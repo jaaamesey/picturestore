@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   activeLayer, addLayer, clearTiles, createDocument, createLayer, duplicateLayer, fillTiles, flatten, mergeDown, moveLayer,
+  moveLayerRelative,
   removeLayer, updateLayer,
 } from "./document";
 import { rect } from "./geometry";
@@ -31,6 +32,22 @@ describe("layers", () => {
     expect(d.layers).toHaveLength(1);
     expect(activeLayer(d)).toBeDefined();
     expect(removeLayer(d, d.layers[0].id)).toBe(d);
+  });
+
+  it("moves layers above or below a target, in either direction", () => {
+    // Bottom to top: A B C D
+    let d = createDocument({ width: 2, height: 2 });
+    const [a] = d.layers;
+    d = addLayer(addLayer(addLayer(updateLayer(d, a.id, { name: "A" }), createLayer({ name: "B" })), createLayer({ name: "C" })), createLayer({ name: "D" }));
+    const id = (n: string) => d.layers.find((l) => l.name === n)!.id;
+    const order = (x: typeof d) => x.layers.map((l) => l.name).join("");
+    expect(order(moveLayerRelative(d, id("D"), id("B"), "above"))).toBe("ABDC"); // downwards, above the target
+    expect(order(moveLayerRelative(d, id("D"), id("B"), "below"))).toBe("ADBC");
+    expect(order(moveLayerRelative(d, id("A"), id("C"), "above"))).toBe("BCAD"); // upwards
+    expect(order(moveLayerRelative(d, id("A"), id("C"), "below"))).toBe("BACD");
+    expect(order(moveLayerRelative(d, id("A"), id("D"), "above"))).toBe("BCDA"); // to the very top
+    expect(order(moveLayerRelative(d, id("C"), id("B"), "above"))).toBe("ABCD"); // already there: no-op
+    expect(moveLayerRelative(d, id("C"), id("C"), "above")).toBe(d);
   });
 
   it("reorders and duplicates", () => {

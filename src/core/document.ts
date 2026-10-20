@@ -163,6 +163,16 @@ export function moveLayer(d: Doc, id: string, toIndex: number): Doc {
   return { ...d, layers };
 }
 
+/** Moves a layer to sit directly above or below another (as dropped in the Layers panel). */
+export function moveLayerRelative(d: Doc, id: string, targetId: string, placement: "above" | "below"): Doc {
+  const from = layerIndex(d, id);
+  const target = layerIndex(d, targetId);
+  if (from < 0 || target < 0 || id === targetId) return d;
+  // Index of the target once the moved layer has been taken out; layers are stored bottom to top.
+  const t = target - (from < target ? 1 : 0);
+  return moveLayer(d, id, placement === "above" ? t + 1 : t);
+}
+
 export function duplicateLayer(d: Doc, id: string): Doc {
   const src = d.layers.find((l) => l.id === id);
   if (!src) return d;

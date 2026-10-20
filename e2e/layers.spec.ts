@@ -25,6 +25,45 @@ test("adds, renames, hides and deletes layers", async ({ page }) => {
   await expect(rows).toHaveCount(2);
 });
 
+test("drag and drop places layers above or below the row, in either direction", async ({ page }) => {
+  await newDocument(page);
+  for (let i = 0; i < 3; i++) await page.getByTestId("new-layer").click();
+  const names = () => page.getByTestId("layer-row").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-layer-name")));
+  const row = (n: string) => page.locator(`[data-layer-name="${n}"]`);
+  const upperHalf = { x: 60, y: 8 };
+  const lowerHalf = { x: 60, y: 36 };
+  expect(await names()).toEqual(["Layer 3", "Layer 2", "Layer 1", "Background"]);
+
+  // Downwards onto the upper half of a lower row: lands directly above it (this used to land below).
+  await row("Layer 3").dragTo(row("Layer 1"), { targetPosition: upperHalf });
+  expect(await names()).toEqual(["Layer 2", "Layer 3", "Layer 1", "Background"]);
+
+  // Upwards onto the lower half of a higher row: lands directly below it.
+  await row("Background").dragTo(row("Layer 2"), { targetPosition: lowerHalf });
+  expect(await names()).toEqual(["Layer 2", "Background", "Layer 3", "Layer 1"]);
+
+  // To the very top.
+  await row("Layer 1").dragTo(row("Layer 2"), { targetPosition: upperHalf });
+  expect(await names()).toEqual(["Layer 1", "Layer 2", "Background", "Layer 3"]);
+  await expect(page.getByTestId("history-entry").last()).toHaveText("Layer Order");
+});
+
+test("shows an insertion line while dragging a layer", async ({ page }) => {
+  await newDocument(page);
+  await page.getByTestId("new-layer").click();
+  const source = page.locator('[data-layer-name="Background"]');
+  const target = page.locator('[data-layer-name="Layer 1"]');
+  const dt = await page.evaluateHandle(() => new DataTransfer());
+  await source.dispatchEvent("dragstart", { dataTransfer: dt });
+  const box = (await target.boundingBox())!;
+  await target.dispatchEvent("dragover", { dataTransfer: dt, clientX: box.x + 20, clientY: box.y + 5 });
+  await expect(target).toHaveAttribute("data-drop", "above");
+  await target.dispatchEvent("dragover", { dataTransfer: dt, clientX: box.x + 20, clientY: box.y + box.height - 5 });
+  await expect(target).toHaveAttribute("data-drop", "below");
+  await source.dispatchEvent("dragend", { dataTransfer: dt });
+  await expect(target).not.toHaveAttribute("data-drop");
+});
+
 test("GPU compositing matches the CPU reference for every blend mode", async ({ page }) => {
   await newDocument(page);
   // Backdrop: two colours on the background layer.

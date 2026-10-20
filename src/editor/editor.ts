@@ -10,7 +10,7 @@ import {
   duplicateLayer,
   fillTiles,
   mergeDown,
-  moveLayer,
+  moveLayerRelative,
   removeLayer,
   updateLayer,
   type Doc,
@@ -408,7 +408,9 @@ export function createEditor() {
       duplicateLayer: () => layerEdit("Duplicate Layer", (d, l) => duplicateLayer(d, l.id)),
       deleteLayer: (id?: string) => edit("Delete Layer", (d) => removeLayer(d, id ?? d.activeLayerId)),
       mergeDown: () => layerEdit("Merge Down", (d, l) => mergeDown(d, l.id)),
-      moveLayer: (id: string, toIndex: number) => edit("Layer Order", (d) => moveLayer(d, id, toIndex)),
+      /** Drops a layer directly above or below another (Layers panel drag and drop). */
+      moveLayer: (id: string, targetId: string, placement: "above" | "below") =>
+        edit("Layer Order", (d) => moveLayerRelative(d, id, targetId, placement)),
       selectLayer: (id: string) => {
         cancelTool();
         const s = active();

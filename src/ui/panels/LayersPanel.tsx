@@ -51,7 +51,32 @@ function Thumbnail(props: { tiles: TileMap; width: number; height: number }) {
   );
 }
 
-function LayerRow(props: { layer: Layer; index: number; active: boolean; width: number; height: number }) {
+type Placement = "above" | "below";
+
+/** Where a dragged layer would land: which row, and which side of it (from the pointer's half). */
+interface DropTarget {
+  readonly id: string;
+  readonly placement: Placement;
+}
+
+const DRAG_TYPE = "application/x-picturestore-layer";
+
+/** Upper half of a row = above it; lower half = below. */
+function placementAt(e: DragEvent): Placement {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  return e.clientY < r.top + r.height / 2 ? "above" : "below";
+}
+
+function LayerRow(props: {
+  layer: Layer;
+  active: boolean;
+  width: number;
+  height: number;
+  drop: Placement | null;
+  onDragOver: (placement: Placement) => void;
+  onDrop: (draggedId: string, placement: Placement) => void;
+  onDragEnd: () => void;
+}) {
   const { editor } = useContext(AppContext);
   const [editing, setEditing] = createSignal(false);
   return (
@@ -61,17 +86,31 @@ function LayerRow(props: { layer: Layer; index: number; active: boolean; width: 
       data-testid="layer-row"
       data-layer-name={props.layer.name}
       draggable={editing() ? "false" : "true"}
+      data-drop={props.drop ?? undefined}
       class={[
-        "flex h-11 items-center gap-1.5 border-b border-line px-1.5",
+        "relative flex h-11 items-center gap-1.5 border-b border-line px-1.5",
+        // Insertion line, as in Photoshop.
+        { "before:absolute before:inset-x-0 before:-top-px before:h-0.5 before:bg-accent": props.drop === "above" },
+        { "after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-accent": props.drop === "below" },
         props.active ? "bg-accent-soft" : "hover:bg-raised",
       ]}
       onClick={() => editor.selectLayer(props.layer.id)}
-      onDragStart={(e) => e.dataTransfer!.setData("application/x-layer", props.layer.id)}
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => {
-        const id = e.dataTransfer!.getData("application/x-layer");
-        if (id) editor.moveLayer(id, props.index);
+      onDragStart={(e) => {
+        e.dataTransfer!.setData(DRAG_TYPE, props.layer.id);
+        e.dataTransfer!.effectAllowed = "move";
       }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        props.onDragOver(placementAt(e));
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        const id = e.dataTransfer!.getData(DRAG_TYPE);
+        if (id) props.onDrop(id, placementAt(e));
+      }}
+      onDragEnd={() => props.onDragEnd()}
     >
       <button
         type="button"
@@ -120,6 +159,7 @@ export function LayersPanel() {
   const current = () => (doc() ? activeLayer(doc()!) : undefined);
   // Panels list layers top-first; documents store them bottom-first.
   const rows = () => (doc() ? doc()!.layers.map((layer, index) => ({ layer, index })).reverse() : []);
+  const [dropTarget, setDropTarget] = createSignal<DropTarget | null>(null);
 
   return (
     <section class="flex min-h-0 flex-1 flex-col" data-testid="layers-panel">
@@ -148,12 +188,25 @@ export function LayersPanel() {
           </div>
         )}
       </Show>
-      <div class="min-h-0 flex-1 overflow-y-auto" role="listbox" aria-label="Layers">
+      <div
+        class="min-h-0 flex-1 overflow-y-auto"
+        role="listbox"
+        aria-label="Layers"
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropTarget(null);
+        }}
+      >
         <For each={rows()} keyed={(r) => r.layer.id}>
           {(r) => (
             <LayerRow
               layer={r().layer}
-              index={r().index}
+              drop={dropTarget()?.id === r().layer.id ? dropTarget()!.placement : null}
+              onDragOver={(placement) => setDropTarget({ id: r().layer.id, placement })}
+              onDrop={(id, placement) => {
+                setDropTarget(null);
+                editor.moveLayer(id, r().layer.id, placement);
+              }}
+              onDragEnd={() => setDropTarget(null)}
               active={r().layer.id === doc()?.activeLayerId}
               width={doc()!.width}
               height={doc()!.height}
