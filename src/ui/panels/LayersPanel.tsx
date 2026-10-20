@@ -1,30 +1,47 @@
 import { For, Show, createEffect, createSignal, useContext } from "solid-js";
 import { BLEND_MODES, type BlendMode } from "../../core/blend";
 import { activeLayer, type Layer } from "../../core/document";
-import { getPixel, type TileMap } from "../../core/tiles";
+import { PREVIEW_FACTOR, TILE_SIZE, keyX, keyY, tilePreview, type TileMap } from "../../core/tiles";
 import { AppContext } from "../context";
 import { IconButton, NumberField } from "../controls";
 import { Icon } from "../icons";
 
 const THUMB = 36;
 
-/** Nearest-neighbour thumbnail, recomputed only when the layer's tiles change. */
+/**
+ * Thumbnail assembled from each tile's cached, area-averaged 1/16 preview, then
+ * scaled with the browser's high-quality filter. Only tiles that changed since
+ * the last update are re-filtered, and thin strokes don't vanish.
+ */
 function Thumbnail(props: { tiles: TileMap; width: number; height: number }) {
   let canvas!: HTMLCanvasElement;
-  const size = () => {
-    const s = THUMB / Math.max(props.width, props.height);
-    return { w: Math.max(1, Math.round(props.width * s)), h: Math.max(1, Math.round(props.height * s)) };
-  };
   createEffect(
-    () => ({ tiles: props.tiles, ...size(), dw: props.width, dh: props.height }),
-    ({ tiles, w, h, dw, dh }) => {
+    () => ({ tiles: props.tiles, dw: props.width, dh: props.height }),
+    ({ tiles, dw, dh }) => {
+      const s = THUMB / Math.max(dw, dh);
+      const w = Math.max(1, Math.round(dw * s));
+      const h = Math.max(1, Math.round(dh * s));
+      const pw = Math.ceil(dw / PREVIEW_FACTOR);
+      const ph = Math.ceil(dh / PREVIEW_FACTOR);
+      const img = new ImageData(pw, ph);
+      const n = TILE_SIZE / PREVIEW_FACTOR;
+      for (const [key, tile] of tiles) {
+        const ox = keyX(key) * n, oy = keyY(key) * n;
+        if (ox >= pw || oy >= ph || ox + n <= 0 || oy + n <= 0) continue;
+        const preview = tilePreview(tile);
+        for (let y = Math.max(0, -oy); y < n && oy + y < ph; y++) {
+          const x0 = Math.max(0, -ox);
+          const x1 = Math.min(n, pw - ox);
+          img.data.set(preview.subarray((y * n + x0) * 4, (y * n + x1) * 4), ((oy + y) * pw + ox + x0) * 4);
+        }
+      }
+      const source = new OffscreenCanvas(pw, ph);
+      source.getContext("2d")!.putImageData(img, 0, 0);
       canvas.width = w;
       canvas.height = h;
-      const img = new ImageData(w, h);
-      for (let y = 0; y < h; y++)
-        for (let x = 0; x < w; x++)
-          img.data.set(getPixel(tiles, Math.floor(((x + 0.5) * dw) / w), Math.floor(((y + 0.5) * dh) / h)), (y * w + x) * 4);
-      canvas.getContext("2d")!.putImageData(img, 0, 0);
+      const ctx = canvas.getContext("2d")!;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(source, 0, 0, w, h);
     },
   );
   return (

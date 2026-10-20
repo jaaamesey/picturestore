@@ -1,7 +1,8 @@
 import { For, Match, Show, Switch, useContext } from "solid-js";
 import type { BrushSettings } from "../core/brush";
 import type { SelectionMode } from "../core/selection";
-import type { TransformState } from "../core/transform";
+import type { Filter } from "../core/rasterize";
+import { locatorPoint, numeric, withNumeric, type NumericTransform, type TransformMode, type TransformState } from "../core/transform";
 import { AppContext } from "./context";
 import { IconButton, NumberField, Separator } from "./controls";
 
@@ -83,28 +84,137 @@ function ToleranceOptions() {
   );
 }
 
-function TransformOptions(props: { state: TransformState }) {
+function ReferenceLocator(props: { state: TransformState }) {
   const { editor } = useContext(AppContext);
-  const set = (patch: Partial<TransformState>) => editor.setTransform({ ...props.state, ...patch });
+  const show = () => editor.settings.transform.showReference;
+  return (
+    <div class="flex items-center gap-1.5">
+      <input
+        type="checkbox"
+        title="Toggle reference point"
+        data-testid="toggle-reference"
+        checked={show()}
+        onChange={(e) => {
+          const v = e.currentTarget.checked;
+          editor.setSettings((s) => void (s.transform.showReference = v));
+        }}
+      />
+      <div class={["grid grid-cols-3 gap-px", { "opacity-40": !show() }]} title="Reference point location">
+        <For each={[0, 1, 2, 3, 4, 5, 6, 7, 8]}>
+          {(i) => (
+            <button
+              type="button"
+              aria-label={`Reference point ${i}`}
+              disabled={!show()}
+              class="size-2 border border-fg/60 hover:bg-fg"
+              onClick={() => editor.setTransform({ ...props.state, reference: locatorPoint(props.state, i % 3, Math.floor(i / 3)) })}
+            />
+          )}
+        </For>
+      </div>
+    </div>
+  );
+}
+
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+function TransformOptions(props: { state: TransformState; mode: TransformMode }) {
+  const { editor } = useContext(AppContext);
+  const n = () => numeric(props.state);
+  const set = (patch: Partial<NumericTransform>) => editor.setTransform(withNumeric(props.state, patch));
+  const link = () => editor.settings.transform.link;
+  const warp = () => props.mode === "warp";
   return (
     <>
-      <NumberField label="X" value={Math.round(props.state.cx)} min={-1e5} max={1e5} suffix="px" onChange={(cx) => set({ cx })} />
-      <NumberField label="Y" value={Math.round(props.state.cy)} min={-1e5} max={1e5} suffix="px" onChange={(cy) => set({ cy })} />
-      <NumberField label="W" value={pct(props.state.sx)} min={-10000} max={10000} suffix="%" onChange={(v) => set({ sx: v / 100 || 0.01 })} />
-      <NumberField label="H" value={pct(props.state.sy)} min={-10000} max={10000} suffix="%" onChange={(v) => set({ sy: v / 100 || 0.01 })} />
-      <NumberField
-        label="Angle"
-        value={Math.round(((props.state.angle * 180) / Math.PI) * 10) / 10}
-        min={-360}
-        max={360}
-        step={0.1}
-        suffix="°"
-        onChange={(deg) => set({ angle: (deg * Math.PI) / 180 })}
-      />
-      <Separator />
-      <IconButton icon="check" title="Commit transform (Enter)" testId="transform-commit" onClick={() => editor.commitTool()} />
-      <IconButton icon="x" title="Cancel transform (Esc)" testId="transform-cancel" onClick={() => editor.cancelTool()} />
+      <Show when={!warp()}>
+        <ReferenceLocator state={props.state} />
+        <Separator />
+        <NumberField label="X" testId="transform-x" value={round1(n().x)} min={-1e5} max={1e5} step={0.1} suffix="px" onChange={(x) => set({ x })} />
+        <NumberField label="Y" testId="transform-y" value={round1(n().y)} min={-1e5} max={1e5} step={0.1} suffix="px" onChange={(y) => set({ y })} />
+        <Separator />
+        <NumberField
+          label="W"
+          testId="transform-w"
+          value={round1(n().w)}
+          min={-1e5}
+          max={1e5}
+          step={0.1}
+          suffix="%"
+          onChange={(w) => set(link() ? { w, h: (n().h * w) / n().w } : { w })}
+        />
+        <button
+          type="button"
+          title="Maintain aspect ratio"
+          data-testid="transform-link"
+          aria-pressed={link() ? "true" : "false"}
+          class={["rounded-sm px-1 text-sm", link() ? "text-accent" : "text-dim"]}
+          onClick={() => editor.setSettings((s) => void (s.transform.link = !s.transform.link))}
+        >
+          ⛓
+        </button>
+        <NumberField
+          label="H"
+          testId="transform-h"
+          value={round1(n().h)}
+          min={-1e5}
+          max={1e5}
+          step={0.1}
+          suffix="%"
+          onChange={(h) => set(link() ? { h, w: (n().w * h) / n().h } : { h })}
+        />
+        <Separator />
+        <NumberField label="∠" testId="transform-angle" value={round1(n().angle)} min={-3600} max={3600} step={0.1} suffix="°" onChange={(angle) => set({ angle })} />
+        <NumberField label="H" testId="transform-hskew" value={round1(n().hSkew)} min={-89} max={89} step={0.1} suffix="°" onChange={(hSkew) => set({ hSkew })} />
+        <NumberField label="V" testId="transform-vskew" value={round1(n().vSkew)} min={-89} max={89} step={0.1} suffix="°" onChange={(vSkew) => set({ vSkew })} />
+        <Separator />
+      </Show>
+      <label class="flex items-center gap-1">
+        <span class="text-dim">Interpolation:</span>
+        <select
+          value={editor.settings.transform.interpolation}
+          onChange={(e) => {
+            const v = e.currentTarget.value as Filter;
+            editor.setSettings((s) => void (s.transform.interpolation = v));
+          }}
+        >
+          <option value="bicubic">Bicubic</option>
+          <option value="bilinear">Bilinear</option>
+          <option value="nearest">Nearest Neighbor</option>
+        </select>
+      </label>
+      <button
+        type="button"
+        title="Switch between free transform and warp modes"
+        data-testid="transform-warp"
+        aria-pressed={warp() ? "true" : "false"}
+        class={["rounded-sm border border-line px-2 py-0.5", warp() ? "bg-accent-soft text-white" : "hover:bg-raised"]}
+        onClick={() => editor.setTransformMode(warp() ? "free" : "warp")}
+      >
+        Warp
+      </button>
+      <div class="ml-auto flex gap-1">
+        <IconButton icon="x" title="Cancel transform (Esc)" testId="transform-cancel" onClick={() => editor.cancelTool()} />
+        <IconButton icon="check" title="Commit transform (Enter)" testId="transform-commit" onClick={() => editor.commitTool()} />
+      </div>
     </>
+  );
+}
+
+function MoveOptions() {
+  const { editor } = useContext(AppContext);
+  return (
+    <label class="flex items-center gap-1.5">
+      <input
+        type="checkbox"
+        data-testid="show-transform-controls"
+        checked={editor.settings.transform.showControls}
+        onChange={(e) => {
+          const v = e.currentTarget.checked;
+          editor.setSettings((s) => void (s.transform.showControls = v));
+        }}
+      />
+      <span>Show Transform Controls</span>
+    </label>
   );
 }
 
@@ -112,11 +222,15 @@ export function OptionsBar() {
   const { editor } = useContext(AppContext);
   const transform = () => {
     const o = editor.active()?.overlay();
-    return o?.kind === "transform" ? o.state : null;
+    return o?.kind === "transform" ? o : null;
   };
   return (
     <div class="flex h-9 items-center gap-3 border-b border-line bg-panel px-3" data-testid="options-bar">
-      <Switch fallback={<span class="text-dim">{editor.tool() === "move" ? "Drag to move the selection or layer." : ""}</span>}>
+      <Switch>
+        <Match when={transform()}>{(o) => <TransformOptions state={o().state} mode={o().mode} />}</Match>
+        <Match when={editor.tool() === "move"}>
+          <MoveOptions />
+        </Match>
         <Match when={editor.tool() === "brush"}>
           <BrushOptions which="brush" />
         </Match>
@@ -132,7 +246,6 @@ export function OptionsBar() {
         <Match when={editor.tool() === "bucket"}>
           <ToleranceOptions />
         </Match>
-        <Match when={transform()}>{(s) => <TransformOptions state={s()} />}</Match>
       </Switch>
     </div>
   );

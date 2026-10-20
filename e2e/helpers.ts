@@ -2,6 +2,36 @@ import { expect, type Page } from "@playwright/test";
 
 type RGBA = number[];
 
+/**
+ * Replaces the File System Access pickers: opening falls back to <input>
+ * (which Playwright drives), and "saving" records what would be written.
+ */
+export async function stubFilePickers(page: Page, { saveInPlace = true } = {}) {
+  await page.addInitScript((inPlace) => {
+    const w = window as unknown as Record<string, unknown>;
+    delete w.showOpenFilePicker;
+    w.__saved = [] as { name: string; blob: Blob }[];
+    w.__savePrompts = 0;
+    if (!inPlace) {
+      delete w.showSaveFilePicker;
+      return;
+    }
+    w.showSaveFilePicker = async (opts: { suggestedName: string }) => {
+      (w.__savePrompts as number)++;
+      return {
+        name: opts.suggestedName,
+        createWritable: async () => {
+          const chunks: Blob[] = [];
+          return {
+            write: async (b: Blob) => void chunks.push(b),
+            close: async () => void (w.__saved as unknown[]).push({ name: opts.suggestedName, blob: new Blob(chunks) }),
+          };
+        },
+      };
+    };
+  }, saveInPlace);
+}
+
 /** Opens the app and creates a document. Readback presentation keeps headless runs deterministic. */
 export async function newDocument(page: Page, width = 400, height = 300, background = "white") {
   await page.goto("/?present=readback");
@@ -68,6 +98,28 @@ export async function screenPixel(page: Page, x: number, y: number): Promise<RGB
 }
 
 export const historyLabels = (page: Page) => page.getByTestId("history-entry").allInnerTexts();
+
+/** Waits for an async commit (GPU resample) to land in history. */
+export async function expectHistory(page: Page, label: string) {
+  await expect(page.getByTestId("history-entry").last()).toHaveText(label);
+  await settled(page);
+}
+
+/** A filled rectangle on a new layer, deselected. */
+export async function rectOnLayer(page: Page, x0: number, y0: number, x1: number, y1: number, hex = "000000") {
+  await page.getByTestId("new-layer").click();
+  if (hex !== "000000") await setForeground(page, hex);
+  await page.keyboard.press("m");
+  await drag(page, [x0, y0], [x1, y1]);
+  await page.keyboard.press("Alt+Backspace");
+  await page.keyboard.press("Control+d");
+}
+
+export async function withKeys(page: Page, keys: string[], fn: () => Promise<void>) {
+  for (const k of keys) await page.keyboard.down(k);
+  await fn();
+  for (const k of [...keys].reverse()) await page.keyboard.up(k);
+}
 
 export function expectClose(actual: RGBA, expected: RGBA, tolerance = 2) {
   expect(actual.length).toBe(expected.length);

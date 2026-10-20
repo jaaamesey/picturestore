@@ -1,4 +1,9 @@
 import { BLEND_MODES } from "../core/blend";
+import { TILE_SIZE } from "../core/tiles";
+
+/** Tiles per atlas page side; a page is ATLAS_TILES² tiles. */
+export const ATLAS_TILES = 8;
+export const ATLAS_PAGE = ATLAS_TILES * TILE_SIZE;
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -10,45 +15,10 @@ const FULLSCREEN_VS = /* wgsl */ `
 const mode = (name: (typeof BLEND_MODES)[number]) => `${BLEND_MODES.indexOf(name)}u`;
 
 /**
- * Composites one layer onto the accumulated result. Mirrors `core/blend.ts`
- * (the CPU reference) — keep the two in sync; e2e tests compare them.
- *
- * Layer textures hold straight RGBA8; the accumulator is premultiplied
- * rgba16float. The source is sampled through an inverse affine matrix with
- * bilinear filtering, which degenerates to an exact copy for the identity.
+ * Blend functions B(Cb, Cs). Mirrors `core/blend.ts` (the CPU reference) —
+ * keep the two in sync; e2e tests compare them.
  */
-export const COMPOSITE_WGSL = /* wgsl */ `
-struct Params {
-  m0: vec4<f32>,       // inverse matrix rows: doc pixel -> source texel
-  m1: vec4<f32>,
-  srcSize: vec2<f32>,
-  opacity: f32,
-  mode: u32,
-  hasDst: u32,
-}
-@group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var src: texture_2d<f32>;
-@group(0) @binding(2) var dst: texture_2d<f32>;
-
-${FULLSCREEN_VS}
-
-fn loadSrc(p: vec2<i32>) -> vec4<f32> {
-  if (any(p < vec2<i32>(0)) || any(p >= vec2<i32>(P.srcSize))) { return vec4<f32>(0.0); }
-  let c = textureLoad(src, p, 0);
-  return vec4<f32>(c.rgb * c.a, c.a);
-}
-
-fn sampleSrc(doc: vec2<f32>) -> vec4<f32> {
-  let h = vec3<f32>(doc, 1.0);
-  let s = vec2<f32>(dot(P.m0.xyz, h), dot(P.m1.xyz, h)) - 0.5;
-  let f = floor(s);
-  let t = s - f;
-  let i = vec2<i32>(f);
-  let top = mix(loadSrc(i), loadSrc(i + vec2<i32>(1, 0)), t.x);
-  let bottom = mix(loadSrc(i + vec2<i32>(0, 1)), loadSrc(i + vec2<i32>(1, 1)), t.x);
-  return mix(top, bottom, t.y);
-}
-
+const BLEND_WGSL = /* wgsl */ `
 fn hardLight(b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
   let m = b * 2.0 * s;
   let sc = b + (2.0 * s - 1.0) - b * (2.0 * s - 1.0);
@@ -116,16 +86,166 @@ fn blend(m: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
   }
 }
 
-@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-  var d = vec4<f32>(0.0);
-  if (P.hasDst == 1u) { d = textureLoad(dst, vec2<i32>(pos.xy), 0); }
-  let s = sampleSrc(pos.xy) * P.opacity;
+/** Source-over with blend mode m: premultiplied s onto premultiplied d. */
+fn composite(m: u32, s: vec4<f32>, d: vec4<f32>) -> vec4<f32> {
   if (s.a <= 0.0) { return d; }
-  if (P.mode == 0u || d.a <= 0.0) { return s + d * (1.0 - s.a); }
+  if (m == 0u || d.a <= 0.0) { return s + d * (1.0 - s.a); }
   let cs = s.rgb / s.a;
   let cb = d.rgb / d.a;
-  let rgb = cs * s.a * (1.0 - d.a) + blend(P.mode, cb, cs) * s.a * d.a + d.rgb * (1.0 - s.a);
+  let rgb = cs * s.a * (1.0 - d.a) + blend(m, cb, cs) * s.a * d.a + d.rgb * (1.0 - s.a);
   return vec4<f32>(rgb, s.a + d.a * (1.0 - s.a));
+}
+`;
+
+/** Clears the scissored area of the accumulator. */
+export const CLEAR_WGSL = /* wgsl */ `
+${FULLSCREEN_VS}
+@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(0.0); }
+`;
+
+/**
+ * Layer compositing: one instanced quad per non-empty tile, sampling the
+ * tile atlas. Normal-mode layers use fixed-function premultiplied "over"
+ * blending (fs_normal); other modes read a copy of the destination (fs_mode).
+ * Layer pixels are straight RGBA8; the accumulator is premultiplied rgba16f.
+ */
+export const TILES_WGSL = /* wgsl */ `
+struct Draw { opacity: f32, mode: u32, docSize: vec2<f32> }
+@group(0) @binding(0) var<uniform> D: Draw;
+@group(0) @binding(1) var atlas: texture_2d_array<f32>;
+@group(0) @binding(2) var dst: texture_2d<f32>;
+
+${BLEND_WGSL}
+
+struct VOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) @interpolate(flat) origin: vec2<i32>,
+  @location(1) @interpolate(flat) base: vec3<i32>,
+}
+
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) tile: vec3<i32>) -> VOut {
+  var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
+  let origin = tile.xy * ${TILE_SIZE};
+  let local = tile.z % ${ATLAS_TILES * ATLAS_TILES};
+  var o: VOut;
+  o.origin = origin;
+  o.base = vec3<i32>((local % ${ATLAS_TILES}) * ${TILE_SIZE}, (local / ${ATLAS_TILES}) * ${TILE_SIZE}, tile.z / ${ATLAS_TILES * ATLAS_TILES});
+  let p = (vec2<f32>(origin) + corners[vi] * ${TILE_SIZE}.0) / D.docSize;
+  o.pos = vec4<f32>(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
+  return o;
+}
+
+fn texel(v: VOut) -> vec4<f32> {
+  let c = textureLoad(atlas, v.base.xy + vec2<i32>(v.pos.xy) - v.origin, v.base.z, 0);
+  return vec4<f32>(c.rgb * c.a, c.a) * D.opacity;
+}
+
+@fragment fn fs_normal(v: VOut) -> @location(0) vec4<f32> { return texel(v); }
+
+@fragment fn fs_mode(v: VOut) -> @location(0) vec4<f32> {
+  return composite(D.mode, texel(v), textureLoad(dst, vec2<i32>(v.pos.xy), 0));
+}
+`;
+
+/**
+ * Floating pixels drawn through a mapping's mesh. Vertex positions are
+ * homogeneous (x·w, y·w, w), so the rasterizer's perspective-correct
+ * interpolation reproduces the homography exactly. The source is a
+ * premultiplied rgba16f texture with a full mip chain.
+ *
+ * fs_preview*: hardware trilinear sampling for interactive feedback.
+ * fs_commit: the final resample, matching `core/rasterize.ts` — per-pixel LOD
+ * from derivatives, then nearest / bilinear / Keys bicubic within that level —
+ * written out as straight RGBA8.
+ */
+export const MESH_WGSL = /* wgsl */ `
+struct Mesh {
+  viewport: vec4<f32>,  // x, y, width, height of the target in document space
+  texSize: vec2<f32>,
+  opacity: f32,
+  mode: u32,
+  interp: u32,          // 0 nearest, 1 bilinear, 2 bicubic
+  maxLod: f32,
+}
+@group(0) @binding(0) var<uniform> M: Mesh;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var trilinear: sampler;
+@group(0) @binding(3) var dst: texture_2d<f32>;
+
+${BLEND_WGSL}
+
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+
+@vertex fn vs(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> VOut {
+  let v = M.viewport;
+  var o: VOut;
+  o.pos = vec4<f32>((p.x - v.x * p.z) * 2.0 / v.z - p.z, p.z - (p.y - v.y * p.z) * 2.0 / v.w, 0.0, p.z);
+  o.uv = uv;
+  return o;
+}
+
+@fragment fn fs_preview(v: VOut) -> @location(0) vec4<f32> {
+  return textureSample(tex, trilinear, v.uv) * M.opacity;
+}
+
+@fragment fn fs_preview_mode(v: VOut) -> @location(0) vec4<f32> {
+  let s = textureSample(tex, trilinear, v.uv) * M.opacity;
+  return composite(M.mode, s, textureLoad(dst, vec2<i32>(v.pos.xy), 0));
+}
+
+fn tap(p: vec2<i32>, size: vec2<i32>, lod: i32) -> vec4<f32> {
+  if (any(p < vec2<i32>(0)) || any(p >= size)) { return vec4<f32>(0.0); }
+  return textureLoad(tex, p, lod);
+}
+
+fn cubic(t: f32) -> f32 {
+  let x = abs(t);
+  if (x < 1.0) { return (1.5 * x - 2.5) * x * x + 1.0; }
+  if (x < 2.0) { return ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0; }
+  return 0.0;
+}
+
+@fragment fn fs_commit(v: VOut) -> @location(0) vec4<f32> {
+  let t = v.uv * M.texSize;
+  let dx = dpdx(t);
+  let dy = dpdy(t);
+  let rho = max(dot(dx, dx), dot(dy, dy));
+  var lod = 0;
+  if (M.interp != 0u && rho > 1.0) { lod = i32(min(M.maxLod, floor(0.5 * log2(rho)))); }
+  let size = vec2<i32>(textureDimensions(tex, lod));
+  let f = v.uv * vec2<f32>(size) - 0.5;
+  var c = vec4<f32>(0.0);
+  if (M.interp == 0u) {
+    c = tap(vec2<i32>(round(f)), size, 0);
+  } else if (M.interp == 1u) {
+    let b = vec2<i32>(floor(f));
+    let w = f - floor(f);
+    c = mix(mix(tap(b, size, lod), tap(b + vec2<i32>(1, 0), size, lod), w.x),
+            mix(tap(b + vec2<i32>(0, 1), size, lod), tap(b + vec2<i32>(1, 1), size, lod), w.x), w.y);
+  } else {
+    let b = vec2<i32>(floor(f));
+    let w = f - floor(f);
+    for (var j = 0; j < 4; j++) {
+      let wy = cubic(w.y - f32(j - 1));
+      for (var i = 0; i < 4; i++) {
+        c += tap(b + vec2<i32>(i - 1, j - 1), size, lod) * (cubic(w.x - f32(i - 1)) * wy);
+      }
+    }
+  }
+  // Un-premultiply; cubic overshoot is clamped here.
+  let a = clamp(c.a, 0.0, 1.0);
+  if (a * 255.0 < 0.5) { return vec4<f32>(0.0); }
+  return vec4<f32>(clamp(c.rgb / c.a, vec3<f32>(0.0), vec3<f32>(1.0)), a);
+}
+`;
+
+/** Straight RGBA8 → premultiplied rgba16f (level 0 of a floating texture). */
+export const PREMULTIPLY_WGSL = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+${FULLSCREEN_VS}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = textureLoad(src, vec2<i32>(pos.xy), 0);
+  return vec4<f32>(c.rgb * c.a, c.a);
 }
 `;
 

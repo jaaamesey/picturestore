@@ -1,58 +1,91 @@
-import { createLayer, docRect, flatten, type Doc } from "../core/document";
-import { tilesFromImage } from "../core/tiles";
-import { NATIVE_EXTENSION, decodeNative, encodeNative, isNative } from "./native";
+import type { Doc } from "../core/document";
+import type { SaveFormat } from "./formats";
+import type { Request, Response } from "./io.worker";
 
-/** Formats the Open dialog accepts. */
-export const OPEN_ACCEPT = `.${NATIVE_EXTENSION},.psd,.png,.jpg,.jpeg,.webp,.gif,.bmp,.avif`;
+export { EXTENSIONS, type ExportFormat, type SaveFormat } from "./formats";
 
-const isPsd = (b: Uint8Array) => b[0] === 0x38 && b[1] === 0x42 && b[2] === 0x50 && b[3] === 0x53; // "8BPS"
+/** Formats the Open dialog accepts. PSD is the native format. */
+export const OPEN_TYPES = [".psd", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"];
 
-/** Decodes any supported file, sniffing the format from its contents. */
-export async function readDocument(file: Blob): Promise<Doc> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  if (isNative(bytes)) return decodeNative(bytes);
-  if (isPsd(bytes)) return (await import("./psd")).readPsdDocument(bytes);
-  return decodeImage(file);
-}
+// --- I/O worker client -------------------------------------------------------
 
-export async function decodeImage(file: Blob): Promise<Doc> {
-  const bitmap = await createImageBitmap(file, { premultiplyAlpha: "none", colorSpaceConversion: "none" });
-  const { width, height } = bitmap;
-  const ctx = new OffscreenCanvas(width, height).getContext("2d")!;
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
-  const data = ctx.getImageData(0, 0, width, height).data;
-  const layer = createLayer({ name: "Background", tiles: tilesFromImage(width, height, data) });
-  return { width, height, layers: [layer], activeLayerId: layer.id, selection: null };
-}
+let worker: Worker | null = null;
+let nextId = 0;
+const pending = new Map<number, { resolve: (v: Doc | Blob) => void; reject: (e: Error) => void }>();
 
-export type ExportFormat = "png" | "jpeg" | "webp" | "psd";
+type WithoutId<T> = T extends unknown ? Omit<T, "id"> : never;
 
-export const EXTENSIONS: Record<ExportFormat | "native", string> = {
-  png: "png",
-  jpeg: "jpg",
-  webp: "webp",
-  psd: "psd",
-  native: NATIVE_EXTENSION,
-};
-
-export async function encodeDocument(doc: Doc, format: ExportFormat | "native", quality = 0.92): Promise<Blob> {
-  if (format === "native") return new Blob([(await encodeNative(doc)) as Uint8Array<ArrayBuffer>]);
-  if (format === "psd") return new Blob([(await import("./psd")).writePsdDocument(doc)]);
-  const pixels = flatten(doc, docRect(doc));
-  const canvas = new OffscreenCanvas(doc.width, doc.height);
-  const ctx = canvas.getContext("2d")!;
-  if (format === "jpeg") {
-    // JPEG has no alpha; composite onto white like Photoshop does.
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, doc.width, doc.height);
-    const tmp = new OffscreenCanvas(doc.width, doc.height);
-    tmp.getContext("2d")!.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, doc.width, doc.height), 0, 0);
-    ctx.drawImage(tmp, 0, 0);
-  } else {
-    ctx.putImageData(new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, doc.width, doc.height), 0, 0);
+function call(req: WithoutId<Request>): Promise<Doc | Blob> {
+  if (!worker) {
+    worker = new Worker(new URL("./io.worker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = ({ data }: MessageEvent<Response>) => {
+      const p = pending.get(data.id);
+      pending.delete(data.id);
+      if (data.ok) p?.resolve(data.result);
+      else p?.reject(new Error(data.error));
+    };
   }
-  return canvas.convertToBlob({ type: `image/${format}`, quality });
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    worker!.postMessage({ ...req, id } as Request);
+  });
+}
+
+/** Decodes a PSD or image off the main thread. */
+export const readDocument = (file: Blob) => call({ op: "decode", file }) as Promise<Doc>;
+
+/** Encodes off the main thread. Tiles are copied to the worker (history still shares them). */
+export const encodeDocument = (doc: Doc, format: SaveFormat) => call({ op: "encode", doc, format }) as Promise<Blob>;
+
+// --- Files on disk -------------------------------------------------------------
+
+export interface OpenedFile {
+  readonly file: File;
+  /** Present when the browser supports saving back in place (File System Access API). */
+  readonly handle: FileSystemFileHandle | null;
+}
+
+const PSD_TYPE = { description: "Photoshop document", accept: { "image/vnd.adobe.photoshop": [".psd"] } };
+const OPEN_PICKER_TYPES = [{ description: "Images", accept: { "image/*": OPEN_TYPES } }];
+
+const isAbort = (e: unknown) => e instanceof DOMException && e.name === "AbortError";
+
+export async function pickFiles(): Promise<OpenedFile[]> {
+  if (window.showOpenFilePicker) {
+    try {
+      const handles = await window.showOpenFilePicker({ multiple: true, types: OPEN_PICKER_TYPES });
+      return Promise.all(handles.map(async (handle) => ({ file: await handle.getFile(), handle })));
+    } catch (e) {
+      if (isAbort(e)) return [];
+      throw e;
+    }
+  }
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = OPEN_TYPES.join(",");
+    input.multiple = true;
+    input.onchange = () => resolve([...(input.files ?? [])].map((file) => ({ file, handle: null })));
+    input.click();
+  });
+}
+
+/** Asks where to save a PSD. Null if the user cancels, or if the browser can't save in place. */
+export async function pickSaveTarget(suggestedName: string): Promise<FileSystemFileHandle | null | "unsupported"> {
+  if (!window.showSaveFilePicker) return "unsupported";
+  try {
+    return await window.showSaveFilePicker({ suggestedName, types: [PSD_TYPE] });
+  } catch (e) {
+    if (isAbort(e)) return null;
+    throw e;
+  }
+}
+
+export async function writeFile(handle: FileSystemFileHandle, blob: Blob) {
+  const stream = await handle.createWritable();
+  await stream.write(blob);
+  await stream.close();
 }
 
 export function download(blob: Blob, filename: string) {
@@ -65,14 +98,4 @@ export function download(blob: Blob, filename: string) {
 }
 
 export const stripExtension = (name: string) => name.replace(/\.[^./\\]+$/, "");
-
-export function pickFiles(accept = OPEN_ACCEPT): Promise<File[]> {
-  return new Promise((resolve) => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = accept;
-    input.multiple = true;
-    input.onchange = () => resolve([...(input.files ?? [])]);
-    input.click();
-  });
-}
+export const isPsdName = (name: string) => /\.psd$/i.test(name);

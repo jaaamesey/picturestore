@@ -2,7 +2,7 @@ import type { Tool, ToolId } from "../types";
 import { createEyedropperTool, createHandTool, zoomTool } from "./navigate";
 import { bucketTool, createPaintTool } from "./paint";
 import { createLassoTool, createMarqueeTool, wandTool } from "./select";
-import { createFreeTransformTool, createMoveTool, type FreeTransformTool } from "./transform";
+import { createMoveTool, createTransformController, type TransformController } from "./transform";
 
 export interface ToolInfo {
   readonly id: Exclude<ToolId, "transform">;
@@ -28,14 +28,14 @@ export const TOOLBAR: readonly ToolInfo[] = [
 
 export interface Tools {
   readonly byId: Record<ToolId, Tool>;
-  readonly transform: FreeTransformTool;
+  readonly transform: TransformController;
 }
 
 /** Tools keep per-interaction state, so each editor gets its own instances. */
 export function createTools(): Tools {
-  const transform = createFreeTransformTool();
+  const transform = createTransformController();
   const list: Tool[] = [
-    createMoveTool(),
+    createMoveTool(transform),
     createMarqueeTool("rect"),
     createMarqueeTool("ellipse"),
     createLassoTool(),

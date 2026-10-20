@@ -329,3 +329,18 @@ export function modeFromModifiers(base: SelectionMode, shift: boolean, alt: bool
   return base;
 }
 
+
+/** Shifts a mask by whole pixels (exact), clipping to the document. */
+export function translateMask(m: Mask, dx: number, dy: number): Mask | null {
+  const b = m.bounds;
+  const moved = rect(b.x + dx, b.y + dy, b.w, b.h);
+  const clipped = intersect(moved, docRect(m.width, m.height));
+  if (isEmpty(clipped)) return null;
+  if (clipped.w === b.w && clipped.h === b.h) return { ...m, bounds: moved };
+  const out = new Uint8Array(clipped.w * clipped.h);
+  for (let y = 0; y < clipped.h; y++) {
+    const src = (clipped.y - moved.y + y) * b.w + (clipped.x - moved.x);
+    out.set(m.data.subarray(src, src + clipped.w), y * clipped.w);
+  }
+  return toMask(out, clipped, m.width, m.height);
+}

@@ -1,10 +1,24 @@
 import { Errored, For, Loading, Show, createMemo, createSignal, onSettled, useContext } from "solid-js";
-import { flatten, type Doc } from "../core/document";
+import { flatten } from "../core/document";
 import { rect } from "../core/geometry";
-import { findCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
-import { createEditor } from "../editor/editor";
+import { transformFloatingCpu } from "../core/raster";
+import { readRect } from "../core/tiles";
+import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
+import { createEditor, type DocumentSession } from "../editor/editor";
 import { requestDevice } from "../gpu/renderer";
-import { EXTENSIONS, download, encodeDocument, pickFiles, readDocument, stripExtension, type ExportFormat } from "../io/files";
+import {
+  EXTENSIONS,
+  download,
+  encodeDocument,
+  isPsdName,
+  pickFiles,
+  pickSaveTarget,
+  readDocument,
+  stripExtension,
+  writeFile,
+  type ExportFormat,
+  type OpenedFile,
+} from "../io/files";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
 import { Icon } from "./icons";
@@ -30,35 +44,79 @@ export function App() {
     messageTimer = window.setTimeout(() => setMessage(null), 4000);
   };
 
-  async function openFiles(files: readonly File[]) {
-    for (const file of files) {
+  /** Where each document lives on disk, when the browser lets us save back in place. */
+  const fileHandles = new WeakMap<DocumentSession, FileSystemFileHandle>();
+  editor.onError(notify);
+
+  const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+  async function openFiles(files: readonly OpenedFile[]) {
+    for (const { file, handle } of files) {
       try {
-        editor.openDocument(await readDocument(file), stripExtension(file.name));
+        const session = editor.openDocument(await readDocument(file), stripExtension(file.name));
+        // Only PSDs save back to their own file; images get "Save as PSD".
+        if (handle && isPsdName(file.name)) fileHandles.set(session, handle);
       } catch (err) {
         console.error(err);
-        notify(`Couldn't open ${file.name}: ${err instanceof Error ? err.message : err}`);
+        notify(`Couldn't open ${file.name}: ${errorText(err)}`);
       }
     }
   }
 
-  async function exportDoc(format: ExportFormat | "native") {
+  async function saveAs() {
     const s = editor.active();
     if (!s) return;
     try {
-      const blob = await encodeDocument(s.doc() as Doc, format);
-      download(blob, `${s.name()}.${EXTENSIONS[format]}`);
-      if (format === "native") editor.markSaved();
+      const target = await pickSaveTarget(`${s.name()}.psd`);
+      if (target === null) return; // cancelled
+      const doc = s.doc();
+      const blob = await encodeDocument(doc, "psd");
+      if (target === "unsupported") {
+        download(blob, `${s.name()}.psd`);
+      } else {
+        await writeFile(target, blob);
+        fileHandles.set(s, target);
+        editor.renameDocument(s.id, stripExtension(target.name));
+      }
+      editor.markSaved(s.id, doc);
     } catch (err) {
       console.error(err);
-      notify(`Export failed: ${err instanceof Error ? err.message : err}`);
+      notify(`Save failed: ${errorText(err)}`);
+    }
+  }
+
+  async function save() {
+    const s = editor.active();
+    if (!s) return;
+    const handle = fileHandles.get(s);
+    if (!handle) return saveAs();
+    try {
+      const doc = s.doc();
+      await writeFile(handle, await encodeDocument(doc, "psd"));
+      editor.markSaved(s.id, doc);
+    } catch (err) {
+      console.error(err);
+      notify(`Save failed: ${errorText(err)}`);
+    }
+  }
+
+  async function exportAs(format: ExportFormat) {
+    const s = editor.active();
+    if (!s) return;
+    try {
+      download(await encodeDocument(s.doc(), format), `${s.name()}.${EXTENSIONS[format]}`);
+    } catch (err) {
+      console.error(err);
+      notify(`Export failed: ${errorText(err)}`);
     }
   }
 
   const shell: Shell = {
     newDocument: () => setShowNew(true),
-    open: () => void pickFiles().then(openFiles),
-    save: () => void exportDoc("native"),
-    exportAs: (format) => void exportDoc(format),
+    open: () => void pickFiles().then(openFiles, (err) => notify(`Couldn't open: ${errorText(err)}`)),
+    save: () => void save(),
+    saveAs: () => void saveAs(),
+    exportAs: (format) => void exportAs(format),
   };
   const app: AppValue = { editor, shell, notify };
 
@@ -67,14 +125,15 @@ export function App() {
       ...window.__ps,
       editor,
       pixel: (x, y) => [...flatten(editor.active()!.displayed(), rect(x, y, 1, 1))],
+      reference: { transformFloatingCpu, readRect },
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target) || showNew()) return;
-      const command = findCommand(e);
-      if (command) {
+      const id = findCommand(e);
+      if (id) {
         e.preventDefault();
-        if (!command.enabled || command.enabled(editor)) command.run(editor, shell);
+        runCommand(id, editor, shell);
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -94,7 +153,7 @@ export function App() {
     const onDragOver = (e: DragEvent) => e.preventDefault();
     const onDrop = (e: DragEvent) => {
       e.preventDefault();
-      if (e.dataTransfer?.files.length) void openFiles([...e.dataTransfer.files]);
+      if (e.dataTransfer?.files.length) void openFiles([...e.dataTransfer.files].map((file) => ({ file, handle: null })));
     };
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (editor.sessions().some((s) => s.dirty())) e.preventDefault();
@@ -112,21 +171,18 @@ export function App() {
     };
   });
 
-  // Documents live on the CPU and the GPU only caches them, so a lost device is
-  // recoverable: request a new one. If presentation was the problem (some VMs and
-  // headless browsers can't present WebGPU canvases), fall back to readback mode.
-  const [gpu, setGpu] = createSignal({
-    epoch: 0,
-    readback: new URLSearchParams(location.search).get("present") === "readback",
-  });
+  // Documents live on the CPU and the GPU only caches them, so a lost device
+  // (driver reset, GPU switch) is recovered by requesting a new one.
+  const [deviceEpoch, setDeviceEpoch] = createSignal(0);
+  const readback = new URLSearchParams(location.search).get("present") === "readback";
   const device = createMemo(() => {
-    const { epoch } = gpu();
+    const epoch = deviceEpoch();
     return requestDevice().then((d) => {
       void d.lost.then((info) => {
-        if (info.reason === "destroyed" || epoch !== gpu().epoch) return;
+        if (info.reason === "destroyed" || epoch !== deviceEpoch()) return;
         console.warn("WebGPU device lost:", info.message);
-        notify("The GPU device was lost; switched to compatibility rendering.");
-        setGpu({ epoch: epoch + 1, readback: true });
+        notify("The GPU was reset; restored the canvas.");
+        setDeviceEpoch(epoch + 1);
       });
       return d;
     });
@@ -142,9 +198,9 @@ export function App() {
           <main class="flex min-w-0 flex-1 flex-col">
             <Tabs />
             <div class="relative min-h-0 flex-1">
-              <Errored fallback={(err) => <Unsupported error={err()} />}>
+              <Errored fallback={(err) => <div class="grid h-full place-items-center p-8 text-dim">{errorText(err())}</div>}>
                 <Loading fallback={<div class="grid h-full place-items-center text-dim">Starting GPU…</div>}>
-                  <Viewport device={device()} readback={gpu().readback} />
+                  <Viewport device={device()} readback={readback} />
                 </Loading>
               </Errored>
               <Show when={editor.sessions().length === 0}>
@@ -235,20 +291,6 @@ function StartScreen() {
             </span>
           </Button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function Unsupported(props: { error: unknown }) {
-  return (
-    <div class="grid h-full place-items-center p-8 text-center" data-testid="unsupported">
-      <div class="max-w-md">
-        <h2 class="mb-2 text-base text-white">WebGPU is required</h2>
-        <p class="text-dim">
-          {props.error instanceof Error ? props.error.message : String(props.error)} Picturestore renders on the GPU; try a
-          recent version of Chrome, Edge, or Safari.
-        </p>
       </div>
     </div>
   );

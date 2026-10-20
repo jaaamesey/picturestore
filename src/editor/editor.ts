@@ -19,9 +19,15 @@ import {
 } from "../core/document";
 import { amend, canRedo, canUndo, createHistory, currentDoc, jump, push, redo, undo, type History } from "../core/history";
 import { invertSelection, selectAll } from "../core/selection";
-import type { TransformState } from "../core/transform";
-import type { FloatingLayer, View } from "../gpu/renderer";
+import { roundOut } from "../core/geometry";
+import { transformFloatingCpu, type Floating } from "../core/raster";
+import type { Filter } from "../core/rasterize";
+import { tilesFromImage, type TileMap } from "../core/tiles";
+import type { TransformMode, TransformState } from "../core/transform";
+import { mappingBounds, type Mapping } from "../core/warp";
+import type { FloatingLayer, Renderer, View } from "../gpu/renderer";
 import { createTools } from "./tools";
+import type { TransformCommand } from "./tools/transform";
 import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings } from "./types";
 import { fitView, nextZoomStep, prevZoomStep, zoomAt } from "./view";
 
@@ -47,7 +53,7 @@ interface SessionInternals extends DocumentSession {
   setFloating(f: FloatingLayer | null): void;
   setOverlay(o: Overlay | null): void;
   setView(v: View): void;
-  markSaved(): void;
+  markSaved(doc: Doc): void;
 }
 
 let sessionCounter = 0;
@@ -77,11 +83,12 @@ function createSession(doc: Doc, name: string, label: string): SessionInternals 
     setFloating,
     setOverlay,
     setView,
-    markSaved: () => setSaved(currentDoc(history())),
+    markSaved: (doc) => setSaved(doc),
   };
 }
 
 export const DEFAULT_SETTINGS: ToolSettings = {
+  transform: { showControls: true, link: true, showReference: false, interpolation: "bicubic" },
   brush: DEFAULT_BRUSH,
   eraser: { ...DEFAULT_BRUSH, hardness: 1 },
   selectionMode: "replace",
@@ -90,6 +97,8 @@ export const DEFAULT_SETTINGS: ToolSettings = {
 };
 
 export type Editor = ReturnType<typeof createEditor>;
+
+type Resampler = Renderer["resample"];
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };
 
@@ -103,14 +112,31 @@ export function createEditor() {
     const [sessions, setSessions] = createSignal<SessionInternals[]>([]);
     const [activeId, setActiveId] = createSignal<string | null>(null);
     const active = createMemo(() => sessions().find((s) => s.id === activeId()) ?? null);
-    const [toolId, setToolId] = createSignal<ToolId>("brush");
+    const [toolId, setToolSignal] = createSignal<ToolId>("brush");
+    // Signal reads lag writes until Solid flushes; editor logic needs the tool synchronously.
+    let currentTool: ToolId = "brush";
+    const setToolId = (id: ToolId) => {
+      currentTool = id;
+      setToolSignal(id);
+    };
     const [settings, setSettings] = createStore<Writable<ToolSettings>>(structuredClone(DEFAULT_SETTINGS));
     const [foreground, setForeground] = createSignal<RGB>(BLACK);
     const [background, setBackground] = createSignal<RGB>(WHITE);
     const [viewportSize, setViewportSize] = createSignal({ width: 800, height: 600 });
 
+    const [busy, setBusy] = createSignal(false);
     let renderRequested: () => void = () => {};
+    let gpuResample: Resampler | null = null;
+    let reportError: (message: string) => void = (m) => console.error(m);
     let mergeKey: string | null = null;
+    let switching = false;
+
+    async function resample(f: Floating, mapping: Mapping, filter: Filter): Promise<TileMap> {
+      const dest = roundOut(mappingBounds(mapping));
+      if (!gpuResample) return transformFloatingCpu(f, mapping, filter);
+      const pixels = await gpuResample(f, mapping, dest, filter);
+      return tilesFromImage(dest.w, dest.h, pixels, dest.x, dest.y);
+    }
 
     function context(s: SessionInternals): ToolContext {
       return {
@@ -124,6 +150,18 @@ export function createEditor() {
           renderRequested();
         },
         commit: (label, doc) => commitTo(s, label, doc),
+        commitAsync(label, pending) {
+          setBusy(true);
+          pending
+            .then((doc) => commitTo(s, label, doc))
+            .catch((err: unknown) => {
+              s.setPreview(null);
+              s.setFloating(null);
+              reportError(`${label} failed: ${err instanceof Error ? err.message : String(err)}`);
+            })
+            .finally(() => setBusy(false));
+        },
+        resample,
         overlay: s.setOverlay,
         requestRender: () => renderRequested(),
         setView: s.setView,
@@ -157,15 +195,26 @@ export function createEditor() {
     }
 
     function cancelTool() {
-      withTool((ctx) => tools.byId[toolId()].cancel?.(ctx));
+      withTool((ctx) => tools.byId[currentTool].cancel?.(ctx));
     }
 
+    /**
+     * Switching away from Free Transform applies it. Re-entrant calls (the
+     * transform session restoring its previous tool as it ends) are ignored.
+     */
     function setTool(id: ToolId) {
-      if (id === toolId()) return;
-      const prev = tools.byId[toolId()];
+      if (switching || id === currentTool) return;
+      const prev = tools.byId[currentTool];
+      switching = true;
       setToolId(id);
-      withTool((ctx) => prev.cancel?.(ctx));
+      withTool((ctx) => (prev.id === "transform" ? prev.commit?.(ctx) : prev.cancel?.(ctx)));
+      switching = false;
     }
+
+    /** Runs a tool action unless a commit is still being computed. */
+    const whenIdle = (fn: () => void) => {
+      if (!busy()) fn();
+    };
 
     function openDocument(doc: Doc, name: string, label = "Open") {
       cancelTool();
@@ -215,6 +264,29 @@ export function createEditor() {
       s.setView({ zoom: 1, panX: Math.round((width - d.width) / 2), panY: Math.round((height - d.height) / 2) });
     }
 
+    /** True when the last transform command found a session already open. */
+    let sessionWasOpen = false;
+
+    function beginTransform(mode: TransformMode): boolean {
+      const s = active();
+      if (!s) return false;
+      if (currentTool === "transform") {
+        sessionWasOpen = true;
+        // E.g. Ctrl+T while warping switches back to Free Transform, as in Photoshop.
+        withTool((ctx) => tools.transform.setMode(ctx, mode));
+        return true;
+      }
+      sessionWasOpen = false;
+      const back = currentTool;
+      cancelTool();
+      if (!tools.transform.begin(context(s), { returnTo: back, mode })) {
+        reportError("Could not complete the request because the layer is empty.");
+        return false;
+      }
+      setToolId("transform");
+      return true;
+    }
+
     const layerEdit = (label: string, fn: (d: Doc, l: Layer) => Doc) =>
       edit(label, (d) => {
         const l = activeLayer(d);
@@ -233,7 +305,8 @@ export function createEditor() {
       newDocument: (opts: NewDocumentOptions, name = "Untitled") => openDocument(createDocument(opts), name, "New"),
       closeDocument,
       renameDocument: (id: string, name: string) => sessions().find((s) => s.id === id)?.setName(name),
-      markSaved: () => active()?.markSaved(),
+      /** Records `doc` as what's on disk (the user may keep editing while a save is in flight). */
+      markSaved: (id: string, doc: Doc) => sessions().find((s) => s.id === id)?.markSaved(doc),
 
       tool: toolId,
       setTool,
@@ -254,18 +327,25 @@ export function createEditor() {
       },
 
       // Pointer input, already converted to document space by the viewport.
-      pointerDown: (e: ToolEvent) => withTool((ctx) => tools.byId[toolId()].down?.(ctx, e)),
-      pointerMove: (e: ToolEvent) => withTool((ctx) => tools.byId[toolId()].move?.(ctx, e)),
-      pointerUp: (e: ToolEvent) => withTool((ctx) => tools.byId[toolId()].up?.(ctx, e)),
+      busy,
+      pointerDown: (e: ToolEvent) => whenIdle(() => withTool((ctx) => tools.byId[currentTool].down?.(ctx, e))),
+      pointerMove: (e: ToolEvent) => whenIdle(() => withTool((ctx) => tools.byId[currentTool].move?.(ctx, e))),
+      pointerUp: (e: ToolEvent) => whenIdle(() => withTool((ctx) => tools.byId[currentTool].up?.(ctx, e))),
       cursor: (e: ToolEvent | null) => {
         const s = active();
         return s ? (tools.byId[toolId()].cursor?.(context(s), e) ?? "default") : "default";
       },
       /** Enter: commits the current tool's operation (e.g. Free Transform). */
-      commitTool: () => withTool((ctx) => tools.byId[toolId()].commit?.(ctx)),
+      commitTool: () => withTool((ctx) => tools.byId[currentTool].commit?.(ctx)),
       cancelTool,
 
       undo: () => {
+        // Inside Free Transform, Ctrl+Z steps back through the session first.
+        if (currentTool === "transform") {
+          let stepped = false;
+          withTool((ctx) => (stepped = tools.transform.undo(ctx)));
+          if (stepped) return;
+        }
         cancelTool();
         mergeKey = null;
         active()?.setHistory(undo);
@@ -294,18 +374,26 @@ export function createEditor() {
       onRenderRequest: (fn: () => void) => {
         renderRequested = fn;
       },
-
-      // Edit
-      freeTransform() {
-        const s = active();
-        if (!s || toolId() === "transform") return;
-        const back = toolId();
-        cancelTool();
-        const ctx = context(s);
-        if (tools.transform.begin(ctx, back)) setToolId("transform");
+      /** The viewport's renderer provides commit-quality GPU resampling. */
+      setResampler: (fn: Resampler | null) => {
+        gpuResample = fn;
       },
+      onError: (fn: (message: string) => void) => {
+        reportError = fn;
+      },
+
+      // Edit ▸ Free Transform / Transform ▸ …
+      freeTransform: (mode: TransformMode = "free") => whenIdle(() => beginTransform(mode)),
+      /** Rotate/flip: within a session it's one more step; otherwise it applies immediately, like Photoshop. */
+      transformCommand: (c: TransformCommand) =>
+        whenIdle(() => {
+          if (currentTool !== "transform" && !beginTransform("free")) return;
+          withTool((ctx) => tools.transform.command(ctx, c));
+          if (!sessionWasOpen) withTool((ctx) => tools.transform.commit?.(ctx));
+        }),
       /** Numeric entry for an active Free Transform. */
-      setTransform: (state: TransformState) => withTool((ctx) => tools.transform.set(ctx, state)),
+      setTransform: (state: TransformState) => withTool((ctx) => tools.transform.setState(ctx, state)),
+      setTransformMode: (mode: TransformMode) => withTool((ctx) => tools.transform.setMode(ctx, mode)),
       fill: (color: RGB) =>
         layerEdit("Fill", (d, l) => updateLayer(d, l.id, { tiles: fillTiles(l.tiles, docRect(d), color, d.selection) })),
       clear: () => layerEdit("Clear", (d, l) => updateLayer(d, l.id, { tiles: clearTiles(l.tiles, d.selection) })),

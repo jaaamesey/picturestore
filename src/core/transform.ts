@@ -134,6 +134,9 @@ function outlineDistance(q: Quad, p: Vec2): number {
 
 export function hitTest(s: TransformState, p: Vec2, o: HitOptions): TransformHit {
   if (o.showReference && dist(p, s.reference) <= o.tolerance) return { kind: "reference" };
+  // Keep the middle of small boxes grabbable: handles never claim more than a quarter of the shortest side.
+  const shortest = Math.min(...s.quad.map((q, i) => dist(q, s.quad[(i + 1) % 4])));
+  const tolerance = Math.min(o.tolerance, shortest / 4);
   if (o.mode === "warp") {
     const k = nearest(warpPoints(s), p, o.tolerance);
     if (k >= 0) return { kind: "warp-point", index: k };
@@ -143,9 +146,9 @@ export function hitTest(s: TransformState, p: Vec2, o: HitOptions): TransformHit
     return st ? { kind: "warp-surface", s: st.s, t: st.t } : { kind: "none" };
   }
   const h = handles(s);
-  const c = nearest(h.corners, p, o.tolerance);
+  const c = nearest(h.corners, p, tolerance);
   if (c >= 0) return { kind: "corner", index: c };
-  const e = nearest(h.edges, p, o.tolerance);
+  const e = nearest(h.edges, p, tolerance);
   if (e >= 0) return { kind: "edge", index: e };
   if (quadCoords(s, p)) return { kind: "move" };
   const canRotate = o.mode === "free" || o.mode === "rotate";

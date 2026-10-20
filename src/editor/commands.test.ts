@@ -28,9 +28,9 @@ describe("shortcuts", () => {
   });
 
   it("finds commands", () => {
-    expect(findCommand(key("z", { ctrlKey: true, shiftKey: true }))?.id).toBe("edit.redo");
-    expect(findCommand(key("Backspace", { altKey: true }))?.id).toBe("edit.fillForeground");
-    expect(findCommand(key("Delete"))?.id).toBe("edit.clear");
+    expect(findCommand(key("z", { ctrlKey: true, shiftKey: true }))).toBe("edit.redo");
+    expect(findCommand(key("Backspace", { altKey: true }))).toBe("edit.fillForeground");
+    expect(findCommand(key("Delete"))).toBe("edit.clear");
     expect(findCommand(key("q"))).toBeUndefined();
   });
 
