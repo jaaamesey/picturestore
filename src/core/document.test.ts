@@ -1,0 +1,83 @@
+import { describe, expect, it } from "vitest";
+import {
+  activeLayer, addLayer, clearTiles, createDocument, createLayer, duplicateLayer, fillTiles, flatten, mergeDown, moveLayer,
+  removeLayer, updateLayer,
+} from "./document";
+import { rect } from "./geometry";
+import { rectMask } from "./selection";
+import { EMPTY_TILES, getPixel } from "./tiles";
+
+const px = (d: Uint8ClampedArray, w: number, x: number, y: number) => [...d.subarray((y * w + x) * 4, (y * w + x) * 4 + 4)];
+
+describe("layers", () => {
+  it("creates a white background", () => {
+    const d = createDocument({ width: 3, height: 2 });
+    expect(d.layers).toHaveLength(1);
+    expect(px(flatten(d), 3, 2, 1)).toEqual([255, 255, 255, 255]);
+    expect(createDocument({ width: 3, height: 2, background: null }).layers[0].tiles.size).toBe(0);
+  });
+
+  it("adds above the active layer with a fresh name and activates it", () => {
+    let d = createDocument({ width: 2, height: 2 });
+    d = addLayer(d);
+    d = addLayer(d);
+    expect(d.layers.map((l) => l.name)).toEqual(["Background", "Layer 1", "Layer 2"]);
+    expect(activeLayer(d)!.name).toBe("Layer 2");
+  });
+
+  it("removes, keeping at least one layer and a valid active layer", () => {
+    let d = addLayer(createDocument({ width: 2, height: 2 }));
+    d = removeLayer(d, d.activeLayerId);
+    expect(d.layers).toHaveLength(1);
+    expect(activeLayer(d)).toBeDefined();
+    expect(removeLayer(d, d.layers[0].id)).toBe(d);
+  });
+
+  it("reorders and duplicates", () => {
+    let d = addLayer(createDocument({ width: 2, height: 2 }));
+    d = moveLayer(d, d.activeLayerId, 0);
+    expect(d.layers[0].name).toBe("Layer 1");
+    d = duplicateLayer(d, d.layers[0].id);
+    expect(d.layers.map((l) => l.name)).toEqual(["Layer 1", "Layer 1 copy", "Background"]);
+    expect(d.layers[1].tiles).toBe(d.layers[0].tiles);
+  });
+});
+
+describe("compositing", () => {
+  const base = createDocument({ width: 2, height: 1, background: { r: 0, g: 0, b: 255 } });
+  const red = fillTiles(EMPTY_TILES, rect(0, 0, 1, 1), { r: 255, g: 0, b: 0 });
+
+  it("respects opacity, visibility and blend mode", () => {
+    const d = addLayer(base, createLayer({ name: "r", tiles: red, opacity: 0.5 }));
+    expect(px(flatten(d), 2, 0, 0)).toEqual([128, 0, 128, 255]);
+    expect(px(flatten(updateLayer(d, d.activeLayerId, { visible: false })), 2, 0, 0)).toEqual([0, 0, 255, 255]);
+    const mul = updateLayer(d, d.activeLayerId, { opacity: 1, blendMode: "multiply" });
+    expect(px(flatten(mul), 2, 0, 0)).toEqual([0, 0, 0, 255]);
+  });
+
+  it("merges down", () => {
+    const d = mergeDown(addLayer(base, createLayer({ name: "r", tiles: red })), "missing");
+    expect(d.layers).toHaveLength(2);
+    const top = addLayer(base, createLayer({ name: "r", tiles: red, opacity: 0.5 }));
+    const merged = mergeDown(top, top.activeLayerId);
+    expect(merged.layers).toHaveLength(1);
+    expect(merged.activeLayerId).toBe(base.layers[0].id);
+    expect(px(flatten(merged), 2, 0, 0)).toEqual(px(flatten(top), 2, 0, 0));
+  });
+});
+
+describe("fill and clear", () => {
+  it("fills only within the selection", () => {
+    const sel = rectMask(4, 4, rect(0, 0, 2, 2));
+    const t = fillTiles(EMPTY_TILES, rect(0, 0, 4, 4), { r: 9, g: 9, b: 9 }, sel);
+    expect(getPixel(t, 1, 1)).toEqual([9, 9, 9, 255]);
+    expect(getPixel(t, 3, 3)[3]).toBe(0);
+  });
+  it("clears the selection or everything", () => {
+    const t = fillTiles(EMPTY_TILES, rect(0, 0, 4, 4), { r: 9, g: 9, b: 9 });
+    const cleared = clearTiles(t, rectMask(4, 4, rect(0, 0, 2, 4)));
+    expect(getPixel(cleared, 0, 0)[3]).toBe(0);
+    expect(getPixel(cleared, 3, 0)[3]).toBe(255);
+    expect(clearTiles(t, null).size).toBe(0);
+  });
+});
