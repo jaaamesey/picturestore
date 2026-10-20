@@ -33,3 +33,9 @@ export const undo = (h: History): History => (canUndo(h) ? { ...h, index: h.inde
 export const redo = (h: History): History => (canRedo(h) ? { ...h, index: h.index + 1 } : h);
 export const jump = (h: History, index: number): History =>
   index >= 0 && index < h.entries.length ? { ...h, index } : h;
+
+/** Replaces the current entry (used to coalesce continuous edits such as dragging a slider). */
+export function amend(h: History, label: string, doc: Doc): History {
+  const entries = [...h.entries.slice(0, h.index), { label, doc }];
+  return { entries, index: h.index };
+}

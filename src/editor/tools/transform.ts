@@ -30,7 +30,8 @@ function lift(doc: Doc): Lift | null {
 }
 
 function showLift(ctx: ToolContext, l: Lift, matrix: Mat) {
-  ctx.preview(updateLayer(l.doc, l.layer.id, { tiles: l.rest }), {
+  // The selection is hidden while its pixels float; it reappears, transformed, on commit.
+  ctx.preview({ ...updateLayer(l.doc, l.layer.id, { tiles: l.rest }), selection: null }, {
     tiles: l.floating.tiles,
     bounds: l.floating.bounds,
     matrix,

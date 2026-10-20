@@ -5,7 +5,7 @@ import { createLassoTool, createMarqueeTool, wandTool } from "./select";
 import { createFreeTransformTool, createMoveTool, type FreeTransformTool } from "./transform";
 
 export interface ToolInfo {
-  readonly id: ToolId;
+  readonly id: Exclude<ToolId, "transform">;
   readonly label: string;
   /** Single-key shortcut, Photoshop-compatible. */
   readonly key: string;

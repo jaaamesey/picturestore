@@ -35,6 +35,8 @@ export interface Renderer {
   render(scene: Scene, view: View, time: number): void;
   /** Reads back the composite as straight RGBA8 (for tests and debugging). */
   readComposite(): Promise<Uint8ClampedArray>;
+  /** Resolves once the most recently rendered frame is on screen. */
+  settled(): Promise<void>;
   destroy(): void;
 }
 
@@ -55,17 +57,27 @@ export async function requestDevice(): Promise<GPUDevice> {
   if (!navigator.gpu) throw new Error("WebGPU is not supported in this browser.");
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("No WebGPU adapter is available.");
-  return adapter.requestDevice({
+  const device = await adapter.requestDevice({
     requiredLimits: {
       maxTextureDimension2D: Math.min(16384, adapter.limits.maxTextureDimension2D),
     },
   });
+  device.addEventListener("uncapturederror", (e) => console.error("WebGPU:", (e as GPUUncapturedErrorEvent).error.message));
+  return device;
 }
 
-export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement): Renderer {
-  const context = canvas.getContext("webgpu")!;
-  const format = navigator.gpu.getPreferredCanvasFormat();
-  context.configure({ device, format, alphaMode: "opaque" });
+export interface RendererOptions {
+  /**
+   * Present by rendering offscreen and copying into a 2D canvas, for
+   * environments where WebGPU canvas presentation fails (some VMs, remote
+   * desktops, headless CI). Slower, but otherwise identical output.
+   */
+  readonly readback?: boolean;
+}
+
+export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, options: RendererOptions = {}): Renderer {
+  const output = options.readback ? readbackOutput(device, canvas) : canvasOutput(device, canvas);
+  const format = output.format;
 
   const compositeModule = device.createShaderModule({ code: COMPOSITE_WGSL });
   // "auto" layouts can't use dynamic offsets, so declare this one explicitly.
@@ -393,13 +405,15 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement): Re
 
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: "clear", storeOp: "store" }],
+      colorAttachments: [{ view: output.target(w, h), loadOp: "clear", storeOp: "store" }],
     });
     pass.setPipeline(presentPipeline);
     pass.setBindGroup(0, presentBindGroup!);
     pass.draw(3);
     pass.end();
+    output.finish(encoder);
     device.queue.submit([encoder.finish()]);
+    output.submitted();
   }
 
   return {
@@ -438,6 +452,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement): Re
       return out;
     },
 
+    settled: () => output.settled(),
+
     destroy() {
       resetDocument(1, 1);
       accum?.destroy();
@@ -446,7 +462,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement): Re
       passUniforms.destroy();
       viewUniforms.destroy();
       emptyTexture.destroy();
-      context.unconfigure();
+      output.destroy();
     },
   };
 }
@@ -458,4 +474,99 @@ export function halfToFloat(h: number): number {
   if (e === 0) return s * 2 ** -14 * (f / 1024);
   if (e === 31) return f ? NaN : s * Infinity;
   return s * 2 ** (e - 15) * (1 + f / 1024);
+}
+
+/** Where presented frames go. */
+interface Output {
+  readonly format: GPUTextureFormat;
+  target(width: number, height: number): GPUTextureView;
+  /** Records any extra commands after the present pass. */
+  finish(encoder: GPUCommandEncoder): void;
+  submitted(): void;
+  settled(): Promise<void>;
+  destroy(): void;
+}
+
+function canvasOutput(device: GPUDevice, canvas: HTMLCanvasElement): Output {
+  const context = canvas.getContext("webgpu")!;
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({ device, format, alphaMode: "opaque" });
+  return {
+    format,
+    target: () => context.getCurrentTexture().createView(),
+    finish() {},
+    submitted() {},
+    settled: () => device.queue.onSubmittedWorkDone(),
+    destroy: () => context.unconfigure(),
+  };
+}
+
+function readbackOutput(device: GPUDevice, canvas: HTMLCanvasElement): Output {
+  const ctx = canvas.getContext("2d")!;
+  let texture: GPUTexture | null = null;
+  let buffer: GPUBuffer | null = null;
+  let bytesPerRow = 0;
+  let mapping = false; // a frame is being read back
+  let stale = false; // a newer frame was rendered meanwhile
+  let waiters: (() => void)[] = [];
+
+  const copy = (encoder: GPUCommandEncoder) =>
+    encoder.copyTextureToBuffer({ texture: texture! }, { buffer: buffer!, bytesPerRow }, [texture!.width, texture!.height]);
+
+  async function readBack() {
+    mapping = true;
+    const t = texture!;
+    const b = buffer!;
+    try {
+      await b.mapAsync(GPUMapMode.READ);
+      const rows = new Uint8Array(b.getMappedRange());
+      const img = new ImageData(t.width, t.height);
+      for (let y = 0; y < t.height; y++) img.data.set(rows.subarray(y * bytesPerRow, y * bytesPerRow + t.width * 4), y * t.width * 4);
+      b.unmap();
+      ctx.putImageData(img, 0, 0);
+    } catch {
+      // The buffer was replaced by a resize; the next frame covers it.
+    }
+    mapping = false;
+    if (stale && texture) {
+      stale = false;
+      const encoder = device.createCommandEncoder();
+      copy(encoder);
+      device.queue.submit([encoder.finish()]);
+      void readBack();
+      return;
+    }
+    waiters.forEach((w) => w());
+    waiters = [];
+  }
+
+  return {
+    format: "rgba8unorm",
+    target(width, height) {
+      if (!texture || texture.width !== width || texture.height !== height) {
+        texture?.destroy();
+        buffer?.destroy();
+        texture = device.createTexture({
+          size: [width, height],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
+        bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+        buffer = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      }
+      return texture.createView();
+    },
+    finish(encoder) {
+      if (mapping) stale = true;
+      else copy(encoder);
+    },
+    submitted() {
+      if (!mapping) void readBack();
+    },
+    settled: () => (mapping ? new Promise<void>((resolve) => waiters.push(resolve)) : Promise.resolve()),
+    destroy() {
+      texture?.destroy();
+      buffer?.destroy();
+    },
+  };
 }

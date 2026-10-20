@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { createDocument, updateLayer } from "./document";
-import { canRedo, createHistory, currentDoc, jump, push, redo, undo } from "./history";
+import { amend, canRedo, createHistory, currentDoc, jump, push, redo, undo } from "./history";
 
 const d0 = createDocument({ width: 4, height: 4 });
 const id = d0.layers[0].id;
@@ -34,4 +34,10 @@ it("jumps", () => {
 it("shares unchanged tiles between snapshots", () => {
   const h = push(createHistory(d0), "rename", named("x"));
   expect(h.entries[1].doc.layers[0].tiles).toBe(h.entries[0].doc.layers[0].tiles);
+});
+
+it("amends the current entry, dropping redo", () => {
+  const h = amend(push(push(createHistory(d0), "a", named("a")), "b", named("b")), "b2", named("b2"));
+  expect(h.entries.map((e) => e.label)).toEqual(["Open", "a", "b2"]);
+  expect(amend(undo(h), "a2", named("a2")).entries.map((e) => e.label)).toEqual(["Open", "a2"]);
 });
