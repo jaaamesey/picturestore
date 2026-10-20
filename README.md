@@ -1,5 +1,9 @@
 # picturestore
 
+A vibe coded slop version of Photoshop, that _might eventually_ have a bit more care put into it
+
+# WARNING: AI SLOP DESCRIPTION BELOW
+
 Legally distinct from Photoshop.
 
 A browser image editor aiming at Photopea's feature set (and eventually a Photoshop replacement), built on
