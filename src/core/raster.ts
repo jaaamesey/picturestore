@@ -1,17 +1,8 @@
-import { apply, integerTranslation, intersect, invert, isEmpty, roundOut, transformRect, type Mat, type Rect } from "./geometry";
+import { intersect, isEmpty, roundOut, type Rect } from "./geometry";
+import { rasterizeMapping, type Filter } from "./rasterize";
 import type { Mask } from "./selection";
-import {
-  EMPTY_TILES,
-  TILE_SIZE,
-  contentBounds,
-  parseTileKey,
-  readRect,
-  tileRect,
-  tileWriter,
-  tilesIn,
-  translateTiles,
-  type TileMap,
-} from "./tiles";
+import { EMPTY_TILES, TILE_SIZE, contentBounds, keyX, keyY, readRect, tileKey, tileRect, tileWriter, tilesIn, tilesFromImage, type TileMap } from "./tiles";
+import { mappingBounds, type Mapping } from "./warp";
 
 /** Pixels lifted off a layer, e.g. for moving or transforming a selection. */
 export interface Floating {
@@ -28,20 +19,26 @@ export function extractFloating(tiles: TileMap, mask: Mask | null): { floating: 
   if (!mask) return { floating: { tiles, bounds: contentBounds(tiles) }, rest: EMPTY_TILES };
   const lifted = tileWriter(EMPTY_TILES);
   const rest = tileWriter(tiles);
-  for (const [tx, ty] of tilesIn(mask.bounds)) {
-    const src = tiles.get(`${tx},${ty}`);
+  const b = mask.bounds;
+  for (const [tx, ty] of tilesIn(b)) {
+    const src = tiles.get(tileKey(tx, ty));
     if (!src) continue;
-    const part = intersect(mask.bounds, tileRect(tx, ty));
-    const f = lifted.writable(tx, ty);
-    const r = rest.writable(tx, ty);
+    const part = intersect(b, tileRect(tx, ty));
+    const f = lifted.writable(tx, ty).data;
+    const r = rest.writable(tx, ty).data;
+    const s = src.data;
+    const ox = tx * TILE_SIZE, oy = ty * TILE_SIZE;
     for (let y = part.y; y < part.y + part.h; y++) {
-      for (let x = part.x; x < part.x + part.w; x++) {
-        const m = mask.data[y * mask.width + x] / 255;
-        if (m === 0) continue;
-        const i = ((y - ty * TILE_SIZE) * TILE_SIZE + (x - tx * TILE_SIZE)) * 4;
-        f.data.set(src.data.subarray(i, i + 3), i);
-        f.data[i + 3] = src.data[i + 3] * m;
-        r.data[i + 3] = src.data[i + 3] * (1 - m);
+      const mrow = (y - b.y) * b.w - b.x;
+      let i = ((y - oy) * TILE_SIZE + (part.x - ox)) * 4;
+      for (let x = part.x; x < part.x + part.w; x++, i += 4) {
+        const m = mask.data[mrow + x];
+        if (m === 0 || s[i + 3] === 0) continue;
+        f[i] = s[i];
+        f[i + 1] = s[i + 1];
+        f[i + 2] = s[i + 2];
+        f[i + 3] = (s[i + 3] * m) / 255;
+        r[i + 3] = (s[i + 3] * (255 - m)) / 255;
       }
     }
   }
@@ -49,61 +46,19 @@ export function extractFloating(tiles: TileMap, mask: Mask | null): { floating: 
   return { floating: { tiles: floatingTiles, bounds: contentBounds(floatingTiles) }, rest: rest.finish() };
 }
 
+
 /**
- * Resamples floating pixels through `m` with bilinear filtering in
- * premultiplied space (so transparent edges don't darken).
+ * CPU reference for transforming floating pixels through a mapping. The editor
+ * renders this on the GPU (see `gpu/renderer.ts`); unit tests and the GPU
+ * parity test use this.
  */
-export function transformTiles(f: Floating, m: Mat): TileMap {
+export function transformFloatingCpu(f: Floating, m: Mapping, filter: Filter = "bicubic"): TileMap {
   if (isEmpty(f.bounds)) return EMPTY_TILES;
-  const shift = integerTranslation(m);
-  if (shift) return translateTiles(f.tiles, shift.x, shift.y);
-
-  const src = readRect(f.tiles, f.bounds);
-  const sw = f.bounds.w;
-  const sh = f.bounds.h;
-  const inv = invert(m);
-  const dest = roundOut(transformRect(m, f.bounds));
-  const out = tileWriter(EMPTY_TILES);
-  const tap = (x: number, y: number) => (x < 0 || y < 0 || x >= sw || y >= sh ? -1 : (y * sw + x) * 4);
-
-  for (const [tx, ty] of tilesIn(dest)) {
-    const part = intersect(dest, tileRect(tx, ty));
-    const t = out.writable(tx, ty);
-    for (let y = part.y; y < part.y + part.h; y++) {
-      for (let x = part.x; x < part.x + part.w; x++) {
-        const p = apply(inv, { x: x + 0.5, y: y + 0.5 });
-        const fx = p.x - 0.5 - f.bounds.x;
-        const fy = p.y - 0.5 - f.bounds.y;
-        const x0 = Math.floor(fx);
-        const y0 = Math.floor(fy);
-        if (x0 < -1 || y0 < -1 || x0 >= sw || y0 >= sh) continue;
-        const ax = fx - x0;
-        const ay = fy - y0;
-        let r = 0, g = 0, b = 0, a = 0;
-        const taps = [
-          [tap(x0, y0), (1 - ax) * (1 - ay)],
-          [tap(x0 + 1, y0), ax * (1 - ay)],
-          [tap(x0, y0 + 1), (1 - ax) * ay],
-          [tap(x0 + 1, y0 + 1), ax * ay],
-        ] as const;
-        for (const [i, w] of taps) {
-          if (i < 0 || w === 0) continue;
-          const wa = w * src[i + 3];
-          r += src[i] * wa;
-          g += src[i + 1] * wa;
-          b += src[i + 2] * wa;
-          a += wa;
-        }
-        if (a <= 0) continue;
-        const i = ((y - ty * TILE_SIZE) * TILE_SIZE + (x - tx * TILE_SIZE)) * 4;
-        t.data[i] = r / a;
-        t.data[i + 1] = g / a;
-        t.data[i + 2] = b / a;
-        t.data[i + 3] = a;
-      }
-    }
-  }
-  return out.finish();
+  const dest = roundOut(mappingBounds(m));
+  if (isEmpty(dest)) return EMPTY_TILES;
+  const src = { width: f.bounds.w, height: f.bounds.h, channels: 4 as const, data: readRect(f.tiles, f.bounds) };
+  const out = rasterizeMapping(src, f.bounds, m, dest, filter);
+  return tilesFromImage(dest.w, dest.h, out.data, dest.x, dest.y);
 }
 
 /** Normal-mode "over" of `top` onto `base`, both straight RGBA. */
@@ -111,23 +66,30 @@ export function compositeOver(base: TileMap, top: TileMap): TileMap {
   if (base.size === 0) return top;
   const out = tileWriter(base);
   for (const [key, t] of top) {
-    const existing = base.get(key);
-    if (!existing) {
-      out.tiles.set(key, t);
+    const tx = keyX(key), ty = keyY(key);
+    if (!base.has(key)) {
+      out.put(tx, ty, t);
       continue;
     }
-    const [tx, ty] = parseTileKey(key);
     const d = out.writable(tx, ty).data;
     const s = t.data;
     for (let i = 0; i < s.length; i += 4) {
-      const sa = s[i + 3] / 255;
+      const sa = s[i + 3];
       if (sa === 0) continue;
+      if (sa === 255) {
+        d[i] = s[i];
+        d[i + 1] = s[i + 1];
+        d[i + 2] = s[i + 2];
+        d[i + 3] = 255;
+        continue;
+      }
+      const a = sa / 255;
       const da = d[i + 3] / 255;
-      const oa = sa + da * (1 - sa);
-      const k = (da * (1 - sa)) / oa;
-      d[i] = s[i] * (sa / oa) + d[i] * k;
-      d[i + 1] = s[i + 1] * (sa / oa) + d[i + 1] * k;
-      d[i + 2] = s[i + 2] * (sa / oa) + d[i + 2] * k;
+      const oa = a + da * (1 - a);
+      const k = (da * (1 - a)) / oa;
+      d[i] = s[i] * (a / oa) + d[i] * k;
+      d[i + 1] = s[i + 1] * (a / oa) + d[i + 1] * k;
+      d[i + 2] = s[i + 2] * (a / oa) + d[i + 2] * k;
       d[i + 3] = oa * 255;
     }
   }

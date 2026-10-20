@@ -1,8 +1,8 @@
-import { compositePixel, type BlendMode } from "./blend";
+import { KERNELS, type BlendMode } from "./blend";
 import type { RGB } from "./color";
 import { intersect, rect, union, type Rect } from "./geometry";
 import type { Mask } from "./selection";
-import { EMPTY_TILES, TILE_SIZE, tileGridBounds, tileRect, tileWriter, tilesIn, type TileMap } from "./tiles";
+import { EMPTY_TILES, TILE_SIZE, tileGridBounds, tileKey, tileRect, tileWriter, tilesIn, words, type TileMap } from "./tiles";
 
 export interface Layer {
   readonly id: string;
@@ -38,25 +38,45 @@ export function createLayer(props: Partial<Layer> & Pick<Layer, "name">): Layer 
   return { id: newId(), visible: true, opacity: 1, blendMode: "normal", tiles: EMPTY_TILES, ...props };
 }
 
-/** Fills `area` (clipped by `mask` if given) with an opaque colour, compositing over existing pixels. */
+/** Packs an opaque colour as a little-endian RGBA u32. */
+const packOpaque = (c: RGB) => ((255 << 24) | (c.b << 16) | (c.g << 8) | c.r) >>> 0;
+
+/**
+ * Fills `area` with a colour, composited over existing pixels with `opacity`
+ * and the selection's coverage. Fully covered opaque spans are written a
+ * word at a time.
+ */
 export function fillTiles(base: TileMap, area: Rect, color: RGB, mask: Mask | null = null, opacity = 1): TileMap {
   const w = tileWriter(base);
   const region = mask ? intersect(area, mask.bounds) : area;
+  const word = packOpaque(color);
   for (const [tx, ty] of tilesIn(region)) {
     const part = intersect(region, tileRect(tx, ty));
     const t = w.writable(tx, ty);
+    const d = t.data;
+    const ox = tx * TILE_SIZE, oy = ty * TILE_SIZE;
+    if (!mask && opacity >= 1) {
+      const u = words(t);
+      for (let y = part.y; y < part.y + part.h; y++) {
+        const i = (y - oy) * TILE_SIZE + (part.x - ox);
+        u.fill(word, i, i + part.w);
+      }
+      continue;
+    }
     for (let y = part.y; y < part.y + part.h; y++) {
-      for (let x = part.x; x < part.x + part.w; x++) {
-        const a = opacity * (mask ? mask.data[y * mask.width + x] / 255 : 1);
+      const mrow = mask ? (y - mask.bounds.y) * mask.bounds.w - mask.bounds.x : 0;
+      let i = ((y - oy) * TILE_SIZE + (part.x - ox)) * 4;
+      for (let x = part.x; x < part.x + part.w; x++, i += 4) {
+        const a = opacity * (mask ? mask.data[mrow + x] * INV255 : 1);
         if (a <= 0) continue;
-        const i = ((y - ty * TILE_SIZE) * TILE_SIZE + (x - tx * TILE_SIZE)) * 4;
-        const da = t.data[i + 3] / 255;
+        const da = d[i + 3] * INV255;
         const oa = a + da * (1 - a);
-        const mix = (s: number, d: number) => (s * a + d * da * (1 - a)) / oa;
-        t.data[i] = mix(color.r, t.data[i]);
-        t.data[i + 1] = mix(color.g, t.data[i + 1]);
-        t.data[i + 2] = mix(color.b, t.data[i + 2]);
-        t.data[i + 3] = oa * 255;
+        const keep = (da * (1 - a)) / oa;
+        const add = a / oa;
+        d[i] = color.r * add + d[i] * keep;
+        d[i + 1] = color.g * add + d[i + 1] * keep;
+        d[i + 2] = color.b * add + d[i + 2] * keep;
+        d[i + 3] = oa * 255;
       }
     }
   }
@@ -67,21 +87,25 @@ export function fillTiles(base: TileMap, area: Rect, color: RGB, mask: Mask | nu
 export function clearTiles(base: TileMap, mask: Mask | null): TileMap {
   if (!mask) return EMPTY_TILES;
   const w = tileWriter(base);
-  for (const [tx, ty] of tilesIn(mask.bounds)) {
+  const b = mask.bounds;
+  for (const [tx, ty] of tilesIn(b)) {
     if (!w.get(tx, ty)) continue;
-    const part = intersect(mask.bounds, tileRect(tx, ty));
-    const t = w.writable(tx, ty);
+    const part = intersect(b, tileRect(tx, ty));
+    const d = w.writable(tx, ty).data;
+    const ox = tx * TILE_SIZE, oy = ty * TILE_SIZE;
     for (let y = part.y; y < part.y + part.h; y++) {
-      for (let x = part.x; x < part.x + part.w; x++) {
-        const m = mask.data[y * mask.width + x];
-        if (m === 0) continue;
-        const i = ((y - ty * TILE_SIZE) * TILE_SIZE + (x - tx * TILE_SIZE)) * 4 + 3;
-        t.data[i] = (t.data[i] * (255 - m)) / 255;
+      const mrow = (y - b.y) * b.w - b.x;
+      let i = ((y - oy) * TILE_SIZE + (part.x - ox)) * 4 + 3;
+      for (let x = part.x; x < part.x + part.w; x++, i += 4) {
+        const m = mask.data[mrow + x];
+        if (m) d[i] = (d[i] * (255 - m)) / 255;
       }
     }
   }
   return w.finish();
 }
+
+const INV255 = 1 / 255;
 
 export interface NewDocumentOptions {
   width: number;
@@ -147,25 +171,22 @@ export function duplicateLayer(d: Doc, id: string): Doc {
 
 /**
  * Composites layers into straight RGBA8. This is the reference compositor,
- * used for export and as the oracle for GPU rendering tests.
+ * used for export and as the oracle for GPU rendering tests. Each layer is
+ * applied a tile row at a time through its blend mode's row kernel.
  */
 export function flatten(d: Doc, area: Rect = docRect(d), layers: readonly Layer[] = d.layers): Uint8ClampedArray {
   const acc = new Float32Array(area.w * area.h * 4);
   for (const layer of layers) {
     if (!layer.visible || layer.opacity <= 0) continue;
+    const kernel = KERNELS[layer.blendMode];
     for (const [tx, ty] of tilesIn(area)) {
-      const t = layer.tiles.get(`${tx},${ty}`);
+      const t = layer.tiles.get(tileKey(tx, ty));
       if (!t) continue;
       const part = intersect(area, tileRect(tx, ty));
       for (let y = part.y; y < part.y + part.h; y++) {
-        let si = ((y - ty * TILE_SIZE) * TILE_SIZE + (part.x - tx * TILE_SIZE)) * 4;
-        let di = ((y - area.y) * area.w + (part.x - area.x)) * 4;
-        for (let x = 0; x < part.w; x++, si += 4, di += 4) {
-          const a = t.data[si + 3];
-          if (a === 0) continue;
-          const s = t.data;
-          compositePixel(acc, di, s[si] / 255, s[si + 1] / 255, s[si + 2] / 255, (a / 255) * layer.opacity, layer.blendMode);
-        }
+        const si = ((y - ty * TILE_SIZE) * TILE_SIZE + (part.x - tx * TILE_SIZE)) * 4;
+        const di = ((y - area.y) * area.w + (part.x - area.x)) * 4;
+        kernel(acc, di, t.data, si, part.w, layer.opacity);
       }
     }
   }
@@ -173,10 +194,11 @@ export function flatten(d: Doc, area: Rect = docRect(d), layers: readonly Layer[
   for (let i = 0; i < acc.length; i += 4) {
     const a = acc[i + 3];
     if (a <= 0) continue;
-    out[i] = Math.round((acc[i] / a) * 255);
-    out[i + 1] = Math.round((acc[i + 1] / a) * 255);
-    out[i + 2] = Math.round((acc[i + 2] / a) * 255);
-    out[i + 3] = Math.round(a * 255);
+    const k = 255 / a;
+    out[i] = acc[i] * k;
+    out[i + 1] = acc[i + 1] * k;
+    out[i + 2] = acc[i + 2] * k;
+    out[i + 3] = a * 255;
   }
   return out;
 }

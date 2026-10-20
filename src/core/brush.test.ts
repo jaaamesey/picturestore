@@ -23,6 +23,25 @@ describe("dabs", () => {
   });
 });
 
+describe("dab rasterization", () => {
+  it.each([
+    [3, 1], [3, 0.5], [12.3, 0], [12.3, 0.8], [40, 0.3],
+  ])("matches the analytic profile (radius %f, hardness %f)", (radius, hardness) => {
+    const s = beginStroke(EMPTY_TILES, {
+      brush: brush({ size: radius * 2, hardness, flow: 1, opacity: 1 }),
+      color: red, erase: false, selection: null, clip,
+    });
+    const c = { x: 50.3, y: 49.7 };
+    s.add({ ...c, pressure: 1 });
+    const t = s.finish();
+    for (let y = 0; y < 100; y++)
+      for (let x = 0; x < 100; x++) {
+        const expected = dabAlpha(Math.hypot(x + 0.5 - c.x, y + 0.5 - c.y), radius, hardness) * 255;
+        expect(Math.abs(getPixel(t, x, y)[3] - expected)).toBeLessThanOrEqual(1.5);
+      }
+  });
+});
+
 describe("interpolation", () => {
   it("places dabs at even spacing regardless of event granularity", () => {
     const coarse = createInterpolator(() => 2);

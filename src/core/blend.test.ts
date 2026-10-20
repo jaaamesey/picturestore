@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BLEND_MODES, blendColor, compositePixel } from "./blend";
+import { BLEND_MODES, KERNELS, blendColor } from "./blend";
 
 describe("blend modes", () => {
   it.each([
@@ -30,15 +30,24 @@ describe("blend modes", () => {
 
   it("every mode reduces to the source over a transparent backdrop", () => {
     for (const mode of BLEND_MODES) {
-      const dst = [0, 0, 0, 0];
-      compositePixel(dst, 0, 0.2, 0.4, 0.6, 0.5, mode);
-      expect(dst.map((v) => +v.toFixed(6))).toEqual([0.1, 0.2, 0.3, 0.5]);
+      const dst = new Float32Array(4);
+      KERNELS[mode](dst, 0, new Uint8ClampedArray([51, 102, 153, 255]), 0, 1, 0.5);
+      expect([...dst].map((v) => +v.toFixed(6))).toEqual([0.1, 0.2, 0.3, 0.5]);
     }
   });
 
   it("normal source-over with partial alpha (premultiplied destination)", () => {
-    const dst = [1, 1, 1, 1];
-    compositePixel(dst, 0, 0, 0, 0, 0.25, "normal");
-    expect(dst).toEqual([0.75, 0.75, 0.75, 1]);
+    const dst = new Float32Array([1, 1, 1, 1]);
+    KERNELS.normal(dst, 0, new Uint8ClampedArray([0, 0, 0, 255]), 0, 1, 0.25);
+    expect([...dst]).toEqual([0.75, 0.75, 0.75, 1]);
+  });
+
+  it("kernels match blendColor for every mode over an opaque backdrop", () => {
+    for (const mode of BLEND_MODES) {
+      const dst = new Float32Array([0.2, 0.5, 0.8, 1]);
+      KERNELS[mode](dst, 0, new Uint8ClampedArray([204, 102, 51, 255]), 0, 1, 1);
+      const expected = blendColor(mode, [0.2, 0.5, 0.8], [0.8, 0.4, 0.2]);
+      expected.forEach((v, i) => expect(dst[i]).toBeCloseTo(v, 5));
+    }
   });
 });

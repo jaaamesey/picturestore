@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { compose, rect, scaling, translation } from "./geometry";
-import { compositeOver, extractFloating, transformTiles } from "./raster";
+import { rect } from "./geometry";
+import { quadOf } from "./warp";
+import { compositeOver, extractFloating, transformFloatingCpu } from "./raster";
 import { rectMask } from "./selection";
 import { contentBounds, getPixel, tilesFromImage } from "./tiles";
 
@@ -28,23 +29,21 @@ describe("floating selections", () => {
   });
 });
 
-describe("transformTiles", () => {
+describe("transformFloatingCpu", () => {
   const tiles = square(4, [255, 0, 0, 255], 10, 10);
   const f = { tiles, bounds: contentBounds(tiles) };
 
   it("translates exactly by whole pixels", () => {
-    const out = transformTiles(f, translation(5, -3));
+    const out = transformFloatingCpu(f, { source: f.bounds, quad: quadOf(rect(15, 7, 4, 4)), patch: null });
     expect(contentBounds(out)).toEqual(rect(15, 7, 4, 4));
     expect(getPixel(out, 15, 7)).toEqual([255, 0, 0, 255]);
   });
 
-  it("scales with bilinear filtering and no dark fringes", () => {
-    const m = compose(translation(-10, -10), scaling(2), translation(10, 10));
-    const out = transformTiles(f, m);
+  it("scales with no dark fringes", () => {
+    const out = transformFloatingCpu(f, { source: f.bounds, quad: quadOf(rect(10, 10, 8, 8)), patch: null });
     expect(contentBounds(out)).toEqual(rect(10, 10, 8, 8));
     expect(getPixel(out, 13, 13)).toEqual([255, 0, 0, 255]);
-    const edge = getPixel(out, 10, 10);
-    expect(edge.slice(0, 3)).toEqual([255, 0, 0]); // colour preserved even where alpha < 1
+    expect(getPixel(out, 10, 10).slice(0, 3)).toEqual([255, 0, 0]); // colour preserved where alpha < 1
   });
 });
 

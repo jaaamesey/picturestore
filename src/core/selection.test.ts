@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { rect, translation, vec } from "./geometry";
+import { rect, vec } from "./geometry";
+import { quadOf } from "./warp";
 import {
   combine, ellipseMask, invertSelection, magicWand, maskAt, modeFromModifiers, polygonMask, rectMask, selectAll, transformMask,
 } from "./selection";
@@ -75,8 +76,37 @@ describe("magic wand", () => {
   it("respects tolerance", () => expect(sum(magicWand(tiles, W, H, vec(2, 2), 255))).toBe(400));
 });
 
-it("transforms masks", () => {
-  const m = transformMask(rectMask(W, H, rect(0, 0, 4, 4))!, translation(3, 2))!;
-  expect(m.bounds).toEqual(rect(3, 2, 4, 4));
-  expect(sum(m)).toBe(16);
+describe("transformMask", () => {
+  it("translates and scales through a mapping", () => {
+    const src = rectMask(W, H, rect(0, 0, 4, 4))!;
+    const moved = transformMask(src, { source: rect(0, 0, 4, 4), quad: quadOf(rect(3, 2, 4, 4)), patch: null })!;
+    expect(moved.bounds).toEqual(rect(3, 2, 4, 4));
+    expect(sum(moved)).toBe(16);
+    const scaled = transformMask(src, { source: rect(0, 0, 4, 4), quad: quadOf(rect(0, 0, 8, 8)), patch: null })!;
+    expect(scaled.bounds).toEqual(rect(0, 0, 8, 8));
+    expect(maskAt(scaled, 4, 4)).toBe(255);
+  });
+});
+
+describe("polygon rasterization", () => {
+  it("covers exact areas, including fractional edges", () => {
+    expect(sum(polygonMask(W, H, [vec(2.5, 2), vec(7.5, 2), vec(7.5, 6), vec(2.5, 6)]))).toBeCloseTo(20, 1);
+    expect(sum(polygonMask(W, H, [vec(0, 0), vec(10, 0), vec(0, 10)]))).toBeCloseTo(50, 1);
+  });
+
+  it("clips lassos that wander off the canvas", () => {
+    const m = polygonMask(W, H, [vec(-50, -50), vec(10, -50), vec(10, 70), vec(-50, 70)])!;
+    expect(m.bounds).toEqual(rect(0, 0, 10, 20));
+    expect(sum(m)).toBeCloseTo(200, 1);
+  });
+
+  it("handles self-intersecting lassos (both lobes of a figure eight)", () => {
+    const m = polygonMask(W, H, [vec(0, 0), vec(10, 10), vec(10, 0), vec(0, 10)])!;
+    expect(sum(m)).toBeCloseTo(50, 0);
+  });
+
+  it("stores only the selection's bounds", () => {
+    const m = rectMask(1000, 1000, rect(10, 10, 5, 5))!;
+    expect(m.data.length).toBe(25);
+  });
 });

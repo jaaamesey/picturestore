@@ -1,121 +1,207 @@
-import { EMPTY_RECT, apply, boundsOf, intersect, invert as invertMat, isEmpty, rect, roundOut, transformRect, type Mat, type Rect, type Vec2 } from "./geometry";
-import { readRect, type TileMap } from "./tiles";
+import { intersect, isEmpty, rect, roundOut, union, vec, type Rect, type Vec2 } from "./geometry";
+import { rasterizeMapping } from "./rasterize";
+import { TILE_SHIFT, TILE_SIZE, tileKey, tileOf, type TileMap } from "./tiles";
+import { mappingBounds, type Mapping } from "./warp";
 
 /**
- * A document-sized 8-bit selection mask (255 = fully selected), with the
- * tight bounds of its non-zero pixels cached for fast iteration.
+ * An 8-bit selection mask (255 = fully selected) for a document of
+ * `width × height`. Only the tight `bounds` of the non-zero pixels are stored
+ * (`data` is `bounds.w × bounds.h`), so history snapshots of small selections
+ * on large documents stay small.
  */
 export interface Mask {
   readonly width: number;
   readonly height: number;
-  readonly data: Uint8Array;
   readonly bounds: Rect;
+  readonly data: Uint8Array;
 }
 
 export type SelectionMode = "replace" | "add" | "subtract" | "intersect";
 
-export function computeBounds(data: Uint8Array, width: number, height: number): Rect {
-  let minX = width, minY = height, maxX = -1, maxY = -1;
-  for (let y = 0; y < height; y++) {
-    const row = y * width;
-    for (let x = 0; x < width; x++) {
-      if (data[row + x] === 0) continue;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      maxY = y;
-    }
+/** Exact for 0 ≤ x ≤ 255², i.e. products of two bytes: round(x / 255). */
+const div255 = (x: number) => (x + 128 + ((x + 128) >> 8)) >> 8;
+
+export const maskAt = (m: Mask | null, x: number, y: number) => {
+  if (!m) return 255;
+  const { bounds: b } = m;
+  const lx = x - b.x, ly = y - b.y;
+  return lx < 0 || ly < 0 || lx >= b.w || ly >= b.h ? 0 : m.data[ly * b.w + lx];
+};
+
+/**
+ * Wraps `data` covering `region` as a mask, cropping to the tight bounds of
+ * its non-zero pixels. Null if nothing is selected.
+ */
+export function toMask(data: Uint8Array, region: Rect, width: number, height: number): Mask | null {
+  let minX = region.w, minY = region.h, maxX = -1, maxY = -1;
+  for (let y = 0; y < region.h; y++) {
+    const row = y * region.w;
+    let x = 0;
+    while (x < region.w && data[row + x] === 0) x++;
+    if (x === region.w) continue;
+    let x1 = region.w - 1;
+    while (data[row + x1] === 0) x1--;
+    if (x < minX) minX = x;
+    if (x1 > maxX) maxX = x1;
+    if (y < minY) minY = y;
+    maxY = y;
   }
-  return maxX < 0 ? EMPTY_RECT : rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
+  if (maxX < 0) return null;
+  const bounds = rect(region.x + minX, region.y + minY, maxX - minX + 1, maxY - minY + 1);
+  if (bounds.w === region.w && bounds.h === region.h) return { width, height, bounds, data };
+  const out = new Uint8Array(bounds.w * bounds.h);
+  for (let y = 0; y < bounds.h; y++) {
+    const src = (y + minY) * region.w + minX;
+    out.set(data.subarray(src, src + bounds.w), y * bounds.w);
+  }
+  return { width, height, bounds, data: out };
 }
 
-/** Wraps raw data as a mask, or null if nothing is selected. */
-export function toMask(data: Uint8Array, width: number, height: number): Mask | null {
-  const bounds = computeBounds(data, width, height);
-  return isEmpty(bounds) ? null : { width, height, data, bounds };
-}
-
-export const maskAt = (m: Mask | null, x: number, y: number) =>
-  !m ? 255 : x < 0 || y < 0 || x >= m.width || y >= m.height ? 0 : m.data[y * m.width + x];
+const docRect = (w: number, h: number) => rect(0, 0, w, h);
 
 export function selectAll(width: number, height: number): Mask {
-  return { width, height, data: new Uint8Array(width * height).fill(255), bounds: rect(0, 0, width, height) };
+  return { width, height, bounds: docRect(width, height), data: new Uint8Array(width * height).fill(255) };
 }
 
 /** Pixel-aligned rectangle (marquee selections snap to whole pixels). */
 export function rectMask(width: number, height: number, r: Rect): Mask | null {
-  const data = new Uint8Array(width * height);
-  const b = intersect(roundOut(rect(Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h))), rect(0, 0, width, height));
-  for (let y = b.y; y < b.y + b.h; y++) data.fill(255, y * width + b.x, y * width + b.x + b.w);
-  return toMask(data, width, height);
+  const b = intersect(rect(Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h)), docRect(width, height));
+  return isEmpty(b) ? null : { width, height, bounds: b, data: new Uint8Array(b.w * b.h).fill(255) };
 }
 
-const SUB = 4; // supersampling factor per axis for antialiased shapes
-
-/** Antialiased ellipse inscribed in `r`. */
-export function ellipseMask(width: number, height: number, r: Rect): Mask | null {
-  const data = new Uint8Array(width * height);
-  const cx = r.x + r.w / 2;
-  const cy = r.y + r.h / 2;
-  const rx = r.w / 2;
-  const ry = r.h / 2;
-  if (rx <= 0 || ry <= 0) return null;
-  const b = intersect(roundOut(r), rect(0, 0, width, height));
-  for (let y = b.y; y < b.y + b.h; y++) {
-    for (let x = b.x; x < b.x + b.w; x++) {
-      let hits = 0;
-      for (let sy = 0; sy < SUB; sy++) {
-        const dy = (y + (sy + 0.5) / SUB - cy) / ry;
-        for (let sx = 0; sx < SUB; sx++) {
-          const dx = (x + (sx + 0.5) / SUB - cx) / rx;
-          if (dx * dx + dy * dy <= 1) hits++;
-        }
-      }
-      data[y * width + x] = Math.round((hits * 255) / (SUB * SUB));
-    }
-  }
-  return toMask(data, width, height);
-}
-
-/** Antialiased polygon (even-odd fill), using SUB×SUB coverage sampling. */
+/**
+ * Exact-area antialiased fill of a closed polygon (non-zero winding), after
+ * the signed-area accumulation technique of font-rs / stb_truetype: each edge
+ * deposits its exact coverage contribution into a per-pixel accumulator and a
+ * running sum along each row turns that into coverage. O(perimeter + area),
+ * independent of how many vertices a lasso has per scanline.
+ */
 export function polygonMask(width: number, height: number, points: readonly Vec2[]): Mask | null {
   if (points.length < 3) return null;
-  const data = new Uint8Array(width * height);
-  const b = intersect(roundOut(boundsOf(points)), rect(0, 0, width, height));
-  if (isEmpty(b)) return null;
-  const coverage = new Float32Array(b.w);
-  const xs: number[] = [];
-  for (let y = b.y; y < b.y + b.h; y++) {
-    coverage.fill(0);
-    for (let s = 0; s < SUB; s++) {
-      const sy = y + (s + 0.5) / SUB;
-      xs.length = 0;
-      for (let i = 0; i < points.length; i++) {
-        const p = points[i];
-        const q = points[(i + 1) % points.length];
-        if ((p.y <= sy) !== (q.y <= sy)) xs.push(p.x + ((sy - p.y) / (q.y - p.y)) * (q.x - p.x));
-      }
-      xs.sort((a, c) => a - c);
-      for (let i = 0; i + 1 < xs.length; i += 2) {
-        // Accumulate horizontal span [x0, x1) with fractional coverage at the ends.
-        const x0 = Math.max(b.x, xs[i]) - b.x;
-        const x1 = Math.min(b.x + b.w, xs[i + 1]) - b.x;
-        if (x1 <= x0) continue;
-        const i0 = Math.floor(x0);
-        const i1 = Math.floor(x1);
-        if (i0 === i1) {
-          coverage[i0] += x1 - x0;
-          continue;
-        }
-        coverage[i0] += i0 + 1 - x0;
-        for (let k = i0 + 1; k < i1; k++) coverage[k] += 1;
-        if (i1 < b.w) coverage[i1] += x1 - i1;
-      }
-    }
-    const row = y * width + b.x;
-    for (let x = 0; x < b.w; x++) data[row + x] = Math.round(Math.min(1, coverage[x] / SUB) * 255);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
   }
-  return toMask(data, width, height);
+  const region = intersect(roundOut(rect(minX, minY, maxX - minX, maxY - minY)), docRect(width, height));
+  if (isEmpty(region)) return null;
+  const w = region.w, h = region.h;
+  const stride = w + 2;
+  const acc = new Float32Array(stride * h);
+
+  const line = (ax: number, ay: number, bx: number, by: number) => {
+    if (ay === by) return;
+    let dir = 1;
+    if (ay > by) {
+      dir = -1;
+      [ax, ay, bx, by] = [bx, by, ax, ay];
+    }
+    const dxdy = (bx - ax) / (by - ay);
+    let x = ax;
+    let y0 = Math.floor(ay);
+    if (ay < 0) {
+      x -= ay * dxdy;
+      y0 = 0;
+    }
+    const yEnd = Math.min(h, Math.ceil(by));
+    for (let y = Math.max(0, y0); y < yEnd; y++) {
+      const row = y * stride;
+      const dy = Math.min(y + 1, by) - Math.max(y, ay);
+      const xnext = x + dxdy * dy;
+      const d = dy * dir;
+      const xa = Math.min(x, xnext), xb = Math.max(x, xnext);
+      const x0f = Math.floor(xa), x0i = x0f;
+      const x1c = Math.ceil(xb), x1i = x1c;
+      if (x1i <= x0i + 1) {
+        const xmf = 0.5 * (x + xnext) - x0f;
+        acc[row + x0i] += d - d * xmf;
+        acc[row + x0i + 1] += d * xmf;
+      } else {
+        const s = 1 / (xb - xa);
+        const x0frac = xa - x0f;
+        const a0 = 0.5 * s * (1 - x0frac) * (1 - x0frac);
+        const x1frac = xb - x1c + 1;
+        const am = 0.5 * s * x1frac * x1frac;
+        acc[row + x0i] += d * a0;
+        if (x1i === x0i + 2) {
+          acc[row + x0i + 1] += d * (1 - a0 - am);
+        } else {
+          const a1 = s * (1.5 - x0frac);
+          acc[row + x0i + 1] += d * (a1 - a0);
+          for (let xi = x0i + 2; xi < x1i - 1; xi++) acc[row + xi] += d * s;
+          const a2 = a1 + (x1i - x0i - 3) * s;
+          acc[row + x1i - 1] += d * (1 - a2 - am);
+        }
+        acc[row + x1i] += d * am;
+      }
+      x = xnext;
+    }
+  };
+
+  // Clip horizontally: geometry left of the region collapses onto x = 0 (it
+  // still affects winding to its right); geometry right of it is irrelevant
+  // and lands in the spare columns.
+  const clampX = (x: number) => Math.min(w, Math.max(0, x));
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const q = points[(i + 1) % points.length];
+    const ax = p.x - region.x, ay = p.y - region.y;
+    const bx = q.x - region.x, by = q.y - region.y;
+    // Split at x = 0 and x = w so clamping never bends a sloped edge.
+    const cuts = [0, 1];
+    for (const edge of [0, w]) {
+      if ((ax - edge) * (bx - edge) < 0) cuts.push((edge - ax) / (bx - ax));
+    }
+    cuts.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < cuts.length; k++) {
+      const t0 = cuts[k], t1 = cuts[k + 1];
+      line(
+        clampX(ax + (bx - ax) * t0), ay + (by - ay) * t0,
+        clampX(ax + (bx - ax) * t1), ay + (by - ay) * t1,
+      );
+    }
+  }
+
+  const data = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    const row = y * stride;
+    for (let x = 0; x < w; x++) {
+      sum += acc[row + x];
+      data[y * w + x] = Math.round(Math.min(1, Math.abs(sum)) * 255);
+    }
+  }
+  return toMask(data, region, width, height);
+}
+
+/** Antialiased ellipse inscribed in `r`, flattened finely enough that the error stays below 1/20 px. */
+export function ellipseMask(width: number, height: number, r: Rect): Mask | null {
+  const rx = r.w / 2, ry = r.h / 2;
+  if (rx <= 0 || ry <= 0) return null;
+  const cx = r.x + rx, cy = r.y + ry;
+  // Chord sagitta R(1 − cos(π/n)) ≤ ε  ⇒  n ≥ π / acos(1 − ε/R).
+  const R = Math.max(rx, ry);
+  const n = Math.max(16, Math.ceil(Math.PI / Math.acos(Math.max(-1, 1 - 0.05 / R))));
+  // An inscribed polygon under-covers; scale it so its area equals the ellipse's (πab).
+  const k = Math.sqrt((2 * Math.PI) / (n * Math.sin((2 * Math.PI) / n)));
+  const pts = Array.from({ length: n }, (_, i) => {
+    const a = (2 * Math.PI * i) / n;
+    return vec(cx + k * rx * Math.cos(a), cy + k * ry * Math.sin(a));
+  });
+  return polygonMask(width, height, pts);
+}
+
+/** Copies a mask's coverage of `region` into a region-sized buffer (row memcpy; zero elsewhere). */
+function blit(m: Mask, region: Rect): Uint8Array {
+  const out = new Uint8Array(region.w * region.h);
+  const part = intersect(m.bounds, region);
+  for (let y = part.y; y < part.y + part.h; y++) {
+    const src = (y - m.bounds.y) * m.bounds.w + (part.x - m.bounds.x);
+    out.set(m.data.subarray(src, src + part.w), (y - region.y) * region.w + (part.x - region.x));
+  }
+  return out;
 }
 
 export function combine(current: Mask | null, shape: Mask | null, mode: SelectionMode): Mask | null {
@@ -123,26 +209,32 @@ export function combine(current: Mask | null, shape: Mask | null, mode: Selectio
   if (!current) return mode === "add" ? shape : null;
   if (!shape) return mode === "intersect" ? null : current;
   const { width, height } = current;
-  const out = new Uint8Array(current.data);
-  const a = current.data;
-  const s = shape.data;
-  const n = width * height;
-  if (mode === "add") for (let i = 0; i < n; i++) out[i] = Math.max(a[i], s[i]);
-  else if (mode === "subtract") for (let i = 0; i < n; i++) out[i] = (a[i] * (255 - s[i])) / 255;
-  else for (let i = 0; i < n; i++) out[i] = (a[i] * s[i]) / 255;
-  return toMask(out, width, height);
+  const region =
+    mode === "add" ? union(current.bounds, shape.bounds)
+    : mode === "subtract" ? current.bounds
+    : intersect(current.bounds, shape.bounds);
+  if (isEmpty(region)) return null;
+  const a = blit(current, region);
+  const b = blit(shape, region);
+  const n = a.length;
+  if (mode === "add") for (let i = 0; i < n; i++) a[i] = a[i] > b[i] ? a[i] : b[i];
+  else if (mode === "subtract") for (let i = 0; i < n; i++) a[i] = div255(a[i] * (255 - b[i]));
+  else for (let i = 0; i < n; i++) a[i] = div255(a[i] * b[i]);
+  return toMask(a, region, width, height);
 }
 
 export function invertSelection(m: Mask | null, width: number, height: number): Mask | null {
   if (!m) return selectAll(width, height);
-  const out = new Uint8Array(width * height);
-  for (let i = 0; i < out.length; i++) out[i] = 255 - m.data[i];
-  return toMask(out, width, height);
+  const region = docRect(width, height);
+  const out = blit(m, region);
+  for (let i = 0; i < out.length; i++) out[i] = 255 - out[i];
+  return toMask(out, region, width, height);
 }
 
 /**
- * Flood-selects pixels whose colour is within `tolerance` (0–255, per channel
- * max difference) of the seed pixel, like Photoshop's Magic Wand.
+ * Magic Wand: selects pixels whose channels are all within `tolerance` of the
+ * seed pixel. Contiguous mode is a scanline span fill (each pixel is tested
+ * and written once per span, not pushed per pixel), reading tiles directly.
  */
 export function magicWand(
   tiles: TileMap,
@@ -155,68 +247,78 @@ export function magicWand(
   const sx = Math.floor(seed.x);
   const sy = Math.floor(seed.y);
   if (sx < 0 || sy < 0 || sx >= width || sy >= height) return null;
-  const pixels = readRect(tiles, rect(0, 0, width, height));
-  const s0 = (sy * width + sx) * 4;
-  const [r0, g0, b0, a0] = pixels.subarray(s0, s0 + 4);
-  const matches = (i: number) => {
-    const j = i * 4;
-    return (
-      Math.abs(pixels[j + 3] - a0) <= tolerance &&
-      (a0 === 0 && pixels[j + 3] === 0
-        ? true
-        : Math.abs(pixels[j] - r0) <= tolerance &&
-          Math.abs(pixels[j + 1] - g0) <= tolerance &&
-          Math.abs(pixels[j + 2] - b0) <= tolerance)
-    );
+
+  // Tile data per (tileRow, tileColumn) for O(1) pixel access.
+  const cols = tileOf(width - 1) + 1;
+  const rows = tileOf(height - 1) + 1;
+  const grid: (Uint8ClampedArray | undefined)[] = new Array(cols * rows);
+  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) grid[ty * cols + tx] = tiles.get(tileKey(tx, ty))?.data;
+
+  const offset = (x: number, y: number) => (((y & (TILE_SIZE - 1)) << TILE_SHIFT) + (x & (TILE_SIZE - 1))) << 2;
+  const seedTile = grid[tileOf(sy) * cols + tileOf(sx)];
+  const so = offset(sx, sy);
+  const [r0, g0, b0, a0] = seedTile ? [seedTile[so], seedTile[so + 1], seedTile[so + 2], seedTile[so + 3]] : [0, 0, 0, 0];
+  const matches = (x: number, y: number) => {
+    const t = grid[(y >> TILE_SHIFT) * cols + (x >> TILE_SHIFT)];
+    if (!t) return a0 <= tolerance;
+    const o = offset(x, y);
+    const a = t[o + 3];
+    if (Math.abs(a - a0) > tolerance) return false;
+    if (a0 === 0 && a === 0) return true;
+    return Math.abs(t[o] - r0) <= tolerance && Math.abs(t[o + 1] - g0) <= tolerance && Math.abs(t[o + 2] - b0) <= tolerance;
   };
+
   const data = new Uint8Array(width * height);
+  const region = docRect(width, height);
   if (!contiguous) {
-    for (let i = 0; i < data.length; i++) if (matches(i)) data[i] = 255;
-    return toMask(data, width, height);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) if (matches(x, y)) data[y * width + x] = 255;
+    return toMask(data, region, width, height);
   }
-  const stack = [sy * width + sx];
-  data[stack[0]] = 255;
-  while (stack.length) {
-    const i = stack.pop()!;
-    const x = i % width;
-    const visit = (j: number) => {
-      if (data[j] === 0 && matches(j)) {
-        data[j] = 255;
-        stack.push(j);
-      }
-    };
-    if (x > 0) visit(i - 1);
-    if (x < width - 1) visit(i + 1);
-    if (i >= width) visit(i - width);
-    if (i < width * (height - 1)) visit(i + width);
+
+  let stack = new Int32Array(1024);
+  let top = 0;
+  const push = (x: number, y: number) => {
+    if (top + 2 > stack.length) {
+      const grown = new Int32Array(stack.length * 2);
+      grown.set(stack);
+      stack = grown;
+    }
+    stack[top++] = x;
+    stack[top++] = y;
+  };
+  /** Pushes one seed per run of fillable pixels on row `y` within [x0, x1]. */
+  const scanRow = (x0: number, x1: number, y: number) => {
+    let inRun = false;
+    for (let x = x0; x <= x1; x++) {
+      const fillable = data[y * width + x] === 0 && matches(x, y);
+      if (fillable && !inRun) push(x, y);
+      inRun = fillable;
+    }
+  };
+
+  push(sx, sy);
+  while (top > 0) {
+    const y = stack[--top];
+    const x = stack[--top];
+    const row = y * width;
+    if (data[row + x]) continue;
+    let left = x;
+    while (left > 0 && !data[row + left - 1] && matches(left - 1, y)) left--;
+    let right = x;
+    while (right < width - 1 && !data[row + right + 1] && matches(right + 1, y)) right++;
+    data.fill(255, row + left, row + right + 1);
+    if (y > 0) scanRow(left, right, y - 1);
+    if (y < height - 1) scanRow(left, right, y + 1);
   }
-  return toMask(data, width, height);
+  return toMask(data, region, width, height);
 }
 
-/** Resamples the mask through an affine transform (bilinear). */
-export function transformMask(m: Mask, mat: Mat): Mask | null {
-  const { width, height } = m;
-  const inv = invertMat(mat);
-  const out = new Uint8Array(width * height);
-  const b = intersect(roundOut(transformRect(mat, m.bounds)), rect(0, 0, width, height));
-  for (let y = b.y; y < b.y + b.h; y++) {
-    for (let x = b.x; x < b.x + b.w; x++) {
-      const p = apply(inv, { x: x + 0.5, y: y + 0.5 });
-      const fx = p.x - 0.5;
-      const fy = p.y - 0.5;
-      const x0 = Math.floor(fx);
-      const y0 = Math.floor(fy);
-      const tx = fx - x0;
-      const ty = fy - y0;
-      const v =
-        maskAt(m, x0, y0) * (1 - tx) * (1 - ty) +
-        maskAt(m, x0 + 1, y0) * tx * (1 - ty) +
-        maskAt(m, x0, y0 + 1) * (1 - tx) * ty +
-        maskAt(m, x0 + 1, y0 + 1) * tx * ty;
-      out[y * width + x] = Math.round(v);
-    }
-  }
-  return toMask(out, width, height);
+/** Transforms a selection mask through a mapping (bilinear, mip-prefiltered when shrinking). */
+export function transformMask(m: Mask, mapping: Mapping): Mask | null {
+  const dest = intersect(roundOut(mappingBounds(mapping)), docRect(m.width, m.height));
+  if (isEmpty(dest)) return null;
+  const out = rasterizeMapping({ width: m.bounds.w, height: m.bounds.h, channels: 1, data: m.data }, m.bounds, mapping, dest, "bilinear");
+  return toMask(new Uint8Array(out.data.buffer, out.data.byteOffset, out.data.length), dest, m.width, m.height);
 }
 
 /** Selection mode implied by modifier keys, Photoshop-style. */
@@ -226,3 +328,4 @@ export function modeFromModifiers(base: SelectionMode, shift: boolean, alt: bool
   if (alt) return "subtract";
   return base;
 }
+

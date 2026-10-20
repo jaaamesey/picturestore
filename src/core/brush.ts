@@ -1,7 +1,7 @@
 import type { RGB } from "./color";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect } from "./geometry";
-import { maskAt, type Mask } from "./selection";
-import { TILE_SIZE, tileKey, tileRect, tileWriter, tilesIn, type TileMap } from "./tiles";
+import type { Mask } from "./selection";
+import { TILE_SIZE, tileKey, tileRect, tileWriter, tilesIn, type TileKey, type TileMap } from "./tiles";
 
 export interface BrushSettings {
   /** Diameter in pixels. */
@@ -98,6 +98,28 @@ export interface Stroke {
   finish(): TileMap;
 }
 
+const LUT_SIZE = 4096;
+const lutCache = new Map<number, Float32Array>();
+
+/**
+ * Soft falloff 1 − smoothstep(hardness, 1, t) sampled over t² ∈ [0, 1], so a
+ * dab needs no square root in its interior. Independent of radius; one table
+ * per hardness (quantised to 1/256).
+ */
+function falloffTable(hardness: number): Float32Array {
+  const key = Math.round(hardness * 256);
+  let lut = lutCache.get(key);
+  if (lut) return lut;
+  lut = new Float32Array(LUT_SIZE + 2);
+  const h = key / 256;
+  for (let i = 0; i <= LUT_SIZE + 1; i++) {
+    const t = Math.sqrt(Math.min(1, i / LUT_SIZE));
+    lut[i] = h >= 1 ? 1 : 1 - smoothstep(h, 1, t);
+  }
+  lutCache.set(key, lut);
+  return lut;
+}
+
 /**
  * A paint or erase stroke over `base`.
  *
@@ -108,49 +130,90 @@ export interface Stroke {
  */
 export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
   const { brush, color, erase, selection, clip } = opts;
+  const { flow, opacity } = brush;
+  const { r: cr, g: cg, b: cb } = color;
   const writer = tileWriter(base);
-  const deposit = new Map<string, Float32Array>();
+  const deposit = new Map<TileKey, Float32Array>();
+  const lut = falloffTable(brush.hardness);
   const radiusAt = (p: StrokePoint) => Math.max(0.5, (brush.size / 2) * (brush.pressureSize ? p.pressure : 1));
   const interpolate = createInterpolator((p) => Math.max(1, radiusAt(p) * 2 * brush.spacing));
+  const sel = selection;
 
   const dab = (p: StrokePoint): Rect => {
-    const radius = radiusAt(p);
-    const area = intersect(roundOut(rect(p.x - radius - 1, p.y - radius - 1, radius * 2 + 2, radius * 2 + 2)), clip);
-    const region = selection ? intersect(area, selection.bounds) : area;
+    const R = radiusAt(p);
+    const outer = R + 0.5;
+    const area = intersect(roundOut(rect(p.x - outer, p.y - outer, outer * 2, outer * 2)), clip);
+    const region = sel ? intersect(area, sel.bounds) : area;
     if (isEmpty(region)) return EMPTY_RECT;
+    const outer2 = outer * outer;
+    const inner = Math.max(0, R - 0.5);
+    const inner2 = inner * inner; // inside this, the antialiased edge is fully on
+    const lutScale = LUT_SIZE / (R * R);
+    const pixelBrush = R <= 0.5;
+
     for (const [tx, ty] of tilesIn(region)) {
       const key = tileKey(tx, ty);
       const part = intersect(region, tileRect(tx, ty));
-      let dep = deposit.get(key);
-      if (!dep) deposit.set(key, (dep = new Float32Array(TILE_SIZE * TILE_SIZE)));
       const src = base.get(key)?.data;
       if (erase && !src) continue;
+      let dep = deposit.get(key);
+      if (!dep) deposit.set(key, (dep = new Float32Array(TILE_SIZE * TILE_SIZE)));
       const out = writer.writable(tx, ty);
       out.version++;
+      const o = out.data;
       const ox = tx * TILE_SIZE;
       const oy = ty * TILE_SIZE;
+
       for (let y = part.y; y < part.y + part.h; y++) {
-        for (let x = part.x; x < part.x + part.w; x++) {
-          const a = dabAlpha(Math.hypot(x + 0.5 - p.x, y + 0.5 - p.y), radius, brush.hardness);
+        const dy = y + 0.5 - p.y;
+        const dy2 = dy * dy;
+        if (dy2 >= outer2) continue;
+        // Only the span of this row that lies within the dab's outer radius.
+        const half = Math.sqrt(outer2 - dy2);
+        const x0 = Math.max(part.x, Math.ceil(p.x - half - 0.5));
+        const x1 = Math.min(part.x + part.w - 1, Math.floor(p.x + half - 0.5));
+        if (x1 < x0) continue;
+        const mrow = sel ? (y - sel.bounds.y) * sel.bounds.w - sel.bounds.x : 0;
+        let dx = x0 + 0.5 - p.x;
+        let d2 = dx * dx + dy2;
+        let pi = (y - oy) * TILE_SIZE + (x0 - ox);
+        for (let x = x0; x <= x1; x++, pi++, d2 += 2 * dx + 1, dx += 1) {
+          if (d2 >= outer2) continue;
+          const q = d2 * lutScale;
+          let a: number;
+          // Past t = 1 the falloff holds its end value (1 for hard brushes, whose rim extends half a pixel further).
+          if (q >= LUT_SIZE) a = lut[LUT_SIZE];
+          else {
+            const qi = q | 0;
+            a = lut[qi] + (lut[qi + 1] - lut[qi]) * (q - qi);
+          }
+          if (d2 > inner2) a *= Math.min(1, outer - Math.sqrt(d2)); // 1px antialiased rim
+          if (pixelBrush) a = Math.max(0, 1 - Math.sqrt(d2));
           if (a <= 0) continue;
-          const pi = (y - oy) * TILE_SIZE + (x - ox);
-          const m = dep[pi] + (1 - dep[pi]) * a * brush.flow;
+          const m = dep[pi] + (1 - dep[pi]) * a * flow;
           dep[pi] = m;
-          const eff = m * brush.opacity * (maskAt(selection, x, y) / 255);
+          let eff = m * opacity;
+          if (sel) eff *= sel.data[mrow + x] * INV255;
           const i = pi * 4;
-          const ba = src ? src[i + 3] / 255 : 0;
+          const ba = src ? src[i + 3] * INV255 : 0;
           if (erase) {
-            out.data[i + 3] = ba * (1 - eff) * 255;
+            o[i + 3] = ba * (1 - eff) * 255;
             continue;
           }
           const oa = eff + ba * (1 - eff);
           if (oa <= 0) continue;
           const keep = (ba * (1 - eff)) / oa;
           const add = eff / oa;
-          out.data[i] = color.r * add + (src ? src[i] : 0) * keep;
-          out.data[i + 1] = color.g * add + (src ? src[i + 1] : 0) * keep;
-          out.data[i + 2] = color.b * add + (src ? src[i + 2] : 0) * keep;
-          out.data[i + 3] = oa * 255;
+          if (src) {
+            o[i] = cr * add + src[i] * keep;
+            o[i + 1] = cg * add + src[i + 1] * keep;
+            o[i + 2] = cb * add + src[i + 2] * keep;
+          } else {
+            o[i] = cr;
+            o[i + 1] = cg;
+            o[i + 2] = cb;
+          }
+          o[i + 3] = oa * 255;
         }
       }
     }
@@ -159,7 +222,13 @@ export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
 
   return {
     tiles: writer.tiles,
-    add: (p) => interpolate(p).reduce((dirty, d) => union(dirty, dab(d)), EMPTY_RECT),
+    add(p) {
+      let dirty = EMPTY_RECT;
+      for (const d of interpolate(p)) dirty = union(dirty, dab(d));
+      return dirty;
+    },
     finish: () => writer.finish(),
   };
 }
+
+const INV255 = 1 / 255;
