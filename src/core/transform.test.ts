@@ -19,6 +19,11 @@ describe("free transform", () => {
     expect(hitTest(s0, vec(150, 30), 4)).toEqual({ kind: "rotate" });
   });
 
+  it("picks the nearest handle when several are in range", () => {
+    const small = initialTransform(rect(0, 0, 10, 10));
+    expect(hitTest(small, vec(10, 10), 6)).toEqual({ kind: "handle", hx: 1, hy: 1 });
+  });
+
   it("drags a corner, anchoring the opposite corner", () => {
     const s = dragHandle(s0, 1, 1, vec(200, 100), free);
     near(handlePoint(s, -1, -1), vec(0, 0));

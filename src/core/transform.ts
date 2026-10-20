@@ -49,10 +49,17 @@ export const HANDLES: readonly (readonly [HandleDir, HandleDir])[] = [
 
 /** `tolerance` is in document units (screen pixels ÷ zoom). */
 export function hitTest(s: TransformState, p: Vec2, tolerance: number): TransformHit {
+  let best: TransformHit | null = null;
+  let bestDist = Infinity;
   for (const [hx, hy] of HANDLES) {
     const h = handlePoint(s, hx, hy);
-    if (Math.abs(h.x - p.x) <= tolerance && Math.abs(h.y - p.y) <= tolerance) return { kind: "handle", hx, hy };
+    const d = Math.max(Math.abs(h.x - p.x), Math.abs(h.y - p.y));
+    if (d <= tolerance && d < bestDist) {
+      best = { kind: "handle", hx, hy };
+      bestDist = d;
+    }
   }
+  if (best) return best;
   const local = apply(invert(transformMatrix(s)), p);
   const { x, y, w, h } = s.source;
   const inside = local.x >= x && local.x <= x + w && local.y >= y && local.y <= y + h;
