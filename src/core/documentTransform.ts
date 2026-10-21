@@ -118,13 +118,18 @@ export interface Anchor {
   readonly y: 0 | 0.5 | 1;
 }
 
+/** Where existing content moves to (whole pixels) in a canvas resized around `anchor`. */
+export const canvasOffset = (doc: Pick<Doc, "width" | "height">, width: number, height: number, anchor: Anchor) => ({
+  x: Math.round((width - doc.width) * anchor.x),
+  y: Math.round((height - doc.height) * anchor.y),
+});
+
 /**
  * Image ▸ Canvas Size: a new canvas with the content placed by `anchor`.
  * Layers keep everything, including what falls outside the new canvas.
  */
 export function resizeCanvas(doc: Doc, width: number, height: number, anchor: Anchor, r: Rasterizers): Promise<Doc> {
-  const dx = Math.round((width - doc.width) * anchor.x);
-  const dy = Math.round((height - doc.height) * anchor.y);
+  const { x: dx, y: dy } = canvasOffset(doc, width, height, anchor);
   return transformDocument(doc, { matrix: translation(dx, dy), width, height, lengthScale: 1, filter: "nearest" }, r);
 }
 

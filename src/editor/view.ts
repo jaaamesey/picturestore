@@ -26,3 +26,27 @@ export function fitView(docW: number, docH: number, vw: number, vh: number, padd
   const z = Math.max(MIN_ZOOM, zoom);
   return { zoom: z, panX: Math.round((vw - docW * z) / 2), panY: Math.round((vh - docH * z) / 2) };
 }
+
+/**
+ * The view after the document's space is remapped by `map` (Image Size,
+ * Canvas Size), at the same zoom — as Photoshop keeps it, so 100% still
+ * means actual pixels and a resize visibly changes the image's size. The
+ * document point at the viewport's centre stays at the centre (mapped to
+ * where it went), so you keep looking at the same thing. With
+ * `centreIfFits`, an axis on which the new document fits within the
+ * viewport is centred instead.
+ */
+export function followRemap(
+  v: View,
+  viewport: { readonly width: number; readonly height: number },
+  size: { readonly width: number; readonly height: number },
+  map: (p: Vec2) => Vec2,
+  centreIfFits: boolean,
+): View {
+  const c = { x: viewport.width / 2, y: viewport.height / 2 };
+  const p = map(screenToDoc(v, c));
+  let panX = c.x - p.x * v.zoom, panY = c.y - p.y * v.zoom;
+  if (centreIfFits && size.width * v.zoom <= viewport.width) panX = (viewport.width - size.width * v.zoom) / 2;
+  if (centreIfFits && size.height * v.zoom <= viewport.height) panY = (viewport.height - size.height * v.zoom) / 2;
+  return { zoom: v.zoom, panX: Math.round(panX), panY: Math.round(panY) };
+}

@@ -1,7 +1,7 @@
 import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
 import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
-import { imageSize, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
+import { canvasOffset, imageSize, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -61,7 +61,7 @@ import { shapeGeometry, shapeStyle } from "./tools/shape";
 import type { TransformCommand } from "./tools/transform";
 import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolSettings } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
-import { fitView, nextZoomStep, prevZoomStep, screenToDoc, zoomAt } from "./view";
+import { fitView, followRemap, nextZoomStep, prevZoomStep, screenToDoc, zoomAt } from "./view";
 
 /** One open document (a tab): its history, transient preview state and viewport. */
 export interface DocumentSession {
@@ -382,12 +382,14 @@ export function createEditor() {
      * (it can't through the UI), the stale result is dropped rather than
      * overwriting newer history.
      */
-    function commitAsync(s: SessionInternals, label: string, result: Promise<Doc>, key: string | null = null) {
+    function commitAsync(s: SessionInternals, label: string, result: Promise<Doc>, key: string | null = null, landed?: () => void) {
       const base = s.doc();
       void track(result).then(
         (doc) => {
-          if (s.doc() === base) commitTo(s, label, doc, key);
-          else s.setPreview(null);
+          if (s.doc() === base) {
+            commitTo(s, label, doc, key);
+            landed?.();
+          } else s.setPreview(null);
           if (pending === 0) runShapeEdit();
         },
         (err: unknown) => {
@@ -841,7 +843,11 @@ export function createEditor() {
           return;
         }
         if (o.width === d.width && o.height === d.height && o.resolution === resolutionOf(d)) return;
-        commitAsync(s, "Image Size", imageSize(d, o, raster));
+        const sx = o.width / d.width, sy = o.height / d.height;
+        // Same zoom (as Photoshop); the centred point of the image stays centred.
+        commitAsync(s, "Image Size", imageSize(d, o, raster), null, () =>
+          s.setView(followRemap(s.view(), viewportSize(), o, (p) => ({ x: p.x * sx, y: p.y * sy }), true)),
+        );
       }),
       /**
        * Image Size's preview: what it would produce within `window` (a
@@ -864,7 +870,12 @@ export function createEditor() {
         if (!s) return;
         cancelTool();
         const d = s.doc();
-        if (width !== d.width || height !== d.height) commitAsync(s, "Canvas Size", resizeCanvas(d, width, height, anchor, raster));
+        if (width === d.width && height === d.height) return;
+        const { x: dx, y: dy } = canvasOffset(d, width, height, anchor);
+        // Same zoom; what was on screen stays put, with the new canvas around it.
+        commitAsync(s, "Canvas Size", resizeCanvas(d, width, height, anchor, raster), null, () =>
+          s.setView(followRemap(s.view(), viewportSize(), { width, height }, (p) => ({ x: p.x + dx, y: p.y + dy }), false)),
+        );
       }),
       updateSmartObject,
 

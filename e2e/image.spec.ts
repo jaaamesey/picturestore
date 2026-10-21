@@ -170,3 +170,43 @@ test("Image Size after its preview resizes the whole image, not the previewed pa
   expect(await cpuPixel(page, 10, 10)).toEqual([255, 0, 0, 255]);
   expect(await cpuPixel(page, 890, 590)).toEqual([0, 0, 255, 255]);
 });
+
+test("Image Size keeps the zoom and what you were looking at; Canvas Size keeps content still", async ({ page }) => {
+  await newDocument(page, 2000, 1500);
+  await rectOnLayer(page, 1500, 1000, 1520, 1020, "ff0000"); // a small square off-centre
+  type View = { zoom: number; panX: number; panY: number };
+  const ed = () => page.evaluate(() => {
+    const e = window.__ps!.editor as { active(): { view(): View }; viewportSize(): { width: number; height: number }; setView(v: View): void };
+    return { view: e.active().view(), viewport: e.viewportSize() };
+  });
+  // Zoom in on the square: 400%, centred on it.
+  const { viewport } = await ed();
+  await page.evaluate(([w, h]) => {
+    (window.__ps!.editor as { setView(v: View): void }).setView({ zoom: 4, panX: w / 2 - 1510 * 4, panY: h / 2 - 1010 * 4 });
+  }, [viewport.width, viewport.height]);
+  await page.keyboard.press("Alt+Control+i");
+  await page.getByTestId("image-size-width-unit").selectOption("percent");
+  await page.getByTestId("image-size-width").fill("50");
+  await page.getByTestId("image-size-width").press("Tab");
+  await page.getByTestId("image-size-ok").click();
+  await expectHistory(page, "Image Size");
+  // (Small enough to fit, an axis would be centred instead; this one isn't.)
+  const after = await ed();
+  expect(after.view.zoom).toBe(4);
+  // The square's centre (now 755, 505) is still in the middle of the viewport.
+  expect(Math.abs(after.view.panX + 755 * 4 - viewport.width / 2)).toBeLessThanOrEqual(1);
+  expect(Math.abs(after.view.panY + 505 * 4 - viewport.height / 2)).toBeLessThanOrEqual(1);
+
+  // Canvas Size: 100 px more on the left; the square doesn't move on screen.
+  await page.keyboard.press("Alt+Control+c");
+  await page.getByTestId("canvas-relative").check();
+  await page.getByTestId("canvas-width").fill("100");
+  await page.getByTestId("canvas-width").press("Tab");
+  await page.getByTestId("canvas-anchor-1-0.5").click();
+  await page.getByTestId("canvas-ok").click();
+  await expectHistory(page, "Canvas Size");
+  const grown = await ed();
+  expect(grown.view.zoom).toBe(4);
+  expect(grown.view.panX + 855 * 4).toBeCloseTo(after.view.panX + 755 * 4, 0);
+  expect(grown.view.panY).toBe(after.view.panY);
+});
