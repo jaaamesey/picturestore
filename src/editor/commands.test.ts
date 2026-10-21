@@ -58,3 +58,10 @@ it("steps brush sizes like Photoshop", () => {
   expect(stepBrushSize(1, -1)).toBe(1);
   expect(stepBrushSize(200, 1)).toBe(225);
 });
+
+it("matches bracket shortcuts by physical key, with or without Shift", () => {
+  const key = (k: string, code: string, shift = false) => ({ key: k, code, ctrlKey: true, metaKey: false, shiftKey: shift, altKey: false });
+  expect(findCommand(key("]", "BracketRight"))).toBe("layer.bringForward");
+  expect(findCommand(key("}", "BracketRight", true))).toBe("layer.bringToFront");
+  expect(findCommand(key("{", "BracketLeft", true))).toBe("layer.sendToBack");
+});

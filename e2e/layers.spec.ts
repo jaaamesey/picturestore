@@ -46,22 +46,57 @@ test("drag and drop places layers above or below the row, in either direction", 
   await row("Layer 1").dragTo(row("Layer 2"), { targetPosition: upperHalf });
   expect(await names()).toEqual(["Layer 1", "Layer 2", "Background", "Layer 3"]);
   await expect(page.getByTestId("history-entry").last()).toHaveText("Layer Order");
+  // Dropped rows settle into their slots and nothing is left offset or lifted.
+  const rows = page.getByTestId("layer-row");
+  await expect.poll(() => rows.evaluateAll((r) => r.flatMap((x) => x.getAnimations()).length)).toBe(0);
+  expect(await rows.evaluateAll((r) => r.map((x) => [getComputedStyle(x).transform, x.hasAttribute("data-dragging")]))).toEqual(
+    Array(4).fill(["none", false]),
+  );
 });
 
-test("shows an insertion line while dragging a layer", async ({ page }) => {
+test("while dragging, other rows slide aside to open the gap; Escape cancels and everything settles", async ({ page }) => {
   await newDocument(page);
-  await page.getByTestId("new-layer").click();
-  const source = page.locator('[data-layer-name="Background"]');
-  const target = page.locator('[data-layer-name="Layer 1"]');
-  const dt = await page.evaluateHandle(() => new DataTransfer());
-  await source.dispatchEvent("dragstart", { dataTransfer: dt });
-  const box = (await target.boundingBox())!;
-  await target.dispatchEvent("dragover", { dataTransfer: dt, clientX: box.x + 20, clientY: box.y + 5 });
-  await expect(target).toHaveAttribute("data-drop", "above");
-  await target.dispatchEvent("dragover", { dataTransfer: dt, clientX: box.x + 20, clientY: box.y + box.height - 5 });
-  await expect(target).toHaveAttribute("data-drop", "below");
-  await source.dispatchEvent("dragend", { dataTransfer: dt });
-  await expect(target).not.toHaveAttribute("data-drop");
+  for (let i = 0; i < 2; i++) await page.getByTestId("new-layer").click();
+  const row = (n: string) => page.locator(`[data-layer-name="${n}"]`);
+  const names = () => page.getByTestId("layer-row").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-layer-name")));
+  const box = (await row("Background").boundingBox())!;
+  await page.mouse.move(box.x + 60, box.y + box.height / 2);
+  await page.mouse.down();
+  // Up past the middle of "Layer 1" (one row up), not yet that of "Layer 2".
+  await page.mouse.move(box.x + 60, box.y + box.height / 2 - box.height * 1.3, { steps: 6 });
+  await expect(row("Background")).toHaveAttribute("data-dragging", "");
+  await expect.poll(() => row("Layer 1").evaluate((el) => el.style.transform)).toBe(`translateY(${box.height}px)`);
+  await expect.poll(() => row("Layer 2").evaluate((el) => el.style.transform)).toBe("");
+
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await expect(row("Background")).not.toHaveAttribute("data-dragging");
+  expect(await names()).toEqual(["Layer 2", "Layer 1", "Background"]);
+  // Settled: no animations left, nothing offset.
+  await expect.poll(() => page.getByTestId("layer-row").evaluateAll((rows) => rows.flatMap((r) => r.getAnimations()).length)).toBe(0);
+  const offsets = await page.getByTestId("layer-row").evaluateAll((rows) => rows.map((r) => getComputedStyle(r).transform));
+  expect(offsets.every((t) => t === "none")).toBe(true);
+  await expect(page.getByTestId("history-entry")).toHaveCount(3); // New + 2 × New Layer: nothing recorded
+});
+
+test("reorders from anywhere animate, interrupt smoothly, and always end in place", async ({ page }) => {
+  await newDocument(page);
+  for (let i = 0; i < 3; i++) await page.getByTestId("new-layer").click();
+  const names = () => page.getByTestId("layer-row").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-layer-name")));
+  await page.getByTestId("layer-row").last().click(); // Background
+  await page.keyboard.press("Control+]");
+  // The moved rows are animating towards their new places…
+  const running = () => page.getByTestId("layer-row").evaluateAll((rows) => rows.filter((r) => r.getAnimations().length > 0).length);
+  expect(await running()).toBeGreaterThan(0);
+  // …and a reorder mid-flight continues from where they're drawn.
+  await page.keyboard.press("Control+Shift+]");
+  expect(await names()).toEqual(["Background", "Layer 3", "Layer 2", "Layer 1"]);
+  await expect.poll(running).toBe(0);
+  const tops = await page.getByTestId("layer-row").evaluateAll((rows) => rows.map((r) => Math.round(r.getBoundingClientRect().top - rows[0].getBoundingClientRect().top)));
+  expect(tops).toEqual([0, 44, 88, 132]);
+  await expect(page.getByTestId("history-entry").last()).toHaveText("Bring to Front");
+  await page.keyboard.press("Control+z");
+  expect(await names()).toEqual(["Layer 3", "Layer 2", "Background", "Layer 1"]);
 });
 
 test("GPU compositing matches the CPU reference for every blend mode", async ({ page }) => {

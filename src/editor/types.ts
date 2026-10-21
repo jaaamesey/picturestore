@@ -128,6 +128,12 @@ export interface ToolContext {
 
 export interface Tool {
   readonly id: ToolId;
+  /**
+   * Only the latest pointer position matters (the tool shows a state, not a
+   * path), so the viewport delivers one move per frame instead of every
+   * coalesced event. Painting tools need them all.
+   */
+  readonly latestMoveOnly?: boolean;
   cursor?(ctx: ToolContext, e: ToolEvent | null): string;
   down?(ctx: ToolContext, e: ToolEvent): void;
   move?(ctx: ToolContext, e: ToolEvent): void;

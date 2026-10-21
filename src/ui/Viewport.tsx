@@ -94,8 +94,10 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       return;
     }
     if (toolPointer === e.pointerId) {
-      // Coalesced events give painting full input resolution at any frame rate.
-      for (const c of e.getCoalescedEvents?.() ?? [e]) editor.pointerMove(toEvent(c));
+      // Coalesced events give painting full input resolution at any frame rate;
+      // tools that only show a state skip to the latest.
+      const events = editor.latestMoveOnly() ? [e] : (e.getCoalescedEvents?.() ?? [e]);
+      for (const c of events) editor.pointerMove(toEvent(c));
     }
     setHover(toEvent(e));
   };

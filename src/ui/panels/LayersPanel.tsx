@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, useContext } from "solid-js";
+import { For, Show, createEffect, createSignal, onSettled, useContext } from "solid-js";
 import { BLEND_MODES, type BlendMode } from "../../core/blend";
 import { activeLayer, type Layer } from "../../core/document";
 import { PREVIEW_FACTOR, TILE_SIZE, keyX, keyY, tilePreview, type TileMap } from "../../core/tiles";
@@ -6,6 +6,7 @@ import { AppContext } from "../context";
 import { LAYER_MENU } from "../MenuBar";
 import { IconButton, NumberField } from "../controls";
 import { Icon } from "../icons";
+import { createSortable } from "../sortable";
 
 const THUMB = 36;
 
@@ -52,31 +53,11 @@ function Thumbnail(props: { tiles: TileMap; width: number; height: number }) {
   );
 }
 
-type Placement = "above" | "below";
-
-/** Where a dragged layer would land: which row, and which side of it (from the pointer's half). */
-interface DropTarget {
-  readonly id: string;
-  readonly placement: Placement;
-}
-
-const DRAG_TYPE = "application/x-picturestore-layer";
-
-/** Upper half of a row = above it; lower half = below. */
-function placementAt(e: DragEvent): Placement {
-  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  return e.clientY < r.top + r.height / 2 ? "above" : "below";
-}
-
 function LayerRow(props: {
   layer: Layer;
   active: boolean;
   width: number;
   height: number;
-  drop: Placement | null;
-  onDragOver: (placement: Placement) => void;
-  onDrop: (draggedId: string, placement: Placement) => void;
-  onDragEnd: () => void;
 }) {
   const { editor, openMenu } = useContext(AppContext);
   const [editing, setEditing] = createSignal(false);
@@ -87,14 +68,13 @@ function LayerRow(props: {
       data-testid="layer-row"
       data-layer-name={props.layer.name}
       data-kind={props.layer.content.kind}
-      draggable={editing() ? "false" : "true"}
-      data-drop={props.drop ?? undefined}
+      data-layer-id={props.layer.id}
+      data-editing={editing() ? "" : undefined}
       class={[
         "relative flex h-11 items-center gap-1.5 border-b border-line px-1.5",
-        // Insertion line, as in Photoshop.
-        { "before:absolute before:inset-x-0 before:-top-px before:h-0.5 before:bg-accent": props.drop === "above" },
-        { "after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-accent": props.drop === "below" },
         props.active ? "bg-accent-soft" : "hover:bg-raised",
+        // Lifted while dragged (see ui/sortable.ts).
+        "data-dragging:z-10 data-dragging:cursor-grabbing data-dragging:bg-raised data-dragging:shadow-[0_6px_16px_rgba(0,0,0,0.45)]",
       ]}
       onClick={() => editor.selectLayer(props.layer.id)}
       onContextMenu={(e) => {
@@ -102,22 +82,6 @@ function LayerRow(props: {
         editor.selectLayer(props.layer.id);
         openMenu(e.clientX, e.clientY, LAYER_MENU);
       }}
-      onDragStart={(e) => {
-        e.dataTransfer!.setData(DRAG_TYPE, props.layer.id);
-        e.dataTransfer!.effectAllowed = "move";
-      }}
-      onDragOver={(e) => {
-        if (!e.dataTransfer?.types.includes(DRAG_TYPE)) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        props.onDragOver(placementAt(e));
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        const id = e.dataTransfer!.getData(DRAG_TYPE);
-        if (id) props.onDrop(id, placementAt(e));
-      }}
-      onDragEnd={() => props.onDragEnd()}
     >
       <button
         type="button"
@@ -178,7 +142,22 @@ export function LayersPanel() {
   const current = () => (doc() ? activeLayer(doc()!) : undefined);
   // Panels list layers top-first; documents store them bottom-first.
   const rows = () => (doc() ? doc()!.layers.map((layer, index) => ({ layer, index })).reverse() : []);
-  const [dropTarget, setDropTarget] = createSignal<DropTarget | null>(null);
+  let list!: HTMLDivElement;
+
+  // Drag to reorder, with layout changes from anywhere (undo, Arrange) animated too.
+  onSettled(() => {
+    const sortable = createSortable(list, {
+      items: "[data-testid=layer-row]",
+      key: (el) => el.dataset.layerId ?? null,
+      canStart: (e) => !(e.target as Element).closest("button, input, select") && !(e.target as Element).closest("[data-editing]"),
+      onSort(id, from, to) {
+        // Rows are listed top-first; dropping past a row puts it below that row, and vice versa.
+        const target = rows()[to]?.layer.id;
+        if (target) editor.moveLayer(id, target, to > from ? "below" : "above");
+      },
+    });
+    return () => sortable.dispose();
+  });
 
   return (
     <section class="flex min-h-0 flex-1 flex-col" data-testid="layers-panel">
@@ -208,24 +187,15 @@ export function LayersPanel() {
         )}
       </Show>
       <div
-        class="min-h-0 flex-1 overflow-y-auto"
+        ref={list}
+        class="relative min-h-0 flex-1 overflow-y-auto"
         role="listbox"
         aria-label="Layers"
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropTarget(null);
-        }}
       >
         <For each={rows()} keyed={(r) => r.layer.id}>
           {(r) => (
             <LayerRow
               layer={r().layer}
-              drop={dropTarget()?.id === r().layer.id ? dropTarget()!.placement : null}
-              onDragOver={(placement) => setDropTarget({ id: r().layer.id, placement })}
-              onDrop={(id, placement) => {
-                setDropTarget(null);
-                editor.moveLayer(id, r().layer.id, placement);
-              }}
-              onDragEnd={() => setDropTarget(null)}
               active={r().layer.id === doc()?.activeLayerId}
               width={doc()!.width}
               height={doc()!.height}

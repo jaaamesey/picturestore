@@ -127,6 +127,10 @@ export const COMMANDS = {
     },
   },
 
+  "layer.bringToFront": { label: "Bring to Front", shortcuts: ["Mod+Shift+]"], run: (ed) => ed.arrange("front"), enabled: hasDoc },
+  "layer.bringForward": { label: "Bring Forward", shortcuts: ["Mod+]"], run: (ed) => ed.arrange("forward"), enabled: hasDoc },
+  "layer.sendBackward": { label: "Send Backward", shortcuts: ["Mod+["], run: (ed) => ed.arrange("backward"), enabled: hasDoc },
+  "layer.sendToBack": { label: "Send to Back", shortcuts: ["Mod+Shift+["], run: (ed) => ed.arrange("back"), enabled: hasDoc },
   "layer.viaCopy": { label: "Layer via Copy", shortcuts: ["Mod+J"], run: (ed) => ed.layerViaCopy(), enabled: hasDoc },
   "layer.viaCut": { label: "Layer via Cut", shortcuts: ["Mod+Shift+J"], run: (ed) => ed.layerViaCut(), enabled: hasSelection },
   "layer.convertToSmart": {
@@ -185,6 +189,8 @@ export function matchShortcut(shortcut: string, e: KeyLike): boolean {
   if (/^[a-z]$/i.test(key)) return e.code === `Key${key.toUpperCase()}`;
   if (/^[0-9]$/.test(key)) return e.code === `Digit${key}` || e.key === key;
   if (key === "=") return e.key === "=" || e.key === "+";
+  // Brackets by physical key: Shift turns them into braces.
+  if (key === "[" || key === "]") return e.code === (key === "[" ? "BracketLeft" : "BracketRight");
   return e.key.toLowerCase() === key.toLowerCase();
 }
 

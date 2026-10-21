@@ -15,6 +15,8 @@ import {
   fillTiles,
   flatten,
   mergeDown,
+  layerIndex,
+  moveLayer as moveLayerTo,
   moveLayerRelative,
   nextLayerName,
   rasterizeLayer,
@@ -665,6 +667,8 @@ export function createEditor() {
       // Pointer input, already converted to document space by the viewport.
       busy,
       pointerDown: whenIdle((e: ToolEvent) => withTool((ctx) => tools.byId[currentTool].down?.(ctx, e))),
+      /** Whether the current tool wants only the latest of a frame's pointer moves. */
+      latestMoveOnly: () => !!tools.byId[currentTool].latestMoveOnly,
       pointerMove: whenIdle((e: ToolEvent) => withTool((ctx) => tools.byId[currentTool].move?.(ctx, e))),
       pointerUp: whenIdle((e: ToolEvent) => withTool((ctx) => tools.byId[currentTool].up?.(ctx, e))),
       cursor: (e: ToolEvent | null) => {
@@ -817,6 +821,15 @@ export function createEditor() {
       mergeDown: whenIdle(() => layerEdit("Merge Down", (d, l) => mergeDown(d, l.id))),
       convertToSmartObject: whenIdle(() => layerEdit("Convert to Smart Object", (d, l) => convertToSmartObject(d, l.id))),
       rasterizeLayer: whenIdle(() => layerEdit("Rasterize Layer", (d, l) => rasterizeLayer(d, l.id))),
+      /** Layer ▸ Arrange: up/down one step in the stack, or to the top/bottom. */
+      arrange: whenIdle((to: "forward" | "backward" | "front" | "back") => {
+        const labels = { forward: "Bring Forward", backward: "Send Backward", front: "Bring to Front", back: "Send to Back" };
+        layerEdit(labels[to], (d, l) => {
+          const i = layerIndex(d, l.id);
+          const target = { forward: i + 1, backward: i - 1, front: d.layers.length - 1, back: 0 }[to];
+          return target === i || target < 0 || target >= d.layers.length ? d : moveLayerTo(d, l.id, target);
+        });
+      }),
       /** Drops a layer directly above or below another (Layers panel drag and drop). */
       moveLayer: whenIdle((id: string, targetId: string, placement: "above" | "below") =>
         edit("Layer Order", (d) => moveLayerRelative(d, id, targetId, placement)),

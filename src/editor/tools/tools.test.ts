@@ -325,6 +325,20 @@ describe("shape tools", () => {
     expect(px.s.history).toEqual([]);
   });
 
+  it("previews shape moves by carrying its pixels on the GPU, then commits the vector exactly", async () => {
+    const h = harness(blank());
+    await h.drag("rectangle", [10, 10], [30, 30]);
+    const move = h.tools.byId.move;
+    move.down!(h.ctx(), h.ev(20, 20));
+    move.move!(h.ctx(), h.ev(45, 25));
+    // No re-rasterising while dragging: the layer's pixels float through a mapping.
+    expect(layerOf(h.s.preview!).tiles.size).toBe(0);
+    expect(h.s.floating!.mapping.quad[0]).toEqual({ x: 35, y: 15 });
+    move.up!(h.ctx(), h.ev(45, 25));
+    await h.s.pending;
+    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(35, 15, 20, 20));
+  });
+
   it("moves a shape by its placement, re-rendering it exactly", async () => {
     const h = harness(blank());
     await h.drag("rectangle", [10, 10], [30, 30]);

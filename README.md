@@ -51,12 +51,16 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   (U / Shift+U, toolbar flyout). Shift constrains, Alt draws from the centre. Shape mode makes live shape
   layers with fill and stroke (width, inside/centre/outside); with a shape selected the options bar edits it.
   Pixels mode fills into the active layer. Shapes transform exactly (vectors are re-rendered, strokes keep
-  their width).
+  their width); while dragging, their pixels are carried through the transform on the GPU, as raster layers'
+  are, so moving large shapes is as smooth.
 - **Clipboard**: Cut, Copy, Copy Merged, Paste (centred on the selection or the visible canvas) and Paste in
   Place. Copies also go to the system clipboard as PNG; images pasted from other apps become new layers (or a
   new document when none is open). Layer via Copy / Cut (Ctrl+J / Ctrl+Shift+J).
-- **Layers**: add, duplicate, delete, merge down, reorder (drag), rename, visibility, opacity and 20 blend
-  modes; right-click a layer (or the canvas) for a context menu.
+- **Layers**: add, duplicate, delete, merge down, rename, visibility, opacity and 20 blend modes; right-click a
+  layer (or the canvas) for a context menu. Reorder by dragging — the row lifts and follows the pointer while
+  the others slide aside, the list auto-scrolls, Esc cancels — or with Layer ▸ Arrange (Ctrl+[ / Ctrl+],
+  with Shift for back/front). Every reorder animates, whatever caused it (`ui/sortable.ts`: FLIP transforms
+  over the real layout, so motion can't leave anything misplaced; respects reduced motion).
 - **History**: undo/redo with a clickable History panel, limited by History States (default 50) and Memory Usage.
 - **Preferences** (Ctrl+K, Edit ▸ Preferences), organised as Photoshop's: General (reset), File Handling (recovery
   interval) and Performance (Memory Usage, History States, display quality). Kept in the browser.

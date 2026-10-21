@@ -90,6 +90,7 @@ export function createShapeTool(id: ShapeToolId): Tool {
 
   return {
     id,
+    latestMoveOnly: true,
     cursor: () => "crosshair",
     down(ctx, e) {
       if (ctx.settings.shape.mode === "pixels") {

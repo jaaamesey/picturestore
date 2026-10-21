@@ -81,6 +81,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "layer.viaCopy",
       "layer.viaCut",
       "-",
+      { submenu: "Arrange", items: ["layer.bringToFront", "layer.bringForward", "layer.sendBackward", "layer.sendToBack"] },
       { submenu: "Smart Objects", items: ["layer.convertToSmart", "layer.editContents"] },
       "layer.rasterize",
       "-",
