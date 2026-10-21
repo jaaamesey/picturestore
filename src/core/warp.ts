@@ -278,3 +278,29 @@ export function mapPoint(m: Mapping, s: number, t: number): Vec2 {
   const q = m.patch ? evalPatch(m.patch, s, t) : vec(s, t);
   return project(H, q.x, q.y);
 }
+
+/** Cubic blossom f(u₁, u₂, u₃): de Casteljau with a different parameter at each level. */
+function blossom(p: readonly Vec2[], u: readonly [number, number, number]): Vec2 {
+  let pts = p;
+  for (const t of u) pts = pts.slice(1).map((q, i) => vec(pts[i].x + (q.x - pts[i].x) * t, pts[i].y + (q.y - pts[i].y) * t));
+  return pts[0];
+}
+
+/** Control points of the same cubic over [a, b] (which may extend past [0, 1]). */
+const reparameterize = (p: readonly Vec2[], a: number, b: number): Vec2[] => [
+  blossom(p, [a, a, a]),
+  blossom(p, [a, a, b]),
+  blossom(p, [a, b, b]),
+  blossom(p, [b, b, b]),
+];
+
+/**
+ * The patch restricted (or extended) to [s0, s1] × [t0, t1], as a patch over
+ * the unit square. Exact: a tensor-product cubic is still one under an affine
+ * change of parameter, and blossoming gives its control points.
+ */
+export function reparameterizePatch(p: Patch, s0: number, s1: number, t0: number, t1: number): Patch {
+  const rows = [0, 1, 2, 3].map((j) => reparameterize(p.slice(j * 4, j * 4 + 4), s0, s1));
+  const cols = [0, 1, 2, 3].map((i) => reparameterize(rows.map((r) => r[i]), t0, t1));
+  return Array.from({ length: 16 }, (_, k) => cols[k % 4][Math.floor(k / 4)]);
+}

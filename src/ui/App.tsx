@@ -27,6 +27,7 @@ import { activeLayer, type Doc } from "../core/document";
 import type { PreferencesPane } from "../editor/preferences";
 import { listRecovery, newRecoveryKey, removeRecovery, saveRecovery } from "../io/recovery";
 import { PreferencesDialog } from "./PreferencesDialog";
+import { CanvasSizeDialog } from "./CanvasSizeDialog";
 import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
@@ -199,6 +200,7 @@ export function App() {
   const confirmDialog = (message: string) => new Promise<boolean>((resolve) => setConfirmation({ message, resolve }));
   editor.onConfirm(confirmDialog);
   const [prefsPane, setPrefsPane] = createSignal<PreferencesPane | null>(null);
+  const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
 
   // --- Recovery information ------------------------------------------------------
   // Every so often (Preferences ▸ File Handling), each document with unsaved
@@ -276,6 +278,7 @@ export function App() {
     cut: () => toSystemClipboard(editor.cut()),
     paste: (inPlace) => void pasteFromMenu(inPlace),
     preferences: (pane = "general") => setPrefsPane(pane),
+    canvasSize: () => setCanvasSize(editor.active() as DocumentSession | null),
   };
   const app: AppValue = { editor, shell, notify, openMenu: (x, y, items) => setMenu({ x, y, items }) };
 
@@ -291,7 +294,7 @@ export function App() {
     const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew() || confirmation() || prefsPane()) return;
+      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize()) return;
       const id = findCommand(e);
       if (id === "edit.paste" || id === "edit.pasteInPlace") {
         // Let the browser deliver a paste event with the clipboard's contents.
@@ -439,6 +442,16 @@ export function App() {
       </Show>
       <Show when={prefsPane()} keyed>
         {(pane) => <PreferencesDialog pane={pane} onClose={() => setPrefsPane(null)} />}
+      </Show>
+      <Show when={canvasSize()} keyed>
+        {(s) => (
+          <CanvasSizeDialog
+            width={s.doc().width}
+            height={s.doc().height}
+            onApply={(w, h, anchor) => editor.active() === s && editor.canvasSize(w, h, anchor)}
+            onClose={() => setCanvasSize(null)}
+          />
+        )}
       </Show>
       <Show when={confirmation()}>{(c) => <ConfirmDialog message={c().message} onAnswer={answer} />}</Show>
       <Show when={message()}>

@@ -1,6 +1,6 @@
 import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
-import { smartObjectLayer, withContent } from "../core/content";
+import { resizeCanvas, resizedPlacement, smartObjectLayer, withContent, type Anchor } from "../core/content";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -581,8 +581,8 @@ export function createEditor() {
         let d = pd;
         for (const l of pd.layers) {
           if (l.content.kind !== "smart" || l.content.source.id !== link.sourceId) continue;
-          // The placement keeps its quad, so the new contents fill the same area.
-          const placement = { ...l.content.placement, source: rect(0, 0, cd.width, cd.height) };
+          // As in Photoshop: same transform, centred where the old contents were.
+          const placement = resizedPlacement(l.content.placement, cd.width, cd.height);
           const { content, tiles } = await withContent(l, { kind: "smart", source, placement }, clip, resample);
           d = updateLayer(d, l.id, { content, tiles });
         }
@@ -779,6 +779,14 @@ export function createEditor() {
         if (!isEmpty(bounds)) paste({ tiles, bounds }, false);
       }),
       placeEmbedded: whenIdle(placeEmbedded),
+      /** Image ▸ Canvas Size. */
+      canvasSize: whenIdle((width: number, height: number, anchor: Anchor) => {
+        const s = active();
+        if (!s) return;
+        cancelTool();
+        const d = s.doc();
+        if (width !== d.width || height !== d.height) commitAsync(s, "Canvas Size", resizeCanvas(d, width, height, anchor, resample));
+      }),
       updateSmartObject,
 
       // Select

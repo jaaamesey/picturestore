@@ -42,7 +42,10 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
 - **Smart objects**: File ▸ Place Embedded (or drop an image onto the canvas) places an image as an embedded
   smart object — centred, fitted to the canvas, in a Free Transform session (Esc discards it). Transforms
   re-render from the embedded source, so scaling down and back up loses nothing. Convert to Smart Object,
-  Rasterize Layer, and Edit Contents (opens the contents as a document; saving it updates every instance).
+  Rasterize Layer, and Edit Contents (opens the contents as a document; saving it updates every instance). If
+  the contents' canvas size changes, the layer keeps its transform — same scale, rotation, perspective and warp
+  — with the new contents centred where the old ones were, as in Photoshop.
+- **Image ▸ Canvas Size** (Alt+Ctrl+C): new width/height, Relative, and a 3×3 anchor.
   Pixel tools on a smart object or shape ask to rasterize it first, with Photoshop's prompts.
 - **Shapes**: Rectangle (corner radius), Ellipse, Triangle, Polygon (sides, star ratio) and Line (weight) tools
   (U / Shift+U, toolbar flyout). Shift constrains, Alt draws from the centre. Shape mode makes live shape

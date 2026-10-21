@@ -154,3 +154,40 @@ test("copy and paste: our own copies and images from other applications", async 
   await expect(rows(page)).toHaveCount(4);
   expect(await cpuPixel(page, 200, 150)).toEqual([0, 0, 255, 255]);
 });
+
+test("changing a smart object's canvas in Edit Contents keeps its scale, centred where it was (as Photoshop does)", async ({ page }) => {
+  await newDocument(page, 400, 300);
+  await rectOnLayer(page, 100, 100, 200, 200, "ff0000");
+  await rows(page).first().click({ button: "right" });
+  await page.getByTestId("context-menu").getByText("Convert to Smart Object").click();
+  // Scale it 2× about its centre (150, 150): it now covers 50–250.
+  await page.keyboard.press("Alt+Control+t");
+  await page.getByTestId("transform-w").fill("200");
+  await page.getByTestId("transform-w").press("Enter");
+  await page.getByTestId("transform-commit").click();
+  await expectHistory(page, "Free Transform");
+  expect(await cpuPixel(page, 60, 150)).toEqual([255, 0, 0, 255]);
+
+  await rows(page).first().click({ button: "right" });
+  await page.getByTestId("context-menu").getByText("Edit Contents").click();
+  await expect(page.getByTestId("doc-tab")).toHaveCount(2);
+  // Canvas Size: 100 px more on the right (anchored left).
+  await page.keyboard.press("Alt+Control+c");
+  await page.getByTestId("canvas-relative").check();
+  await page.getByTestId("canvas-width").fill("100");
+  await page.getByTestId("canvas-width").press("Tab");
+  await page.getByTestId("canvas-anchor-0-0.5").click();
+  await page.getByTestId("canvas-ok").click();
+  await expectHistory(page, "Canvas Size");
+  await page.keyboard.press("Control+s");
+  await page.getByTestId("doc-tab").first().click();
+  await expectHistory(page, "Update Smart Object");
+
+  // Still 2× (200 source px → 400 doc px), centred on 150: the red half now spans -50–150.
+  expect(await cpuPixel(page, 10, 150)).toEqual([255, 0, 0, 255]);
+  expect(await cpuPixel(page, 140, 150)).toEqual([255, 0, 0, 255]);
+  expect(await cpuPixel(page, 200, 150)).toEqual([255, 255, 255, 255]);
+  // Height unchanged: 50–250.
+  expect(await cpuPixel(page, 100, 40)).toEqual([255, 255, 255, 255]);
+  expect(await cpuPixel(page, 100, 60)).toEqual([255, 0, 0, 255]);
+});

@@ -13,6 +13,8 @@ export interface Shell {
   exportAs(format: "png" | "jpeg" | "webp"): void;
   /** Edit ▸ Preferences, optionally opening a given pane. */
   preferences(pane?: PreferencesPane): void;
+  /** Image ▸ Canvas Size dialog. */
+  canvasSize(): void;
   /** File ▸ Place Embedded: picks an image and places it as a smart object. */
   placeEmbedded(): void;
   /** Opens the active smart object's contents as a document. */
@@ -107,6 +109,9 @@ export const COMMANDS = {
   },
   "edit.transform.flipHorizontal": { label: "Flip Horizontal", run: (ed) => ed.transformCommand("flip-horizontal"), enabled: hasDoc },
   "edit.transform.flipVertical": { label: "Flip Vertical", run: (ed) => ed.transformCommand("flip-vertical"), enabled: hasDoc },
+
+  // Image
+  "image.canvasSize": { label: "Canvas Size…", shortcuts: ["Alt+Mod+C"], run: (_, s) => s.canvasSize(), enabled: hasDoc },
 
   // Layer
   "layer.new": { label: "New Layer", shortcuts: ["Mod+Shift+N"], run: (ed) => ed.newLayer(), enabled: hasDoc },

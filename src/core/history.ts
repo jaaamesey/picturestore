@@ -26,7 +26,8 @@ export interface HistoryLimits {
   readonly bytes: number;
 }
 
-export const DEFAULT_LIMITS: HistoryLimits = { steps: 50, bytes: 1024 ** 3 };
+/** The editor sets both from Preferences ▸ Performance (History States, Memory Usage). */
+export const DEFAULT_LIMITS: HistoryLimits = { steps: 50, bytes: Infinity };
 
 const TILE_BYTES = 256 * 256 * 4;
 

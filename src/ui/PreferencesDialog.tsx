@@ -157,7 +157,10 @@ export function PreferencesDialog(props: { pane: PreferencesPane; onClose: () =>
                   value={draft().memoryUsageMB}
                   onInput={(e) => set({ memoryUsageMB: e.currentTarget.valueAsNumber })}
                 />
-                <p class="text-dim">Open documents and their history share this. Past it, the oldest history states are freed.</p>
+                <p class="text-dim">
+                  The memory open documents and their undo history may use. Past it, the oldest history states are freed (the
+                  documents themselves never are).
+                </p>
               </Group>
               <Group title="History & Cache">
                 <NumberField
