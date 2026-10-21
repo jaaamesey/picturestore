@@ -4,7 +4,7 @@ import { intersect, isEmpty, rect, union, type Rect } from "./geometry";
 import type { Mask } from "./selection";
 import type { ShapeGeometry, ShapeStyle } from "./shape";
 import type { TransformState } from "./transform";
-import { EMPTY_TILES, clipTiles, contentBounds, readSpans, tileGridBounds, tileWriter, tilesFromImage, translateTiles, writeSpans, type TileMap } from "./tiles";
+import { NO_PIXELS, clipPixels, contentBounds, readSpans, storedBounds, tileWriter, pixelsFromImage, translatePixels, writeSpans, type Pixels } from "./pixels";
 import { quadOf } from "./warp";
 
 /** Where a smart object's or shape's source box lands in the document. */
@@ -17,7 +17,7 @@ export interface SmartSource {
   readonly width: number;
   readonly height: number;
   /** Source pixels, with the top-left at (0, 0). */
-  readonly tiles: TileMap;
+  readonly pixels: Pixels;
   /** The original encoded file (PNG, JPEG, PSD…), embedded verbatim when saving to PSD. */
   readonly file: { readonly bytes: Uint8Array; readonly type: string } | null;
 }
@@ -25,7 +25,7 @@ export interface SmartSource {
 /**
  * What a layer is. Pixel layers are edited directly; smart objects and
  * shapes are rendered from a source through a placement, so transforming
- * them never loses quality. `Layer.tiles` always holds the rendered pixels.
+ * them never loses quality. `Layer.pixels` always holds the rendered pixels.
  */
 export type LayerContent =
   | { readonly kind: "pixels" }
@@ -42,7 +42,7 @@ export interface Layer {
   readonly opacity: number;
   readonly blendMode: BlendMode;
   /** Rendered pixels (for smart objects and shapes, a cache of their content clipped to the canvas). */
-  readonly tiles: TileMap;
+  readonly pixels: Pixels;
   readonly content: LayerContent;
 }
 
@@ -54,7 +54,7 @@ export interface Guide {
 
 /**
  * An immutable document snapshot. Every edit produces a new Doc that shares
- * unchanged layers and tiles with its predecessor, so history is just a list
+ * unchanged layers and pixel storage with its predecessor, so history is just a list
  * of snapshots.
  */
 export interface Doc {
@@ -84,7 +84,7 @@ export const newSourceId = (): string => crypto.randomUUID();
 export const docRect = (d: Pick<Doc, "width" | "height">): Rect => rect(0, 0, d.width, d.height);
 
 export function createLayer(props: Partial<Layer> & Pick<Layer, "name">): Layer {
-  return { id: newId(), visible: true, opacity: 1, blendMode: "normal", tiles: EMPTY_TILES, content: PIXELS, ...props };
+  return { id: newId(), visible: true, opacity: 1, blendMode: "normal", pixels: NO_PIXELS, content: PIXELS, ...props };
 }
 
 /** Packs an opaque colour as a little-endian RGBA u32. */
@@ -95,42 +95,49 @@ const packOpaque = (c: RGB) => ((255 << 24) | (c.b << 16) | (c.g << 8) | c.r) >>
  * and the selection's coverage. Fully covered opaque spans are written a
  * word at a time.
  */
-export function fillTiles(base: TileMap, area: Rect, color: RGB, mask: Mask | null = null, opacity = 1): TileMap {
+export function fillPixels(base: Pixels, area: Rect, color: RGB, mask: Mask | null = null, opacity = 1): Pixels {
   const w = tileWriter(base);
   const region = mask ? intersect(area, mask.bounds) : area;
   const word = packOpaque(color);
-  writeSpans(w, region, (d, i, x0, y, n, u) => {
-    if (!mask && opacity >= 1) return void u.fill(word, i >> 2, (i >> 2) + n);
-    const mrow = mask ? (y - mask.bounds.y) * mask.bounds.w - mask.bounds.x : 0;
-    for (let x = x0; x < x0 + n; x++, i += 4) {
-      const a = opacity * (mask ? mask.data[mrow + x] * INV255 : 1);
-      if (a <= 0) continue;
-      const da = d[i + 3] * INV255;
-      const oa = a + da * (1 - a);
-      const keep = (da * (1 - a)) / oa;
-      const add = a / oa;
-      d[i] = color.r * add + d[i] * keep;
-      d[i + 1] = color.g * add + d[i + 1] * keep;
-      d[i + 2] = color.b * add + d[i + 2] * keep;
-      d[i + 3] = oa * 255;
-    }
-  });
+  if (!mask && opacity >= 1) {
+    writeSpans(w, region, (_d, i, _x, _y, n, u) => u.fill(word, i >> 2, (i >> 2) + n));
+    return w.finish();
+  }
+  const mb = mask?.bounds;
+  writeSpans(w, region, (d, i, x, y, n) => blendColorSpan(d, i, n, color, opacity, mask ? mask.data : null, mb ? (y - mb.y) * mb.w + (x - mb.x) : 0));
   return w.finish();
 }
 
+/** Composites `color` over `n` pixels from byte `i` of `d`, at `opacity` times the coverage in `mask` from index `m`. */
+export function blendColorSpan(d: Uint8ClampedArray, i: number, n: number, color: RGB, opacity: number, mask: Uint8Array | null, m: number) {
+  const { r, g, b } = color;
+  for (let end = i + n * 4; i < end; i += 4, m++) {
+    const a = mask ? opacity * mask[m] * INV255 : opacity;
+    if (a <= 0) continue;
+    const da = d[i + 3] * INV255;
+    const oa = a + da * (1 - a);
+    const keep = (da * (1 - a)) / oa;
+    const add = a / oa;
+    d[i] = r * add + d[i] * keep;
+    d[i + 1] = g * add + d[i + 1] * keep;
+    d[i + 2] = b * add + d[i + 2] * keep;
+    d[i + 3] = oa * 255;
+  }
+}
+
 /** Erases pixels under `mask` (or everything). */
-export function clearTiles(base: TileMap, mask: Mask | null): TileMap {
-  return mask ? maskTiles(base, mask, "outside") : EMPTY_TILES;
+export function clearPixels(base: Pixels, mask: Mask | null): Pixels {
+  return mask ? maskPixels(base, mask, "outside") : NO_PIXELS;
 }
 
 /**
  * Keeps pixels by the mask's coverage: "inside" scales alpha by it (what a
  * selection lifts), "outside" by its inverse (what's left behind).
  */
-export function maskTiles(base: TileMap, mask: Mask, keep: "inside" | "outside"): TileMap {
+export function maskPixels(base: Pixels, mask: Mask, keep: "inside" | "outside"): Pixels {
   const b = mask.bounds;
   // Inside, nothing beyond the mask survives.
-  const w = tileWriter(keep === "inside" ? clipTiles(base, b) : base);
+  const w = tileWriter(keep === "inside" ? clipPixels(base, b) : base);
   writeSpans(
     w,
     b,
@@ -158,7 +165,7 @@ export interface NewDocumentOptions {
 export function createDocument({ width, height, background = { r: 255, g: 255, b: 255 } }: NewDocumentOptions): Doc {
   const layer = createLayer({
     name: "Background",
-    tiles: background ? fillTiles(EMPTY_TILES, rect(0, 0, width, height), background) : EMPTY_TILES,
+    pixels: background ? fillPixels(NO_PIXELS, rect(0, 0, width, height), background) : NO_PIXELS,
   });
   return { width, height, layers: [layer], activeLayerId: layer.id, selection: null };
 }
@@ -235,14 +242,14 @@ export function rasterizeLayer(d: Doc, id: string): Doc {
 export function convertToSmartObject(d: Doc, id: string, sourceId = newSourceId()): Doc {
   const l = d.layers.find((x) => x.id === id);
   if (!l || l.content.kind === "smart") return d;
-  const b = contentBounds(l.tiles);
+  const b = contentBounds(l.pixels);
   if (isEmpty(b)) return d;
   const source: SmartSource = {
     id: sourceId,
     name: l.name,
     width: b.w,
     height: b.h,
-    tiles: translateTiles(l.tiles, -b.x, -b.y),
+    pixels: translatePixels(l.pixels, -b.x, -b.y),
     file: null,
   };
   const placement: Placement = { source: rect(0, 0, b.w, b.h), quad: quadOf(b), angle: 0, patch: null };
@@ -265,7 +272,7 @@ export function flatten(d: Doc, area: Rect = docRect(d), layers: readonly Layer[
   for (const layer of layers) {
     if (!layer.visible || layer.opacity <= 0) continue;
     const kernel = KERNELS[layer.blendMode];
-    readSpans(layer.tiles, area, (data, i, x, y, n) => kernel(acc, ((y - area.y) * area.w + (x - area.x)) * 4, data, i, n, layer.opacity));
+    readSpans(layer.pixels, area, (data, i, x, y, n) => kernel(acc, ((y - area.y) * area.w + (x - area.x)) * 4, data, i, n, layer.opacity));
   }
   const out = new Uint8ClampedArray(acc.length);
   for (let i = 0; i < acc.length; i += 4) {
@@ -286,10 +293,10 @@ export function mergeDown(d: Doc, id: string): Doc {
   if (i <= 0) return d;
   const below = d.layers[i - 1];
   const top = d.layers[i];
-  // Merge over the union of both layers' tiles, which may extend past the canvas.
-  const area = union(tileGridBounds(below.tiles), tileGridBounds(top.tiles));
+  // Merge over everything both layers store, which may extend past the canvas.
+  const area = union(storedBounds(below.pixels), storedBounds(top.pixels));
   const merged = flatten(d, area, [{ ...below, opacity: 1, visible: true, blendMode: "normal" }, top]);
   const layers = [...d.layers];
-  layers.splice(i - 1, 2, { ...below, tiles: tilesFromImage(area.w, area.h, merged, area.x, area.y), content: PIXELS });
+  layers.splice(i - 1, 2, { ...below, pixels: pixelsFromImage(area.w, area.h, merged, area.x, area.y), content: PIXELS });
   return { ...d, layers, activeLayerId: below.id };
 }

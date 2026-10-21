@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { rect, vec } from "./geometry";
 import { documentKnots, renderShape, shapeContours, shapeOutline, type ShapeGeometry, type ShapeStyle } from "./shape";
-import { getPixel, readRect, type TileMap } from "./tiles";
+import { getPixel, readRect, type Pixels } from "./pixels";
 import { quadOf, type Mapping } from "./warp";
 
 const clip = rect(0, 0, 200, 200);
 const red = { r: 255, g: 0, b: 0 };
 const blue = { r: 0, g: 0, b: 255 };
 const at = (box: ReturnType<typeof rect>): Mapping => ({ source: box, quad: quadOf(box), patch: null });
-const area = (tiles: TileMap) => {
-  const px = readRect(tiles, clip);
+const area = (pixels: Pixels) => {
+  const px = readRect(pixels, clip);
   let a = 0;
   for (let i = 3; i < px.length; i += 4) a += px[i] / 255;
   return a;
@@ -24,8 +24,8 @@ describe("shape geometry", () => {
     ["triangle", { kind: "triangle" }, (100 * 50) / 2],
     ["hexagon", { kind: "polygon", sides: 6, starRatio: 1 }, ((3 * Math.sqrt(3)) / 2) * 50 * 25 * (2 / Math.sqrt(3)) * (Math.sqrt(3) / 2)],
   ])("%s fills its exact area", (_, g, expected) => {
-    const tiles = renderShape(g, fillOnly(), at(rect(20, 30, 100, 50)), clip);
-    expect(area(tiles) / expected).toBeCloseTo(1, 2);
+    const pixels = renderShape(g, fillOnly(), at(rect(20, 30, 100, 50)), clip);
+    expect(area(pixels) / expected).toBeCloseTo(1, 2);
   });
 
   it("star ratio pulls in alternate vertices", () => {
@@ -50,10 +50,10 @@ describe("strokes", () => {
   });
 
   it("paints the stroke over the fill", () => {
-    const tiles = renderShape(sq, { fill: red, stroke: { color: blue, width: 4, align: "inside" } }, at(box), clip);
-    expect(getPixel(tiles, 100, 100)).toEqual([255, 0, 0, 255]);
-    expect(getPixel(tiles, 51, 100)).toEqual([0, 0, 255, 255]);
-    expect(getPixel(tiles, 49, 100)[3]).toBe(0);
+    const pixels = renderShape(sq, { fill: red, stroke: { color: blue, width: 4, align: "inside" } }, at(box), clip);
+    expect(getPixel(pixels, 100, 100)).toEqual([255, 0, 0, 255]);
+    expect(getPixel(pixels, 51, 100)).toEqual([0, 0, 255, 255]);
+    expect(getPixel(pixels, 49, 100)[3]).toBe(0);
   });
 
   it("keeps its width when the shape is scaled", () => {
@@ -67,10 +67,10 @@ describe("strokes", () => {
 describe("transforms", () => {
   it("renders vectors exactly through perspective (no resampling)", () => {
     const m: Mapping = { source: rect(0, 0, 100, 100), quad: [vec(70, 20), vec(130, 20), vec(180, 180), vec(20, 180)], patch: null };
-    const tiles = renderShape({ kind: "rectangle", radius: 0 }, fillOnly(), m, clip);
+    const pixels = renderShape({ kind: "rectangle", radius: 0 }, fillOnly(), m, clip);
     // A trapezoid: (60 + 160) / 2 × 160.
-    expect(area(tiles) / ((60 + 160) / 2) / 160).toBeCloseTo(1, 2);
-    expect(getPixel(tiles, 100, 100)).toEqual([255, 0, 0, 255]);
+    expect(area(pixels) / ((60 + 160) / 2) / 160).toBeCloseTo(1, 2);
+    expect(getPixel(pixels, 100, 100)).toEqual([255, 0, 0, 255]);
   });
 
   it("exports Bézier knots exactly for affine placements, flattened otherwise", () => {

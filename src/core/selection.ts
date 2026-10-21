@@ -1,7 +1,7 @@
 import { intersect, isEmpty, rect, roundOut, union, vec, type Rect, type Vec2 } from "./geometry";
 import { rasterizeContours } from "./coverage";
 import { rasterizeMapping } from "./rasterize";
-import { pixelReader, type TileMap } from "./tiles";
+import { pixelReader, type Pixels } from "./pixels";
 import { mappingBounds, type Mapping } from "./warp";
 
 /**
@@ -134,10 +134,10 @@ export function invertSelection(m: Mask | null, width: number, height: number): 
 /**
  * Magic Wand: selects pixels whose channels are all within `tolerance` of the
  * seed pixel. Contiguous mode is a scanline span fill (each pixel is tested
- * and written once per span, not pushed per pixel), reading tiles directly.
+ * and written once per span, not pushed per pixel), reading pixels directly.
  */
 export function magicWand(
-  tiles: TileMap,
+  pixels: Pixels,
   width: number,
   height: number,
   seed: Vec2,
@@ -149,7 +149,7 @@ export function magicWand(
   if (sx < 0 || sy < 0 || sx >= width || sy >= height) return null;
 
   // Packed RGBA, little-endian: red in the low byte, alpha in the high one.
-  const pixel = pixelReader(tiles);
+  const pixel = pixelReader(pixels);
   const s0 = pixel(sx, sy);
   const r0 = s0 & 255, g0 = (s0 >>> 8) & 255, b0 = (s0 >>> 16) & 255, a0 = s0 >>> 24;
   const matches = (x: number, y: number) => {

@@ -4,7 +4,7 @@ import { quadOf } from "./warp";
 import {
   combine, ellipseMask, invertSelection, magicWand, maskAt, modeFromModifiers, polygonMask, rectMask, selectAll, transformMask,
 } from "./selection";
-import { tilesFromImage } from "./tiles";
+import { pixelsFromImage } from "./pixels";
 
 const W = 20, H = 20;
 const sum = (m: { data: Uint8Array } | null) => (m ? m.data.reduce((a, v) => a + v, 0) / 255 : 0);
@@ -68,7 +68,7 @@ describe("magic wand", () => {
   const img = new Uint8ClampedArray(W * H * 4);
   for (let y = 0; y < H; y++)
     for (let x = 0; x < W; x++) img.set(x < 10 || (x === 15 && y === 15) ? [255, 0, 0, 255] : [0, 0, 255, 255], (y * W + x) * 4);
-  const tiles = tilesFromImage(W, H, img);
+  const tiles = pixelsFromImage(W, H, img);
 
   it("selects contiguous similar pixels", () => expect(sum(magicWand(tiles, W, H, vec(2, 2), 10))).toBe(200));
   it("selects all similar pixels when not contiguous", () =>

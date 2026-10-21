@@ -189,7 +189,7 @@ export interface ToolContext {
   readonly snap: Snapper;
   /** The View menu's toggles (whether guides are shown and locked, rulers). */
   readonly viewOptions: ViewOptions;
-  /** Redraws after in-place changes to previewed tiles. */
+  /** Redraws after in-place changes to previewed pixels. */
   requestRender(): void;
   setView(v: View): void;
   setForeground(c: RGB): void;

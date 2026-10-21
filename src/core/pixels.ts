@@ -1,7 +1,11 @@
 import { EMPTY_RECT, intersect, isEmpty, rect, union, type Rect } from "./geometry";
 
 /**
- * Layer pixels live in a sparse grid of fixed-size tiles in document space.
+ * A layer's pixels ({@link Pixels}): an unbounded image in document space,
+ * stored as a sparse grid of fixed-size tiles. The tiling is this module's
+ * business (and the GPU renderer's, which uploads it): everything else works
+ * in regions — reading and writing rectangles, visiting row spans, bounds,
+ * shifts and clips — so no other code computes where a pixel is stored.
  *
  * Tiles are treated as immutable once they are part of a committed document,
  * which lets history snapshots share every tile an edit didn't touch. Edits go
@@ -25,9 +29,9 @@ export interface Tile {
 
 /** Tile coordinates packed into one integer (±32k tiles, i.e. ±8M pixels, per axis). */
 export type TileKey = number;
-export type TileMap = ReadonlyMap<TileKey, Tile>;
+export type Pixels = ReadonlyMap<TileKey, Tile>;
 
-export const EMPTY_TILES: TileMap = new Map();
+export const NO_PIXELS: Pixels = new Map();
 
 const OFFSET = 1 << 15;
 const SPAN = 1 << 16;
@@ -65,7 +69,7 @@ export interface TileWriter {
   /** The working map; readers may iterate it while a stroke is in progress. */
   readonly tiles: Map<TileKey, Tile>;
   /** What the writer started from (untouched by it). */
-  readonly base: TileMap;
+  readonly base: Pixels;
   get(tx: number, ty: number): Tile | undefined;
   /** A tile that is safe to mutate: cloned (or created) on first request. */
   writable(tx: number, ty: number): Tile;
@@ -73,38 +77,38 @@ export interface TileWriter {
   put(tx: number, ty: number, t: Tile): void;
   delete(tx: number, ty: number): void;
   /** Drops fully transparent tiles this writer created and returns the result. */
-  finish(): TileMap;
+  finish(): Pixels;
 }
 
-export function tileWriter(base: TileMap): TileWriter {
-  const tiles = new Map(base);
+export function tileWriter(base: Pixels): TileWriter {
+  const pixels = new Map(base);
   const owned = new Set<Tile>();
   return {
-    tiles,
+    tiles: pixels,
     base,
-    get: (tx, ty) => tiles.get(tileKey(tx, ty)),
+    get: (tx, ty) => pixels.get(tileKey(tx, ty)),
     writable(tx, ty) {
       const key = tileKey(tx, ty);
-      const existing = tiles.get(key);
+      const existing = pixels.get(key);
       if (existing && owned.has(existing)) return existing;
       const t = existing ? cloneTile(existing) : newTile();
       owned.add(t);
-      tiles.set(key, t);
+      pixels.set(key, t);
       return t;
     },
-    put: (tx, ty, t) => void tiles.set(tileKey(tx, ty), t),
-    delete: (tx, ty) => void tiles.delete(tileKey(tx, ty)),
+    put: (tx, ty, t) => void pixels.set(tileKey(tx, ty), t),
+    delete: (tx, ty) => void pixels.delete(tileKey(tx, ty)),
     finish() {
-      for (const [key, t] of tiles) if (owned.has(t) && isTransparent(t)) tiles.delete(key);
-      return tiles;
+      for (const [key, t] of pixels) if (owned.has(t) && isTransparent(t)) pixels.delete(key);
+      return pixels;
     },
   };
 }
 
 /** Copies the pixels of `r` out of a tile map into a contiguous RGBA buffer. */
-export function readRect(tiles: TileMap, r: Rect, out = new Uint8ClampedArray(r.w * r.h * 4)): Uint8ClampedArray {
+export function readRect(pixels: Pixels, r: Rect, out = new Uint8ClampedArray(r.w * r.h * 4)): Uint8ClampedArray {
   for (const [tx, ty] of tilesIn(r)) {
-    const t = tiles.get(tileKey(tx, ty));
+    const t = pixels.get(tileKey(tx, ty));
     if (!t) continue;
     const part = intersect(r, tileRect(tx, ty));
     const ox = tx << TILE_SHIFT;
@@ -144,9 +148,9 @@ export function writeRect(w: TileWriter, r: Rect, data: Uint8ClampedArray | Uint
 export type SpanVisitor = (data: Uint8ClampedArray, i: number, x: number, y: number, n: number, words: Uint32Array, base: Uint8ClampedArray | undefined) => void;
 
 /** Visits the stored pixels of `tiles` within `r`, row by row (what isn't stored is transparent, and skipped). */
-export function readSpans(tiles: TileMap, r: Rect, visit: (data: Uint8ClampedArray, i: number, x: number, y: number, n: number) => void): void {
+export function readSpans(pixels: Pixels, r: Rect, visit: (data: Uint8ClampedArray, i: number, x: number, y: number, n: number) => void): void {
   for (const [tx, ty] of tilesIn(r)) {
-    const t = tiles.get(tileKey(tx, ty));
+    const t = pixels.get(tileKey(tx, ty));
     if (!t) continue;
     const part = intersect(r, tileRect(tx, ty));
     const ox = tx << TILE_SHIFT, oy = ty << TILE_SHIFT;
@@ -181,7 +185,7 @@ export function writeSpans(w: TileWriter, r: Rect, visit: SpanVisitor, o: WriteO
  * a copy of base's storage from top's (same layout, the whole stored block);
  * where only top has pixels they're shared as they are.
  */
-export function combineTiles(base: TileMap, top: TileMap, combine: (dst: Uint8ClampedArray, src: Uint8ClampedArray) => void): TileMap {
+export function combinePixels(base: Pixels, top: Pixels, combine: (dst: Uint8ClampedArray, src: Uint8ClampedArray) => void): Pixels {
   if (base.size === 0) return top;
   const out = tileWriter(base);
   for (const [key, t] of top) {
@@ -196,13 +200,13 @@ export function combineTiles(base: TileMap, top: TileMap, combine: (dst: Uint8Cl
  * Random access to single pixels, as packed little-endian RGBA u32s (0 where
  * nothing is stored), for algorithms that wander (flood fills).
  */
-export function pixelReader(tiles: TileMap): (x: number, y: number) => number {
+export function pixelReader(pixels: Pixels): (x: number, y: number) => number {
   let lastKey = NaN, last: Uint32Array | undefined;
   return (x, y) => {
     const key = tileKey(x >> TILE_SHIFT, y >> TILE_SHIFT);
     if (key !== lastKey) {
       lastKey = key;
-      const t = tiles.get(key);
+      const t = pixels.get(key);
       last = t && words(t);
     }
     return last ? last[((y & (TILE_SIZE - 1)) << TILE_SHIFT) + (x & (TILE_SIZE - 1))] : 0;
@@ -214,11 +218,11 @@ export function pixelReader(tiles: TileMap): (x: number, y: number) => number {
  * origin, assembled from cached per-tile previews (only changed tiles are
  * re-filtered): what layer thumbnails are drawn from.
  */
-export function previewImage(tiles: TileMap, width: number, height: number): { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> } {
+export function previewImage(pixels: Pixels, width: number, height: number): { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> } {
   const pw = Math.ceil(width / PREVIEW_FACTOR), ph = Math.ceil(height / PREVIEW_FACTOR);
   const data = new Uint8ClampedArray(pw * ph * 4);
   const n = TILE_SIZE / PREVIEW_FACTOR;
-  for (const [key, tile] of tiles) {
+  for (const [key, tile] of pixels) {
     const ox = keyX(key) * n, oy = keyY(key) * n;
     if (ox >= pw || oy >= ph || ox + n <= 0 || oy + n <= 0) continue;
     const preview = tilePreview(tile);
@@ -229,22 +233,22 @@ export function previewImage(tiles: TileMap, width: number, height: number): { w
 }
 
 /** Builds a tile map from an RGBA image positioned at (x, y). Transparent tiles are omitted. */
-export function tilesFromImage(
+export function pixelsFromImage(
   width: number,
   height: number,
   data: Uint8ClampedArray | Uint8Array,
   x = 0,
   y = 0,
-): TileMap {
-  const w = tileWriter(EMPTY_TILES);
+): Pixels {
+  const w = tileWriter(NO_PIXELS);
   writeRect(w, rect(x, y, width, height), data);
   return w.finish();
 }
 
 /** Bounds of the allocated tiles (cheap, but not tight). */
-export function tileGridBounds(tiles: TileMap): Rect {
+export function storedBounds(pixels: Pixels): Rect {
   let bounds = EMPTY_RECT;
-  for (const key of tiles.keys()) bounds = union(bounds, tileRect(keyX(key), keyY(key)));
+  for (const key of pixels.keys()) bounds = union(bounds, tileRect(keyX(key), keyY(key)));
   return bounds;
 }
 
@@ -280,9 +284,9 @@ export function tileContentBounds(t: Tile): Rect {
 }
 
 /** Tight bounds of non-transparent pixels. */
-export function contentBounds(tiles: TileMap): Rect {
+export function contentBounds(pixels: Pixels): Rect {
   let bounds = EMPTY_RECT;
-  for (const [key, t] of tiles) {
+  for (const [key, t] of pixels) {
     const b = tileContentBounds(t);
     if (!isEmpty(b)) bounds = union(bounds, rect((keyX(key) << TILE_SHIFT) + b.x, (keyY(key) << TILE_SHIFT) + b.y, b.w, b.h));
   }
@@ -331,24 +335,24 @@ export function tilePreview(t: Tile): Uint8ClampedArray {
 }
 
 /** Shifts every pixel by an integer offset. Tile-aligned shifts share tiles instead of copying. */
-export function translateTiles(tiles: TileMap, dx: number, dy: number): TileMap {
-  if (dx === 0 && dy === 0) return tiles;
+export function translatePixels(pixels: Pixels, dx: number, dy: number): Pixels {
+  if (dx === 0 && dy === 0) return pixels;
   if (dx % TILE_SIZE === 0 && dy % TILE_SIZE === 0) {
     const out = new Map<TileKey, Tile>();
-    for (const [key, t] of tiles) out.set(tileKey(keyX(key) + dx / TILE_SIZE, keyY(key) + dy / TILE_SIZE), t);
+    for (const [key, t] of pixels) out.set(tileKey(keyX(key) + dx / TILE_SIZE, keyY(key) + dy / TILE_SIZE), t);
     return out;
   }
-  const w = tileWriter(EMPTY_TILES);
-  for (const [key, t] of tiles) {
+  const w = tileWriter(NO_PIXELS);
+  for (const [key, t] of pixels) {
     writeRect(w, rect((keyX(key) << TILE_SHIFT) + dx, (keyY(key) << TILE_SHIFT) + dy, TILE_SIZE, TILE_SIZE), t.data);
   }
   return w.finish();
 }
 
 /** Only the pixels within `r` (whole pixels): tiles inside are shared, tiles across its edge are copied and cleared outside it. */
-export function clipTiles(tiles: TileMap, r: Rect): TileMap {
+export function clipPixels(pixels: Pixels, r: Rect): Pixels {
   const out = new Map<TileKey, Tile>();
-  for (const [key, t] of tiles) {
+  for (const [key, t] of pixels) {
     const tr = tileRect(keyX(key), keyY(key));
     const x0 = Math.max(r.x, tr.x), y0 = Math.max(r.y, tr.y), x1 = Math.min(r.x + r.w, tr.x + TILE_SIZE), y1 = Math.min(r.y + r.h, tr.y + TILE_SIZE);
     if (x0 >= x1 || y0 >= y1) continue;
@@ -375,8 +379,8 @@ export function clipTiles(tiles: TileMap, r: Rect): TileMap {
 export const pixelIndex = (x: number, y: number) => ((y & (TILE_SIZE - 1)) * TILE_SIZE + (x & (TILE_SIZE - 1))) * 4;
 
 /** Reads a single pixel; transparent black where no tile exists. */
-export function getPixel(tiles: TileMap, x: number, y: number): [number, number, number, number] {
-  const t = tiles.get(tileKey(tileOf(x), tileOf(y)));
+export function getPixel(pixels: Pixels, x: number, y: number): [number, number, number, number] {
+  const t = pixels.get(tileKey(tileOf(x), tileOf(y)));
   if (!t) return [0, 0, 0, 0];
   const i = pixelIndex(x, y);
   return [t.data[i], t.data[i + 1], t.data[i + 2], t.data[i + 3]];

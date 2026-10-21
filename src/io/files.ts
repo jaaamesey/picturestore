@@ -1,7 +1,7 @@
 import { smartSource } from "../core/content";
 import { createLayer, flatten, type Doc, type SmartSource } from "../core/document";
 import type { Floating } from "../core/raster";
-import { readRect, tilesFromImage, type TileMap } from "../core/tiles";
+import { readRect, pixelsFromImage, type Pixels } from "../core/pixels";
 import type { SaveFormat } from "./formats";
 import type { Request, Response } from "./io.worker";
 
@@ -50,10 +50,10 @@ export const readDocument = (file: Blob) => call({ op: "decode", file }) as Prom
 export const encodeDocument = (doc: Doc, format: SaveFormat) => call({ op: "encode", doc, format }) as Promise<Blob>;
 
 /** A document's pixels as one image: the layer itself when that's exact, else the composite. */
-function compositeTiles(doc: Doc): TileMap {
+function compositeTiles(doc: Doc): Pixels {
   const [only] = doc.layers;
   const plain = doc.layers.length === 1 && only.visible && only.opacity === 1 && only.blendMode === "normal";
-  return plain ? only.tiles : tilesFromImage(doc.width, doc.height, flatten(doc));
+  return plain ? only.pixels : pixelsFromImage(doc.width, doc.height, flatten(doc));
 }
 
 /** Decodes an image (or PSD, composited) as smart object contents, keeping the file to embed. */
@@ -64,12 +64,12 @@ export async function readSmartSource(file: File): Promise<SmartSource> {
 }
 
 /** Decodes an image into pixels (e.g. pasted from another application). */
-export const readImageTiles = async (file: Blob): Promise<TileMap> => compositeTiles(await readDocument(file));
+export const readImageTiles = async (file: Blob): Promise<Pixels> => compositeTiles(await readDocument(file));
 
 /** A smart object's contents as a document, for Edit Contents. Embedded PSDs keep their layers. */
 export async function smartSourceDocument(source: SmartSource): Promise<Doc> {
   if (source.file && isPsdBytes(source.file.bytes)) return readDocument(new Blob([source.file.bytes as Uint8Array<ArrayBuffer>]));
-  const layer = createLayer({ name: "Layer 0", tiles: source.tiles });
+  const layer = createLayer({ name: "Layer 0", pixels: source.pixels });
   return { width: source.width, height: source.height, layers: [layer], activeLayerId: layer.id, selection: null };
 }
 
@@ -77,7 +77,7 @@ export async function smartSourceDocument(source: SmartSource): Promise<Doc> {
 export async function encodePng(f: Floating): Promise<Blob> {
   const { w, h } = f.bounds;
   const canvas = new OffscreenCanvas(w, h);
-  canvas.getContext("2d")!.putImageData(new ImageData(readRect(f.tiles, f.bounds) as Uint8ClampedArray<ArrayBuffer>, w, h), 0, 0);
+  canvas.getContext("2d")!.putImageData(new ImageData(readRect(f.pixels, f.bounds) as Uint8ClampedArray<ArrayBuffer>, w, h), 0, 0);
   return canvas.convertToBlob({ type: "image/png" });
 }
 

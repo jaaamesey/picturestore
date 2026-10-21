@@ -1,5 +1,5 @@
 import type { Doc, Layer } from "./document";
-import type { TileMap } from "./tiles";
+import type { Pixels } from "./pixels";
 
 export interface HistoryEntry {
   readonly label: string;
@@ -31,10 +31,10 @@ export const DEFAULT_LIMITS: HistoryLimits = { steps: 50, bytes: Infinity };
 
 const TILE_BYTES = 256 * 256 * 4;
 
-function newTileBytes(tiles: TileMap, prev: TileMap | undefined): number {
-  if (tiles === prev) return 0;
+function newTileBytes(pixels: Pixels, prev: Pixels | undefined): number {
+  if (pixels === prev) return 0;
   let n = 0;
-  for (const [key, t] of tiles) if (prev?.get(key) !== t) n++;
+  for (const [key, t] of pixels) if (prev?.get(key) !== t) n++;
   return n * TILE_BYTES;
 }
 
@@ -42,7 +42,7 @@ function contentBytes(l: Layer, prev: Layer | undefined): number {
   if (l.content.kind !== "smart") return 0;
   const p = prev?.content.kind === "smart" ? prev.content.source : undefined;
   if (p === l.content.source) return 0;
-  return newTileBytes(l.content.source.tiles, p?.tiles) + (l.content.source.file?.bytes.length ?? 0);
+  return newTileBytes(l.content.source.pixels, p?.pixels) + (l.content.source.file?.bytes.length ?? 0);
 }
 
 /** Memory `doc` holds that `prev` doesn't, by object identity (O(layers + changed tiles)). */
@@ -53,7 +53,7 @@ export function retainedBytes(doc: Doc, prev: Doc | null): number {
   for (const l of doc.layers) {
     const p = before.get(l.id);
     if (p === l) continue;
-    bytes += newTileBytes(l.tiles, p?.tiles) + contentBytes(l, p);
+    bytes += newTileBytes(l.pixels, p?.pixels) + contentBytes(l, p);
   }
   if (doc.selection && doc.selection !== prev?.selection) bytes += doc.selection.data.length;
   return bytes;

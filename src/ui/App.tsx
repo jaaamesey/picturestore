@@ -2,7 +2,7 @@ import { Errored, For, Loading, Show, createMemo, createSignal, onSettled, useCo
 import { flatten } from "../core/document";
 import { rect } from "../core/geometry";
 import { transformFloatingCpu } from "../core/raster";
-import { readRect } from "../core/tiles";
+import { readRect } from "../core/pixels";
 import { renderShape } from "../core/shape";
 import { placementMapping } from "../core/content";
 import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
@@ -172,8 +172,8 @@ export function App() {
   async function pasteFrom(data: { text: string; image: Blob | null }, inPlace: boolean) {
     if (data.image && data.text !== copyToken) {
       try {
-        const tiles = await readImageTiles(data.image);
-        if (editor.active()) editor.pasteImage(tiles);
+        const pixels = await readImageTiles(data.image);
+        if (editor.active()) editor.pasteImage(pixels);
         else editor.openDocument(await readDocument(data.image), "Untitled", "Paste");
       } catch (err) {
         notify(`Couldn't paste: ${errorText(err)}`);

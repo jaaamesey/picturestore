@@ -3,14 +3,14 @@ import { rect, vec, type Rect, type Vec2 } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "./shape";
-import type { TileMap } from "./tiles";
+import type { Pixels } from "./pixels";
 import type { TransformState } from "./transform";
 import { evalPatch, invert3, isIdentityPatch, project, quadOf, reparameterizePatch, squareToQuad, type Mapping, type Quad } from "./warp";
 
 /** Commit-quality resampling, clipped to `clip` if given (layers may extend past the canvas). */
-export type Resample = (f: Floating, m: Mapping, filter: Filter, clip?: Rect) => Promise<TileMap>;
+export type Resample = (f: Floating, m: Mapping, filter: Filter, clip?: Rect) => Promise<Pixels>;
 /** A shape's pixels, clipped to `clip`. */
-export type ShapeRasterizer = (g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect) => Promise<TileMap>;
+export type ShapeRasterizer = (g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect) => Promise<Pixels>;
 
 /** How content becomes pixels: on the GPU in the app; {@link CPU_RASTERIZERS} are the reference. */
 export interface Rasterizers {
@@ -78,10 +78,10 @@ export const framedState = (p: Placement): TransformState => placementState(fram
 
 export const toPlacement = (s: TransformState): Placement => ({ source: s.source, quad: s.quad, angle: s.angle, patch: s.patch });
 
-export const sourceFloating = (s: SmartSource): Floating => ({ tiles: s.tiles, bounds: rect(0, 0, s.width, s.height) });
+export const sourceFloating = (s: SmartSource): Floating => ({ pixels: s.pixels, bounds: rect(0, 0, s.width, s.height) });
 
 /** Renders non-pixel content through its placement, clipped to the canvas. */
-export async function renderContent(content: LayerContent, clip: Rect, r: Rasterizers, filter: Filter = "bicubic"): Promise<TileMap | null> {
+export async function renderContent(content: LayerContent, clip: Rect, r: Rasterizers, filter: Filter = "bicubic"): Promise<Pixels | null> {
   switch (content.kind) {
     case "pixels":
       return null;
@@ -94,8 +94,8 @@ export async function renderContent(content: LayerContent, clip: Rect, r: Raster
 
 /** The layer with new content, re-rendered. */
 export async function withContent(layer: Layer, content: LayerContent, clip: Rect, r: Rasterizers, filter?: Filter): Promise<Layer> {
-  const tiles = await renderContent(content, clip, r, filter);
-  return { ...layer, content, tiles: tiles ?? layer.tiles };
+  const pixels = await renderContent(content, clip, r, filter);
+  return { ...layer, content, pixels: pixels ?? layer.pixels };
 }
 
 /**
@@ -145,12 +145,12 @@ export async function smartObjectLayer(doc: Doc, source: SmartSource, r: Rasteri
   return withContent(layer, { kind: "smart", source, placement: p }, rect(0, 0, doc.width, doc.height), r);
 }
 
-export const smartSource = (name: string, width: number, height: number, tiles: TileMap, file: SmartSource["file"] = null): SmartSource => ({
+export const smartSource = (name: string, width: number, height: number, pixels: Pixels, file: SmartSource["file"] = null): SmartSource => ({
   id: newSourceId(),
   name,
   width,
   height,
-  tiles,
+  pixels,
   file,
 });
 

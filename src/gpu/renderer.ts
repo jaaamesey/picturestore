@@ -6,13 +6,13 @@ import { createVectorRasterizer } from "./vector";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect, type Vec2 } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
-import { EMPTY_TILES, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileKey, tileRect, tilesFromImage, tilesIn, type Tile, type TileKey, type TileMap } from "../core/tiles";
+import { NO_PIXELS, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileKey, tileRect, pixelsFromImage, tilesIn, type Tile, type TileKey, type Pixels } from "../core/pixels";
 import { tessellate, type Mapping } from "../core/warp";
 import { ATLAS_PAGE, CLEAR_WGSL, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, tilesWgsl } from "./shaders";
 
 /** Pixels drawn through a mapping above a given layer (Free Transform / Move preview). */
 export interface FloatingLayer {
-  readonly tiles: TileMap;
+  readonly pixels: Pixels;
   /** Bounds of `tiles`' content; also the mapping's source rectangle. */
   readonly bounds: Rect;
   readonly mapping: Mapping;
@@ -46,12 +46,12 @@ export interface Renderer {
    * Resamples floating pixels through a mapping on the GPU (the Free
    * Transform commit), returning straight RGBA8 covering `dest`.
    */
-  resample(source: { tiles: TileMap; bounds: Rect }, mapping: Mapping, dest: Rect, filter: Filter): Promise<Uint8ClampedArray>;
+  resample(source: { pixels: Pixels; bounds: Rect }, mapping: Mapping, dest: Rect, filter: Filter): Promise<Uint8ClampedArray>;
   /**
    * Rasterizes a shape at full resolution on the GPU and reads it back as
    * tiles, clipped to `clip` (a committed shape layer's pixels).
    */
-  rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<TileMap>;
+  rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<Pixels>;
   /** Reads back the composite as straight RGBA8 (for tests and debugging). */
   readComposite(): Promise<Uint8ClampedArray>;
   /** Resolves once the most recently rendered frame is on screen. */
@@ -139,7 +139,7 @@ interface LayerEntry {
 }
 
 interface FloatingTexture {
-  readonly source: TileMap;
+  readonly source: Pixels;
   readonly bounds: Rect;
   readonly texture: GPUTexture;
   readonly mipCount: number;
@@ -455,7 +455,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     for (const release of w.releases) release();
   }
 
-  function syncLayer(entry: LayerEntry, tiles: TileMap): Rect {
+  function syncLayer(entry: LayerEntry, tiles: Pixels): Rect {
     const canvasRect = rect(0, 0, size.width, size.height);
     // Was a shape (since rasterized): its GPU-rendered tiles are replaced by uploads below.
     let dirty = entry.shape ? translateRect(entry.shapeBounds, entry.offset) : EMPTY_RECT;
@@ -592,7 +592,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       const content = layer.content;
       const changed = !layer.visible ? EMPTY_RECT
         : content.kind === "shape" ? syncShape(entry, content)
-        : syncLayer(entry, layer.tiles);
+        : syncLayer(entry, layer.pixels);
       const props = `${layer.visible}|${layer.opacity}|${layer.blendMode}`;
       if (props !== entry.props) {
         entry.props = props;
@@ -617,7 +617,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   }
 
   /** The preview's premultiplied, mipmapped texture of floating pixels, at the display's quality (cached by tile-map identity). */
-  function floatingTexture(source: TileMap, bounds: Rect): FloatingTexture {
+  function floatingTexture(source: Pixels, bounds: Rect): FloatingTexture {
     // Keyed by what was uploaded: the same tiles over a different region (a preview window, then the whole layer) are a different texture.
     const b = floating?.bounds;
     if (floating && floating.source === source && floating.level === level && b!.x === bounds.x && b!.y === bounds.y && b!.w === bounds.w && b!.h === bounds.h) {
@@ -636,7 +636,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
    * Reduced levels are filtered on the CPU a strip at a time, so no
    * full-size intermediate is ever allocated.
    */
-  function buildFloating(source: TileMap, bounds: Rect, lvl: number): FloatingTexture {
+  function buildFloating(source: Pixels, bounds: Rect, lvl: number): FloatingTexture {
     const w = Math.ceil(bounds.w / (1 << lvl)), h = Math.ceil(bounds.h / (1 << lvl));
     const max = device.limits.maxTextureDimension2D;
     if (w > max || h > max) throw new Error(`Transforms are limited to ${max << lvl}px per side`);
@@ -721,7 +721,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     if (f === lastFloating) return EMPTY_RECT;
     lastFloating = f;
     if (f && !isEmpty(f.bounds)) {
-      floatingTexture(f.tiles, f.bounds);
+      floatingTexture(f.pixels, f.bounds);
       meshBuffers(f.mapping);
     }
     return rect(0, 0, size.width, size.height);
@@ -884,7 +884,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
   // --- Commit-quality resampling ----------------------------------------------
 
-  async function resample(source: { tiles: TileMap; bounds: Rect }, mapping: Mapping, dest: Rect, filter: Filter) {
+  async function resample(source: { pixels: Pixels; bounds: Rect }, mapping: Mapping, dest: Rect, filter: Filter) {
     const out = new Uint8ClampedArray(dest.w * dest.h * 4);
     if (isEmpty(dest) || isEmpty(source.bounds)) return out;
     if (!accum) throw new Error("Renderer has no document");
@@ -894,7 +894,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     let temporary: FloatingTexture | null = null;
     const uniforms = device.createBuffer({ size: MESH_UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     try {
-      const f = level === 0 ? floatingTexture(source.tiles, source.bounds) : (temporary = buildFloating(source.tiles, source.bounds, 0));
+      const f = level === 0 ? floatingTexture(source.pixels, source.bounds) : (temporary = buildFloating(source.pixels, source.bounds, 0));
       const m = meshBuffers(mapping);
       const bindGroup = meshBindGroup(f.texture, uniforms);
       const filterIndex = { nearest: 0, bilinear: 1, bicubic: 2 }[filter];
@@ -945,10 +945,10 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   /** Bands read back per round trip, bounding the staging memory (≤ 64 MB at 16k px wide). */
   const READBACK_BANDS = 16;
 
-  async function rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<TileMap> {
+  async function rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<Pixels> {
     const seg = shapeSegments(geometry, style, mapping);
     const bounds = intersect(roundOut(seg.bounds), clip);
-    if (isEmpty(bounds)) return EMPTY_TILES;
+    if (isEmpty(bounds)) return NO_PIXELS;
     const tx0 = Math.floor(bounds.x / TILE_SIZE), ty0 = Math.floor(bounds.y / TILE_SIZE);
     const x0 = tx0 * TILE_SIZE, y0 = ty0 * TILE_SIZE;
     const w = (Math.floor((bounds.x + bounds.w - 1) / TILE_SIZE) - tx0 + 1) * TILE_SIZE;
@@ -970,7 +970,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         await staging.mapAsync(GPUMapMode.READ);
         const pixels = new Uint8ClampedArray(staging.getMappedRange().slice(0));
         staging.destroy();
-        for (const [k, t] of tilesFromImage(w, rows, pixels, x0, y)) out.set(k, t);
+        for (const [k, t] of pixelsFromImage(w, rows, pixels, x0, y)) out.set(k, t);
       }
     } finally {
       const err = await device.popErrorScope();

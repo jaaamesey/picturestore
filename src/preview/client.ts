@@ -1,7 +1,7 @@
 import type { Doc } from "../core/document";
 import type { ImageSizeOptions } from "../core/documentTransform";
 import type { Rect } from "../core/geometry";
-import type { Tile } from "../core/tiles";
+import type { Tile } from "../core/pixels";
 import { toWire, type Request, type Response } from "./wire";
 
 /** Tiles per message when syncing (256 KB each): keeps each structured clone short on the main thread. */

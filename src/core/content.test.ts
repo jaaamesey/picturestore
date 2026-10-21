@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { framedPlacement, wholePixelMove, initialPlacement, placementMapping, resizedPlacement, smartObjectLayer, smartSource, CPU_RASTERIZERS } from "./content";
 import { resizeCanvas } from "./documentTransform";
-import { addLayer, convertToSmartObject, createDocument, createLayer, fillTiles, rasterizeLayer } from "./document";
+import { addLayer, convertToSmartObject, createDocument, createLayer, fillPixels, rasterizeLayer } from "./document";
 import { rect, vec } from "./geometry";
-import { EMPTY_TILES, contentBounds, getPixel, tilesFromImage } from "./tiles";
+import { NO_PIXELS, contentBounds, getPixel, pixelsFromImage } from "./pixels";
 import { IDENTITY_PATCH, invert3, mapPoint, project, quadOf, squareToQuad, type Mapping } from "./warp";
 import type { Placement } from "./document";
 
@@ -11,7 +11,7 @@ const cpu = CPU_RASTERIZERS;
 
 describe("smart objects", () => {
   const checker = new Uint8ClampedArray(64 * 64 * 4).map((_, i) => (i % 4 === 3 ? 255 : (Math.floor(i / 4) % 64) * 4));
-  const source = smartSource("photo.png", 64, 64, tilesFromImage(64, 64, checker));
+  const source = smartSource("photo.png", 64, 64, pixelsFromImage(64, 64, checker));
 
   it("places centred, shrinking only when larger than the canvas", () => {
     expect(initialPlacement(64, 32, 200, 100).quad[0]).toEqual({ x: 68, y: 34 });
@@ -24,25 +24,25 @@ describe("smart objects", () => {
     const doc = createDocument({ width: 200, height: 200, background: null });
     const layer = await smartObjectLayer(doc, source, cpu);
     expect(layer.content.kind).toBe("smart");
-    expect(contentBounds(layer.tiles)).toEqual(rect(68, 68, 64, 64));
+    expect(contentBounds(layer.pixels)).toEqual(rect(68, 68, 64, 64));
     // Shrink to 8×8 then back to 64×64: the source is untouched, so detail returns.
     if (layer.content.kind !== "smart") throw new Error();
     const tiny = { ...layer.content.placement, quad: quadOf(rect(0, 0, 8, 8)) };
     const back = { ...tiny, quad: quadOf(rect(0, 0, 64, 64)) };
-    const restored = await cpu.resample({ tiles: source.tiles, bounds: rect(0, 0, 64, 64) }, placementMapping(back), "bicubic", rect(0, 0, 200, 200));
-    expect(getPixel(restored, 10, 5)).toEqual(getPixel(source.tiles, 10, 5));
+    const restored = await cpu.resample({ pixels: source.pixels, bounds: rect(0, 0, 64, 64) }, placementMapping(back), "bicubic", rect(0, 0, 200, 200));
+    expect(getPixel(restored, 10, 5)).toEqual(getPixel(source.pixels, 10, 5));
   });
 
   it("converts pixel layers in place and rasterizes back", () => {
     const d0 = createDocument({ width: 100, height: 100 });
-    const d1 = addLayer(d0, createLayer({ name: "L", tiles: fillTiles(EMPTY_TILES, rect(10, 20, 30, 40), { r: 1, g: 2, b: 3 }) }));
+    const d1 = addLayer(d0, createLayer({ name: "L", pixels: fillPixels(NO_PIXELS, rect(10, 20, 30, 40), { r: 1, g: 2, b: 3 }) }));
     const smart = convertToSmartObject(d1, d1.activeLayerId);
     const layer = smart.layers[1];
     if (layer.content.kind !== "smart") throw new Error("expected smart object");
     expect(layer.content.source.width).toBe(30);
     expect(layer.content.placement.quad[0]).toEqual({ x: 10, y: 20 });
-    expect(getPixel(layer.content.source.tiles, 0, 0)).toEqual([1, 2, 3, 255]);
-    expect(layer.tiles).toBe(d1.layers[1].tiles); // pixels unchanged
+    expect(getPixel(layer.content.source.pixels, 0, 0)).toEqual([1, 2, 3, 255]);
+    expect(layer.pixels).toBe(d1.layers[1].pixels); // pixels unchanged
     expect(rasterizeLayer(smart, layer.id).layers[1].content.kind).toBe("pixels");
   });
 });
@@ -85,18 +85,18 @@ describe("Canvas Size", () => {
     const d = createDocument({ width: 100, height: 100, background: { r: 255, g: 0, b: 0 } });
     const centred = await resizeCanvas(d, 200, 50, { x: 0.5, y: 0.5 }, cpu);
     expect([centred.width, centred.height]).toEqual([200, 50]);
-    expect(contentBounds(centred.layers[0].tiles)).toEqual(rect(50, -25, 100, 100));
+    expect(contentBounds(centred.layers[0].pixels)).toEqual(rect(50, -25, 100, 100));
     const topLeft = await resizeCanvas(d, 150, 150, { x: 0, y: 0 }, cpu);
-    expect(contentBounds(topLeft.layers[0].tiles)).toEqual(rect(0, 0, 100, 100));
+    expect(contentBounds(topLeft.layers[0].pixels)).toEqual(rect(0, 0, 100, 100));
   });
 
   it("moves smart objects' placements and re-renders them for the new canvas", async () => {
     const d = createDocument({ width: 100, height: 100 });
-    const src = smartSource("s", 10, 10, fillTiles(EMPTY_TILES, rect(0, 0, 10, 10), { r: 0, g: 0, b: 255 }));
+    const src = smartSource("s", 10, 10, fillPixels(NO_PIXELS, rect(0, 0, 10, 10), { r: 0, g: 0, b: 255 }));
     const doc = addLayer(d, await smartObjectLayer(d, src, cpu, { source: rect(0, 0, 10, 10), quad: quadOf(rect(90, 90, 20, 20)), angle: 0, patch: null }));
     // Part of it was off the old canvas; on the bigger one it's all rendered.
     const big = await resizeCanvas(doc, 200, 200, { x: 0, y: 0 }, cpu);
-    expect(contentBounds(big.layers[1].tiles)).toEqual(rect(90, 90, 20, 20));
+    expect(contentBounds(big.layers[1].pixels)).toEqual(rect(90, 90, 20, 20));
   });
 });
 

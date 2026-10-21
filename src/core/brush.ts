@@ -1,7 +1,7 @@
 import type { RGB } from "./color";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect } from "./geometry";
 import type { Mask } from "./selection";
-import { tileWriter, writeSpans, type TileMap } from "./tiles";
+import { tileWriter, writeSpans, type Pixels } from "./pixels";
 
 export interface BrushSettings {
   /** Diameter in pixels. */
@@ -91,11 +91,11 @@ export interface StrokeOptions {
 }
 
 export interface Stroke {
-  /** Live working tiles; safe to read for preview while the stroke continues. */
-  readonly tiles: TileMap;
+  /** The pixels so far; safe to read for preview while the stroke continues. */
+  readonly pixels: Pixels;
   /** Adds a point; returns the area that changed. */
   add(p: StrokePoint): Rect;
-  finish(): TileMap;
+  finish(): Pixels;
 }
 
 const LUT_SIZE = 4096;
@@ -128,7 +128,7 @@ function falloffTable(hardness: number): Float32Array {
  * untouched `base` pixel, so overlapping dabs never exceed the stroke's
  * `opacity` — the same model Photoshop uses.
  */
-export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
+export function beginStroke(base: Pixels, opts: StrokeOptions): Stroke {
   const { brush, color, erase, selection, clip } = opts;
   const { flow, opacity } = brush;
   const { r: cr, g: cg, b: cb } = color;
@@ -216,7 +216,7 @@ export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
   };
 
   return {
-    tiles: writer.tiles,
+    pixels: writer.tiles,
     add(p) {
       let dirty = EMPTY_RECT;
       for (const d of interpolate(p)) dirty = union(dirty, dab(d));

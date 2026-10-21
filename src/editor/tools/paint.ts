@@ -1,5 +1,5 @@
 import { beginStroke, type Stroke, type StrokePoint } from "../../core/brush";
-import { activeLayer, docRect, fillTiles, updateLayer } from "../../core/document";
+import { activeLayer, docRect, fillPixels, updateLayer } from "../../core/document";
 import { combine, magicWand } from "../../core/selection";
 import type { Tool, ToolEvent } from "../types";
 
@@ -19,14 +19,14 @@ export function createPaintTool(id: "brush" | "eraser"): Tool {
       if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
       const erase = id === "eraser";
       layerId = layer.id;
-      stroke = beginStroke(layer.tiles, {
+      stroke = beginStroke(layer.pixels, {
         brush: erase ? ctx.settings.eraser : ctx.settings.brush,
         color: ctx.foreground,
         erase,
         selection: ctx.doc.selection,
         clip: docRect(ctx.doc),
       });
-      ctx.preview(updateLayer(ctx.doc, layerId, { tiles: stroke.tiles }));
+      ctx.preview(updateLayer(ctx.doc, layerId, { pixels: stroke.pixels }));
       if (e.shift && last) stroke.add(last);
       stroke.add(point(e));
       ctx.requestRender();
@@ -38,10 +38,10 @@ export function createPaintTool(id: "brush" | "eraser"): Tool {
     },
     up(ctx, e) {
       if (!stroke) return;
-      const tiles = stroke.finish();
+      const pixels = stroke.finish();
       stroke = null;
       last = point(e);
-      ctx.commit(id === "eraser" ? "Eraser" : "Brush Tool", updateLayer(ctx.doc, layerId, { tiles }));
+      ctx.commit(id === "eraser" ? "Eraser" : "Brush Tool", updateLayer(ctx.doc, layerId, { pixels }));
     },
     cancel(ctx) {
       if (!stroke) return;
@@ -61,10 +61,10 @@ export const bucketTool: Tool = {
     if (!layer || !layer.visible || !ctx.requireEditable(layer, (c) => bucketTool.down!(c, e))) return;
     const region = combine(
       doc.selection,
-      magicWand(layer.tiles, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
+      magicWand(layer.pixels, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
       doc.selection ? "intersect" : "replace",
     );
     if (!region) return;
-    ctx.commit("Paint Bucket", updateLayer(doc, layer.id, { tiles: fillTiles(layer.tiles, region.bounds, ctx.foreground, region) }));
+    ctx.commit("Paint Bucket", updateLayer(doc, layer.id, { pixels: fillPixels(layer.pixels, region.bounds, ctx.foreground, region) }));
   },
 };

@@ -1,5 +1,5 @@
 import { createLayer, docRect, flatten, type Doc } from "../core/document";
-import { tilesFromImage } from "../core/tiles";
+import { pixelsFromImage } from "../core/pixels";
 import type { SaveFormat } from "./formats";
 import { readPsdDocument, writePsdDocument } from "./psd";
 
@@ -17,7 +17,7 @@ export async function decode(file: Blob): Promise<Doc> {
   const ctx = new OffscreenCanvas(width, height).getContext("2d")!;
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
-  const layer = createLayer({ name: "Background", tiles: tilesFromImage(width, height, ctx.getImageData(0, 0, width, height).data) });
+  const layer = createLayer({ name: "Background", pixels: pixelsFromImage(width, height, ctx.getImageData(0, 0, width, height).data) });
   return { width, height, layers: [layer], activeLayerId: layer.id, selection: null };
 }
 
@@ -42,4 +42,4 @@ export async function encode(doc: Doc, format: SaveFormat, quality = 0.92): Prom
 
 /** Every tile buffer in a document, for zero-copy transfer out of the worker. */
 export const transferables = (doc: Doc): ArrayBuffer[] =>
-  doc.layers.flatMap((l) => [...l.tiles.values()].map((t) => t.data.buffer as ArrayBuffer));
+  doc.layers.flatMap((l) => [...l.pixels.values()].map((t) => t.data.buffer as ArrayBuffer));

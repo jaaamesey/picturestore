@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onSettled, useContext } from "solid-js";
 import { BLEND_MODES, type BlendMode } from "../../core/blend";
 import { activeLayer, type Layer } from "../../core/document";
-import { previewImage, type TileMap } from "../../core/tiles";
+import { previewImage, type Pixels } from "../../core/pixels";
 import { AppContext } from "../context";
 import { LAYER_MENU } from "../MenuBar";
 import { IconButton, NumberField } from "../controls";
@@ -15,15 +15,15 @@ const THUMB = 36;
  * what changed is re-filtered), scaled with the browser's high-quality
  * filter, so thin strokes don't vanish.
  */
-function Thumbnail(props: { tiles: TileMap; width: number; height: number }) {
+function Thumbnail(props: { pixels: Pixels; width: number; height: number }) {
   let canvas!: HTMLCanvasElement;
   createEffect(
-    () => ({ tiles: props.tiles, dw: props.width, dh: props.height }),
-    ({ tiles, dw, dh }) => {
+    () => ({ pixels: props.pixels, dw: props.width, dh: props.height }),
+    ({ pixels, dw, dh }) => {
       const s = THUMB / Math.max(dw, dh);
       const w = Math.max(1, Math.round(dw * s));
       const h = Math.max(1, Math.round(dh * s));
-      const img = previewImage(tiles, dw, dh);
+      const img = previewImage(pixels, dw, dh);
       const source = new OffscreenCanvas(img.width, img.height);
       source.getContext("2d")!.putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
       canvas.width = w;
@@ -83,7 +83,7 @@ function LayerRow(props: {
         <Icon name="eye" size={15} />
       </button>
       <div class="relative">
-        <Thumbnail tiles={props.layer.tiles} width={props.width} height={props.height} />
+        <Thumbnail pixels={props.layer.pixels} width={props.width} height={props.height} />
         <Show when={props.layer.content.kind !== "pixels"}>
           {/* Photoshop's badges: smart objects and shapes aren't directly editable pixels. */}
           <span

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BRUSH } from "../../core/brush";
-import { addLayer, createDocument, fillTiles, updateLayer, type Doc } from "../../core/document";
+import { addLayer, createDocument, fillPixels, updateLayer, type Doc } from "../../core/document";
 import { rect } from "../../core/geometry";
 import { rectMask } from "../../core/selection";
-import { EMPTY_TILES, contentBounds, getPixel } from "../../core/tiles";
+import { NO_PIXELS, contentBounds, getPixel } from "../../core/pixels";
 import type { FloatingLayer, View } from "../../gpu/renderer";
 import { DEFAULT_SETTINGS } from "../editor";
 import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings, Writable } from "../types";
@@ -104,12 +104,12 @@ describe("brush", () => {
     brush.down!(h.ctx(), h.ev(20, 20));
     expect(h.s.preview).not.toBeNull();
     brush.move!(h.ctx(), h.ev(60, 20));
-    expect(getPixel(layerOf(h.s.preview!).tiles, 40, 20)).toEqual([255, 0, 0, 255]);
+    expect(getPixel(layerOf(h.s.preview!).pixels, 40, 20)).toEqual([255, 0, 0, 255]);
     brush.up!(h.ctx(), h.ev(60, 20));
     expect(h.s.history).toEqual(["Brush Tool"]);
     expect(h.s.preview).toBeNull();
     // Dabs are evenly spaced, so the stroke may stop short of the release point by < 1 spacing.
-    const b = contentBounds(layerOf(h.s.doc).tiles);
+    const b = contentBounds(layerOf(h.s.doc).pixels);
     expect([b.x, b.y, b.h]).toEqual([15, 15, 10]);
     expect(b.w).toBeGreaterThanOrEqual(48);
   });
@@ -125,13 +125,13 @@ describe("brush", () => {
     const h = harness(blank());
     await h.drag("brush", [10, 50], [10, 50]);
     await h.drag("brush", [90, 50], [90, 50], { shift: true });
-    expect(getPixel(layerOf(h.s.doc).tiles, 50, 50)[3]).toBe(255);
+    expect(getPixel(layerOf(h.s.doc).pixels, 50, 50)[3]).toBe(255);
   });
 
   it("erases", async () => {
     const h = harness(createDocument({ width: 100, height: 100 }));
     await h.drag("eraser", [50, 50], [50, 50]);
-    expect(getPixel(layerOf(h.s.doc).tiles, 50, 50)[3]).toBe(0);
+    expect(getPixel(layerOf(h.s.doc).pixels, 50, 50)[3]).toBe(0);
     expect(h.s.history).toEqual(["Eraser"]);
   });
 });
@@ -169,36 +169,36 @@ describe("selection tools", () => {
   it("magic wand and paint bucket use the active layer", async () => {
     const d = createDocument({ width: 100, height: 100 });
     const id = d.activeLayerId;
-    const h = harness(updateLayer(d, id, { tiles: fillTiles(layerOf(d).tiles, rect(0, 0, 50, 100), { r: 0, g: 0, b: 0 }) }));
+    const h = harness(updateLayer(d, id, { pixels: fillPixels(layerOf(d).pixels, rect(0, 0, 50, 100), { r: 0, g: 0, b: 0 }) }));
     await h.drag("wand", [10, 10], [10, 10]);
     expect(h.s.doc.selection!.bounds).toEqual(rect(0, 0, 50, 100));
     h.s.doc = { ...h.s.doc, selection: null };
     await h.drag("bucket", [80, 80], [80, 80]);
-    expect(getPixel(layerOf(h.s.doc).tiles, 80, 80)).toEqual([255, 0, 0, 255]);
-    expect(getPixel(layerOf(h.s.doc).tiles, 10, 10)).toEqual([0, 0, 0, 255]);
+    expect(getPixel(layerOf(h.s.doc).pixels, 80, 80)).toEqual([255, 0, 0, 255]);
+    expect(getPixel(layerOf(h.s.doc).pixels, 10, 10)).toEqual([0, 0, 0, 255]);
   });
 });
 
 describe("move and transform", () => {
   const withSquare = () => {
     const d = blank();
-    return updateLayer(d, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(10, 10, 10, 10), { r: 0, g: 255, b: 0 }) });
+    return updateLayer(d, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(10, 10, 10, 10), { r: 0, g: 255, b: 0 }) });
   };
 
   it("moves the layer by whole pixels when dragged inside the controls", async () => {
     const h = harness(withSquare());
     await h.drag("move", [15, 15], [25.4, 35.6]);
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(20, 31, 10, 10));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(20, 31, 10, 10));
     expect(h.s.history).toEqual(["Move"]);
   });
 
   it("moves only selected pixels, and the selection with them", async () => {
     const h = harness({ ...withSquare(), selection: rectMask(100, 100, rect(10, 10, 5, 10)) });
     await h.drag("move", [12, 12], [52, 12]);
-    const tiles = layerOf(h.s.doc).tiles;
-    expect(getPixel(tiles, 12, 12)[3]).toBe(0);
-    expect(getPixel(tiles, 17, 12)[3]).toBe(255);
-    expect(getPixel(tiles, 52, 12)[3]).toBe(255);
+    const pixels = layerOf(h.s.doc).pixels;
+    expect(getPixel(pixels, 12, 12)[3]).toBe(0);
+    expect(getPixel(pixels, 17, 12)[3]).toBe(255);
+    expect(getPixel(pixels, 52, 12)[3]).toBe(255);
     expect(h.s.doc.selection!.bounds).toEqual(rect(50, 10, 5, 10));
   });
 
@@ -211,7 +211,7 @@ describe("move and transform", () => {
     await h.s.pending;
     expect(h.s.history).toEqual(["Free Transform"]);
     expect(h.s.tool).toBe("move");
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(10, 10, 20, 20));
   });
 
   it("the Move tool ignores handles when transform controls are off", async () => {
@@ -236,7 +236,7 @@ describe("move and transform", () => {
     expect(h.s.history).toEqual(["Free Transform"]);
     expect(h.s.tool).toBe("brush");
     expect(h.s.overlay).toBeNull();
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(10, 10, 20, 20));
   });
 
   it("steps back within the session, then cancels without changing the document", async () => {
@@ -256,12 +256,12 @@ describe("move and transform", () => {
 
   it("flips about the reference point", async () => {
     const d = blank();
-    const h = harness(updateLayer(d, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(10, 10, 5, 10), { r: 0, g: 0, b: 255 }) }));
+    const h = harness(updateLayer(d, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(10, 10, 5, 10), { r: 0, g: 0, b: 255 }) }));
     h.tools.transform.begin(h.ctx(), { returnTo: "move" });
     h.tools.transform.command(h.ctx(), "rotate-180");
     h.tools.transform.commit!(h.ctx());
     await h.s.pending;
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 5, 10));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(10, 10, 5, 10));
     expect(h.s.history).toEqual(["Free Transform"]);
   });
 
@@ -303,8 +303,8 @@ describe("shape tools", () => {
     const l = layerOf(h.s.doc);
     expect(l.name).toBe("Rectangle 1");
     expect(l.content.kind).toBe("shape");
-    expect(getPixel(l.tiles, 30, 40)).toEqual([255, 0, 0, 255]);
-    expect(contentBounds(l.tiles)).toEqual(rect(10, 20, 40, 40));
+    expect(getPixel(l.pixels, 30, 40)).toEqual([255, 0, 0, 255]);
+    expect(contentBounds(l.pixels)).toEqual(rect(10, 20, 40, 40));
     await h.drag("rectangle", [60, 60], [90, 90]);
     expect(layerOf(h.s.doc).name).toBe("Rectangle 2");
   });
@@ -316,14 +316,14 @@ describe("shape tools", () => {
     t.move!(h.ctx(), h.ev(70, 60, { shift: true, alt: true }));
     t.up!(h.ctx(), h.ev(70, 60, { shift: true, alt: true }));
     await h.s.pending;
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(30, 30, 40, 40));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(30, 30, 40, 40));
   });
 
   it("draws lines along the drag with the configured weight", async () => {
     const h = harness(blank());
     await h.drag("line", [10, 50], [90, 50]);
     const l = layerOf(h.s.doc);
-    expect(contentBounds(l.tiles)).toEqual(rect(10, 49, 80, 2));
+    expect(contentBounds(l.pixels)).toEqual(rect(10, 49, 80, 2));
   });
 
   it("fills pixels into the active layer in Pixels mode, and won't draw onto a shape", async () => {
@@ -331,7 +331,7 @@ describe("shape tools", () => {
     await h.drag("rectangle", [10, 10], [30, 30]);
     expect(h.s.doc.layers.length).toBe(2);
     expect(layerOf(h.s.doc).content.kind).toBe("pixels");
-    expect(getPixel(layerOf(h.s.doc).tiles, 20, 20)).toEqual([255, 0, 0, 255]);
+    expect(getPixel(layerOf(h.s.doc).pixels, 20, 20)).toEqual([255, 0, 0, 255]);
 
     const shapes = harness(blank());
     await shapes.drag("rectangle", [10, 10], [30, 30]);
@@ -348,10 +348,10 @@ describe("shape tools", () => {
     t.move!(h.ctx(), h.ev(30, 30));
     // Nothing is rasterized while drawing: the preview is the shape itself.
     expect(layerOf(h.s.preview!).content.kind).toBe("shape");
-    expect(layerOf(h.s.preview!).tiles.size).toBe(0);
+    expect(layerOf(h.s.preview!).pixels.size).toBe(0);
     t.up!(h.ctx(), h.ev(30, 30));
     await h.s.pending;
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(10, 10, 20, 20));
 
     const move = h.tools.byId.move;
     move.down!(h.ctx(), h.ev(20, 20));
@@ -361,7 +361,7 @@ describe("shape tools", () => {
     expect(h.s.floating).toBeNull();
     move.up!(h.ctx(), h.ev(45, 25));
     await h.s.pending;
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(35, 15, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(35, 15, 20, 20));
   });
 
   it("the Move tool's frame follows the content while dragging", async () => {
@@ -398,13 +398,13 @@ describe("shape tools", () => {
     await h.drag("move", [20, 20], [45, 25]);
     const l = layerOf(h.s.doc);
     expect(h.s.history).toEqual(["Rectangle Tool", "Move"]);
-    expect(contentBounds(l.tiles)).toEqual(rect(35, 15, 20, 20));
+    expect(contentBounds(l.pixels)).toEqual(rect(35, 15, 20, 20));
     expect(l.content.kind === "shape" && l.content.placement.quad[0]).toEqual({ x: 35, y: 15 });
   });
 });
 
 describe("smart objects", () => {
-  const green = fillTiles(EMPTY_TILES, rect(0, 0, 10, 10), { r: 0, g: 255, b: 0 });
+  const green = fillPixels(NO_PIXELS, rect(0, 0, 10, 10), { r: 0, g: 255, b: 0 });
   const withSmart = async () => {
     const d = blank();
     const placement = { source: rect(0, 0, 10, 10), quad: quadOf(rect(20, 20, 10, 10)), angle: 0, patch: null };
@@ -431,8 +431,8 @@ describe("smart objects", () => {
     await h.s.pending;
     const l = layerOf(h.s.doc);
     expect(h.s.history).toEqual(["Free Transform", "Free Transform"]);
-    expect(getPixel(l.tiles, 40, 40)).toEqual([0, 255, 0, 255]);
-    expect(contentBounds(l.tiles)).toEqual(rect(20, 20, 40, 40));
+    expect(getPixel(l.pixels, 40, 40)).toEqual([0, 255, 0, 255]);
+    expect(contentBounds(l.pixels)).toEqual(rect(20, 20, 40, 40));
   });
 
   it("transforms the whole smart object regardless of the selection", async () => {
@@ -461,19 +461,19 @@ describe("smart objects", () => {
     const c = convertToSmartObject(d, d.activeLayerId);
     const l = layerOf(c);
     expect(l.content.kind).toBe("smart");
-    expect(l.tiles).toBe(layerOf(d).tiles);
+    expect(l.pixels).toBe(layerOf(d).pixels);
   });
 });
 
 /** A smart object layer (not yet in `d`), as Place Embedded makes. */
 function createLayerFor(d: Doc) {
-  const l = createLayer({ name: "img", tiles: fillTiles(EMPTY_TILES, rect(0, 0, 100, 100), { r: 1, g: 2, b: 3 }) });
+  const l = createLayer({ name: "img", pixels: fillPixels(NO_PIXELS, rect(0, 0, 100, 100), { r: 1, g: 2, b: 3 }) });
   return layerOf(convertToSmartObject(addLayer(d, l), l.id));
 }
 
 function withSquareDoc() {
   const d = blank();
-  return updateLayer(d, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(10, 10, 10, 10), { r: 9, g: 9, b: 9 }) });
+  return updateLayer(d, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(10, 10, 10, 10), { r: 9, g: 9, b: 9 }) });
 }
 
 describe("rasterize prompts", () => {
@@ -497,7 +497,7 @@ describe("crop", () => {
   /** A 100×100 document: white background, and a red 20×20 square at (40, 40) on the active layer. */
   const doc = () => {
     const d = blank();
-    return updateLayer(d, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(40, 40, 20, 20), { r: 255, g: 0, b: 0 }) });
+    return updateLayer(d, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(40, 40, 20, 20), { r: 255, g: 0, b: 0 }) });
   };
   /** Pointer events at screen points, through the current (possibly rotated) view. */
   const pointer = (h: ReturnType<typeof harness>) => {
@@ -542,7 +542,7 @@ describe("crop", () => {
     await h.s.pending;
     expect(h.s.history).toEqual(["Crop"]);
     expect([h.s.doc.width, h.s.doc.height]).toEqual([40, 30]);
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(10, 10, 20, 20));
     expect(h.s.overlay).toBeNull();
     await drag([5, 5], [5, 5]);
     expect(cropBox(h)).toEqual({ cx: 20, cy: 15, w: 40, h: 30, angle: 0 });
@@ -555,7 +555,7 @@ describe("crop", () => {
       await drag([20, 15], [50, 100]);
       h.tools.crop.commit!(h.ctx());
       await h.s.pending;
-      expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(deletePixels ? rect(20, 25, 10, 20) : rect(20, 25, 20, 20));
+      expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(deletePixels ? rect(20, 25, 10, 20) : rect(20, 25, 20, 20));
     }
   });
 
@@ -570,7 +570,7 @@ describe("crop", () => {
     await h.s.pending;
     expect(h.s.doc.width).toBe(130);
     // The added canvas is transparent (there's no locked Background layer to fill).
-    expect(getPixel(h.s.doc.layers[0].tiles, 120, 50)[3]).toBe(0);
+    expect(getPixel(h.s.doc.layers[0].pixels, 120, 50)[3]).toBe(0);
   });
 
   it("turns the image under a fixed box (the view rotates), and crops it rotated", async () => {
@@ -597,7 +597,7 @@ describe("crop", () => {
     await h.s.pending;
     expect([h.s.doc.width, h.s.doc.height]).toEqual([Math.round(b.w), Math.round(b.h)]);
     // No transparent corners.
-    expect(getPixel(h.s.doc.layers[0].tiles, 1, 1)[3]).toBe(255);
+    expect(getPixel(h.s.doc.layers[0].pixels, 1, 1)[3]).toBe(255);
   });
 
   it("fits the box to a ratio, and resamples to W x H x Resolution", async () => {
@@ -660,8 +660,8 @@ describe("perspective crop", () => {
     await h.s.pending;
     expect(h.s.history).toEqual(["Perspective Crop"]);
     // Opaque everywhere: the quad lay within the white background.
-    expect(getPixel(h.s.doc.layers[0].tiles, 1, 1)[3]).toBe(255);
-    expect(getPixel(h.s.doc.layers[0].tiles, h.s.doc.width - 2, h.s.doc.height - 2)[3]).toBe(255);
+    expect(getPixel(h.s.doc.layers[0].pixels, 1, 1)[3]).toBe(255);
+    expect(getPixel(h.s.doc.layers[0].pixels, h.s.doc.width - 2, h.s.doc.height - 2)[3]).toBe(255);
   });
 
   it("refuses a quad that folds over itself", () => {
@@ -687,9 +687,9 @@ describe("snapping", () => {
   /** 100×100: a 24×24 square at (10, 10) on one layer, and a 20×20 one at (60, 60) on the active one. */
   const twoSquares = () => {
     const d = blank();
-    const other = createLayer({ name: "other", tiles: fillTiles(EMPTY_TILES, rect(10, 10, 24, 24), { r: 0, g: 0, b: 255 }) });
+    const other = createLayer({ name: "other", pixels: fillPixels(NO_PIXELS, rect(10, 10, 24, 24), { r: 0, g: 0, b: 255 }) });
     const withOther = { ...d, layers: [d.layers[0], other, d.layers[1]] };
-    return updateLayer(withOther, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(60, 60, 20, 20), { r: 255, g: 0, b: 0 }) });
+    return updateLayer(withOther, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(60, 60, 20, 20), { r: 255, g: 0, b: 0 }) });
   };
 
   it("marquee corners snap to guides and the canvas edge", async () => {
@@ -710,18 +710,18 @@ describe("snapping", () => {
     expect(h.s.smartGuides).toContainEqual({ axis: "x", at: 34, from: 10, to: 80 });
     t.up!(h.ctx(), h.ev(46, 70));
     await h.s.pending;
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(34, 60, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(34, 60, 20, 20));
 
     const h2 = harness(twoSquares());
     h2.s.snapTo = ALL;
     await h2.drag("move", [70, 70], [46, 70], { mod: true });
-    expect(contentBounds(layerOf(h2.s.doc).tiles)).toEqual(rect(36, 60, 20, 20));
+    expect(contentBounds(layerOf(h2.s.doc).pixels)).toEqual(rect(36, 60, 20, 20));
   });
 
   it("nothing snaps with snapping off", async () => {
     const h = harness(twoSquares());
     await h.drag("move", [70, 70], [46, 70]);
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(36, 60, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(36, 60, 20, 20));
   });
 
   it("Free Transform corners snap where they land", async () => {
@@ -744,7 +744,7 @@ describe("snapping", () => {
     expect(h.s.history).toEqual(["Move Guide"]);
     expect(h.s.doc.guides).toEqual([{ orientation: "vertical", position: 34 }]);
     // Untouched content: the drag moved the guide, not the layer.
-    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(60, 60, 20, 20));
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(60, 60, 20, 20));
     await h.drag("move", [34, 5], [-900, 5]);
     expect(h.s.history).toEqual(["Move Guide", "Delete Guide"]);
     expect(h.s.doc.guides).toEqual([]);

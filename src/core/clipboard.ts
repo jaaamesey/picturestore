@@ -2,7 +2,7 @@ import { addLayer, createLayer, docRect, flatten, nextLayerName, type Doc, type 
 import { intersect, isEmpty, type Rect, type Vec2 } from "./geometry";
 import { extractFloating, type Floating } from "./raster";
 import { rectMask } from "./selection";
-import { tilesFromImage, translateTiles } from "./tiles";
+import { pixelsFromImage, translatePixels } from "./pixels";
 
 /**
  * What Copy takes from a layer's pixels: the selection (or, with none, the
@@ -12,15 +12,15 @@ import { tilesFromImage, translateTiles } from "./tiles";
 export function copyPixels(doc: Doc, layer: Layer): Floating | null {
   const mask = doc.selection ?? rectMask(doc.width, doc.height, docRect(doc));
   if (!mask) return null;
-  const { floating } = extractFloating(layer.tiles, mask);
+  const { floating } = extractFloating(layer.pixels, mask);
   return isEmpty(floating.bounds) ? null : floating;
 }
 
 /** Copy Merged: the composite of all visible layers within the selection. */
 export function copyMerged(doc: Doc): Floating | null {
   const area = doc.selection ? doc.selection.bounds : docRect(doc);
-  const tiles = tilesFromImage(area.w, area.h, flatten(doc, area), area.x, area.y);
-  return copyPixels(doc, createLayer({ name: "", tiles }));
+  const pixels = pixelsFromImage(area.w, area.h, flatten(doc, area), area.x, area.y);
+  return copyPixels(doc, createLayer({ name: "", pixels }));
 }
 
 /**
@@ -31,8 +31,8 @@ export function copyMerged(doc: Doc): Floating | null {
 export function pasteFloating(doc: Doc, f: Floating, at: Vec2 | null): Doc {
   const dx = at ? Math.round(at.x - (f.bounds.x + f.bounds.w / 2)) : 0;
   const dy = at ? Math.round(at.y - (f.bounds.y + f.bounds.h / 2)) : 0;
-  const tiles = dx || dy ? translateTiles(f.tiles, dx, dy) : f.tiles;
-  return { ...addLayer(doc, createLayer({ name: nextLayerName(doc), tiles })), selection: null };
+  const pixels = dx || dy ? translatePixels(f.pixels, dx, dy) : f.pixels;
+  return { ...addLayer(doc, createLayer({ name: nextLayerName(doc), pixels })), selection: null };
 }
 
 /**

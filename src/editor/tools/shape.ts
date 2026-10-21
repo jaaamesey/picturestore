@@ -94,11 +94,11 @@ export function createShapeTool(id: ShapeToolId): Tool {
     const added = activeLayer(shown)!;
     if (added.content.kind !== "shape") return doc;
     const { geometry, style, placement: p } = added.content;
-    const tiles = await ctx.raster.shape(geometry, style, placementMapping(p), docRect(doc));
-    if (ctx.settings.shape.mode !== "pixels") return updateLayer(shown, added.id, { tiles });
+    const pixels = await ctx.raster.shape(geometry, style, placementMapping(p), docRect(doc));
+    if (ctx.settings.shape.mode !== "pixels") return updateLayer(shown, added.id, { pixels });
     const layer = activeLayer(doc)!;
-    const clipped = doc.selection ? extractFloating(tiles, doc.selection).floating.tiles : tiles;
-    return updateLayer(doc, layer.id, { tiles: compositeOver(layer.tiles, clipped) });
+    const clipped = doc.selection ? extractFloating(pixels, doc.selection).floating.pixels : pixels;
+    return updateLayer(doc, layer.id, { pixels: compositeOver(layer.pixels, clipped) });
   };
 
   return {

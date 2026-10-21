@@ -7,13 +7,13 @@ import { BLACK, WHITE, type RGB } from "../core/color";
 import {
   activeLayer,
   addLayer,
-  clearTiles,
+  clearPixels,
   convertToSmartObject,
   createDocument,
   createLayer,
   docRect,
   duplicateLayer,
-  fillTiles,
+  fillPixels,
   flatten,
   mergeDown,
   layerIndex,
@@ -52,7 +52,7 @@ import { intersect, isEmpty, rect, roundOut, translation, type Rect, type Vec2 }
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "../core/shape";
-import { EMPTY_TILES, contentBounds, tilesFromImage, type TileMap } from "../core/tiles";
+import { NO_PIXELS, contentBounds, pixelsFromImage, type Pixels } from "../core/pixels";
 import type { TransformMode, TransformState } from "../core/transform";
 import { mappingBounds, type Mapping } from "../core/warp";
 import type { FloatingLayer, Renderer, View } from "../gpu/renderer";
@@ -267,14 +267,14 @@ export function createEditor() {
     let mergeKey: string | null = null;
     let switching = false;
 
-    async function resample(f: Floating, mapping: Mapping, filter: Filter, clip?: Rect): Promise<TileMap> {
+    async function resample(f: Floating, mapping: Mapping, filter: Filter, clip?: Rect): Promise<Pixels> {
       const bounds = roundOut(mappingBounds(mapping));
       const dest = clip ? intersect(bounds, clip) : bounds;
-      if (isEmpty(dest) || isEmpty(f.bounds)) return EMPTY_TILES;
+      if (isEmpty(dest) || isEmpty(f.bounds)) return NO_PIXELS;
       if (gpu) {
         try {
           const pixels = await gpu.resample(f, mapping, dest, filter);
-          return tilesFromImage(dest.w, dest.h, pixels, dest.x, dest.y);
+          return pixelsFromImage(dest.w, dest.h, pixels, dest.x, dest.y);
         } catch (err) {
           // Out of GPU memory (or the device was lost): the CPU reference gives the same result, just slower.
           if (isOutOfMemory(err)) throw err;
@@ -285,7 +285,7 @@ export function createEditor() {
     }
 
     /** A shape's pixels: rasterized on the GPU and read back; the CPU reference without one. */
-    async function rasterizeShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): Promise<TileMap> {
+    async function rasterizeShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): Promise<Pixels> {
       if (gpu) {
         try {
           return await gpu.rasterizeShape(g, style, m, clip);
@@ -616,7 +616,7 @@ export function createEditor() {
       const l = s && activeLayer(s.doc());
       if (pending > 0 || !s || !l || !context(s).requireEditable(l, () => void cut())) return null;
       const f = copy(false);
-      if (f) pixelEdit("Cut", (d, x) => updateLayer(d, x.id, { tiles: clearTiles(x.tiles, d.selection) }));
+      if (f) pixelEdit("Cut", (d, x) => updateLayer(d, x.id, { pixels: clearPixels(x.pixels, d.selection) }));
       return f;
     }
 
@@ -670,7 +670,7 @@ export function createEditor() {
         ...old.content.source,
         width: cd.width,
         height: cd.height,
-        tiles: tilesFromImage(cd.width, cd.height, flatten(cd)),
+        pixels: pixelsFromImage(cd.width, cd.height, flatten(cd)),
         file: null,
       };
       const clip = docRect(pd);
@@ -680,8 +680,8 @@ export function createEditor() {
           if (l.content.kind !== "smart" || l.content.source.id !== link.sourceId) continue;
           // As in Photoshop: same transform, centred where the old contents were.
           const placement = resizedPlacement(l.content.placement, cd.width, cd.height);
-          const { content, tiles } = await withContent(l, { kind: "smart", source, placement }, clip, raster);
-          d = updateLayer(d, l.id, { content, tiles });
+          const { content, pixels } = await withContent(l, { kind: "smart", source, placement }, clip, raster);
+          d = updateLayer(d, l.id, { content, pixels });
         }
         return d;
       };
@@ -760,7 +760,7 @@ export function createEditor() {
       const shown = updateLayer(d, e.id, { content });
       e.s.setPreview(shown);
       const pixels = raster.shape(content.geometry, content.style, placementMapping(content.placement), docRect(d));
-      commitAsync(e.s, "Shape Properties", pixels.then((tiles) => updateLayer(d, e.id, { content, tiles })), `shape:${e.id}`);
+      commitAsync(e.s, "Shape Properties", pixels.then((rendered) => updateLayer(d, e.id, { content, pixels: rendered })), `shape:${e.id}`);
     }
 
     return {
@@ -941,9 +941,9 @@ export function createEditor() {
       setTransform: (state: TransformState) => withTool((ctx) => tools.transform.setState(ctx, state)),
       setTransformMode: (mode: TransformMode) => withTool((ctx) => tools.transform.setMode(ctx, mode)),
       fill: whenIdle((color: RGB) =>
-        pixelEdit("Fill", (d, l) => updateLayer(d, l.id, { tiles: fillTiles(l.tiles, docRect(d), color, d.selection) })),
+        pixelEdit("Fill", (d, l) => updateLayer(d, l.id, { pixels: fillPixels(l.pixels, docRect(d), color, d.selection) })),
       ),
-      clear: whenIdle(() => pixelEdit("Clear", (d, l) => updateLayer(d, l.id, { tiles: clearTiles(l.tiles, d.selection) }))),
+      clear: whenIdle(() => pixelEdit("Clear", (d, l) => updateLayer(d, l.id, { pixels: clearPixels(l.pixels, d.selection) }))),
 
       // Clipboard. `copy`/`cut` return the pixels for the system clipboard.
       copy: (merged = false) => (pending === 0 ? copy(merged) : null),
@@ -955,9 +955,9 @@ export function createEditor() {
         return true;
       },
       /** Pastes decoded pixels from another application as a new layer. */
-      pasteImage: whenIdle((tiles: TileMap) => {
-        const bounds = contentBounds(tiles);
-        if (!isEmpty(bounds)) paste({ tiles, bounds }, false);
+      pasteImage: whenIdle((pixels: Pixels) => {
+        const bounds = contentBounds(pixels);
+        if (!isEmpty(bounds)) paste({ pixels, bounds }, false);
       }),
       placeEmbedded: whenIdle(placeEmbedded),
       /**
@@ -1023,15 +1023,15 @@ export function createEditor() {
         layerEdit("Layer Via Copy", (d, l) => {
           if (!d.selection) return duplicateLayer(d, l.id);
           const f = copyPixels(d, l);
-          return f ? addLayer(d, createLayer({ name: nextLayerName(d), tiles: f.tiles })) : d;
+          return f ? addLayer(d, createLayer({ name: nextLayerName(d), pixels: f.pixels })) : d;
         }),
       ),
       layerViaCut: whenIdle(() =>
         pixelEdit("Layer Via Cut", (d, l) => {
           const f = d.selection && copyPixels(d, l);
           if (!f) return d;
-          const cut = updateLayer(d, l.id, { tiles: clearTiles(l.tiles, d.selection) });
-          return addLayer(cut, createLayer({ name: nextLayerName(d), tiles: f.tiles }));
+          const cut = updateLayer(d, l.id, { pixels: clearPixels(l.pixels, d.selection) });
+          return addLayer(cut, createLayer({ name: nextLayerName(d), pixels: f.pixels }));
         }),
       ),
       deleteLayer: whenIdle((id?: string) => edit("Delete Layer", (d) => removeLayer(d, id ?? d.activeLayerId))),

@@ -56,7 +56,7 @@ test("GPU shape rendering matches the CPU reference, on screen and read back", a
       visible: true,
       opacity: 1,
       blendMode: "normal",
-      tiles: new Map(),
+      pixels: new Map(),
       content: { kind: "shape", ...s },
     }));
     // Display: layers carry no pixels, so everything on screen came from the GPU rasterizer.
@@ -65,7 +65,7 @@ test("GPU shape rendering matches the CPU reference, on screen and read back", a
     const gpu = await ps.renderer!.readComposite();
     const reference = layers.map((l) => ({
       ...l,
-      tiles: ref.renderShape(l.content.geometry as never, l.content.style as never, ref.placementMapping(l.content.placement as never), clip),
+      pixels: ref.renderShape(l.content.geometry as never, l.content.style as never, ref.placementMapping(l.content.placement as never), clip),
     }));
     const cpu = ref.flatten({ width: W, height: H, layers: reference, activeLayerId: id(0), selection: null } as never);
     const compare = (a: ArrayLike<number>, b: ArrayLike<number>) => {
@@ -88,7 +88,7 @@ test("GPU shape rendering matches the CPU reference, on screen and read back", a
     const readback = [];
     for (const l of reference) {
       const tiles = await ps.renderer!.rasterizeShape(l.content.geometry as never, l.content.style as never, ref.placementMapping(l.content.placement as never), clip);
-      readback.push(compare(ref.readRect(tiles, clip), ref.readRect(l.tiles, clip)));
+      readback.push(compare(ref.readRect(tiles, clip), ref.readRect(l.pixels, clip)));
     }
     return { display, readback };
   });

@@ -121,7 +121,7 @@ test.describe("Free Transform", () => {
     await drag(page, [150, 170], [175, 230]);
     await page.evaluate(() => {
       const w = window as unknown as Record<string, unknown> & typeof window;
-      const ed = w.__ps!.editor as { active(): { floating(): { tiles: unknown; bounds: unknown; mapping: unknown } } };
+      const ed = w.__ps!.editor as { active(): { floating(): { pixels: unknown; bounds: unknown; mapping: unknown } } };
       const f = ed.active().floating();
       w.__expected = w.__ps!.reference!.transformFloatingCpu(f as never, f.mapping as never, "bicubic");
     });
@@ -158,12 +158,12 @@ async function compareLayerWithExpected(page: Page) {
   await settled(page);
   return page.evaluate(() => {
     const w = window as unknown as Record<string, unknown> & typeof window;
-    const ed = w.__ps!.editor as { active(): { doc(): { layers: { id: string; tiles: Map<number, unknown> }[]; activeLayerId: string } } };
+    const ed = w.__ps!.editor as { active(): { doc(): { layers: { id: string; pixels: Map<number, unknown> }[]; activeLayerId: string } } };
     const doc = ed.active().doc();
     const layer = doc.layers.find((l) => l.id === doc.activeLayerId)!;
     const expected = w.__expected as Map<number, unknown>;
     const area = { x: 0, y: 0, w: 400, h: 300 };
-    const a = w.__ps!.reference!.readRect(layer.tiles as never, area);
+    const a = w.__ps!.reference!.readRect(layer.pixels as never, area);
     const b = w.__ps!.reference!.readRect(expected as never, area);
     let pixels = 0, mismatched = 0;
     for (let i = 0; i < a.length; i += 4) {

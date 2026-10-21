@@ -1,7 +1,8 @@
 import type { RGB } from "./color";
 import { rasterizeContours, type Coverage } from "./coverage";
 import { isEmpty, rect, union, vec, type Rect, type Vec2 } from "./geometry";
-import { EMPTY_TILES, tileWriter, writeSpans, type TileMap } from "./tiles";
+import { blendColorSpan } from "./document";
+import { NO_PIXELS, tileWriter, writeSpans, type Pixels } from "./pixels";
 import { mapPoint, squareToQuad, type Mapping } from "./warp";
 
 /**
@@ -213,9 +214,9 @@ export function strokePolygons(contours: readonly (readonly Vec2[])[], width: nu
   return out;
 }
 
-/** Composites `color` with per-pixel `coverage` over the tiles in `w`. */
-function paintCoverage(tiles: TileMap, c: Coverage, color: RGB): TileMap {
-  const w = tileWriter(tiles);
+/** Composites `color` with per-pixel `coverage` over `pixels`. */
+function paintCoverage(pixels: Pixels, c: Coverage, color: RGB): Pixels {
+  const w = tileWriter(pixels);
   const { region, data } = c;
   const covered = (part: Rect) => {
     for (let y = part.y; y < part.y + part.h; y++)
@@ -225,19 +226,7 @@ function paintCoverage(tiles: TileMap, c: Coverage, color: RGB): TileMap {
   writeSpans(
     w,
     region,
-    (d, i, x0, y, n) => {
-      for (let ci = (y - region.y) * region.w + (x0 - region.x), end = ci + n; ci < end; ci++, i += 4) {
-        const a = data[ci] / 255;
-        if (a <= 0) continue;
-        const da = d[i + 3] / 255;
-        const oa = a + da * (1 - a);
-        const keep = (da * (1 - a)) / oa;
-        d[i] = color.r * (a / oa) + d[i] * keep;
-        d[i + 1] = color.g * (a / oa) + d[i + 1] * keep;
-        d[i + 2] = color.b * (a / oa) + d[i + 2] * keep;
-        d[i + 3] = oa * 255;
-      }
-    },
+    (d, i, x, y, n) => blendColorSpan(d, i, n, color, 1, data, (y - region.y) * region.w + (x - region.x)),
     { wanted: covered },
   );
   return w.finish();
@@ -260,11 +249,11 @@ export const fillCoverage = (g: ShapeGeometry, m: Mapping, clip: Rect) => raster
  * `clip` — the canvas: the vector is the source of truth, so nothing outside
  * it needs caching.
  */
-export function renderShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): TileMap {
+export function renderShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): Pixels {
   const outline = shapeOutline(g, m);
   const fill = rasterizeContours(outline, clip);
-  let tiles: TileMap = EMPTY_TILES;
-  if (style.fill && fill) tiles = paintCoverage(tiles, fill, style.fill);
+  let pixels: Pixels = NO_PIXELS;
+  if (style.fill && fill) pixels = paintCoverage(pixels, fill, style.fill);
   const s = style.stroke;
   if (s && s.width > 0) {
     // Inside/outside strokes are a doubled centre stroke clipped by the fill.
@@ -285,13 +274,13 @@ export function renderShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, cli
             const fv = f(r.x + x, r.y + y);
             clipped[i] = s.align === "inside" ? (stroke.data[i] * fv) / 255 : (stroke.data[i] * (255 - fv)) / 255;
           }
-        tiles = paintCoverage(tiles, { region: r, data: clipped }, s.color);
+        pixels = paintCoverage(pixels, { region: r, data: clipped }, s.color);
       } else {
-        tiles = paintCoverage(tiles, stroke, s.color);
+        pixels = paintCoverage(pixels, stroke, s.color);
       }
     }
   }
-  return tiles;
+  return pixels;
 }
 
 /** Document-space bounds a rendered shape can touch (outline plus stroke). */

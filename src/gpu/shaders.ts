@@ -1,5 +1,5 @@
 import { BLEND_MODES } from "../core/blend";
-import { TILE_SIZE } from "../core/tiles";
+import { TILE_SIZE } from "../core/pixels";
 
 /** Atlas page side in texels: 8×8 full-resolution tiles, or more at reduced quality. */
 export const ATLAS_PAGE = 8 * TILE_SIZE;

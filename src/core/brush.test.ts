@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_BRUSH, beginStroke, createInterpolator, dabAlpha, type BrushSettings } from "./brush";
 import { rect } from "./geometry";
 import { rectMask } from "./selection";
-import { EMPTY_TILES, getPixel, tilesFromImage } from "./tiles";
+import { NO_PIXELS, getPixel, pixelsFromImage } from "./pixels";
 
 const red = { r: 255, g: 0, b: 0 };
 const clip = rect(0, 0, 100, 100);
@@ -27,7 +27,7 @@ describe("dab rasterization", () => {
   it.each([
     [3, 1], [3, 0.5], [12.3, 0], [12.3, 0.8], [40, 0.3],
   ])("matches the analytic profile (radius %f, hardness %f)", (radius, hardness) => {
-    const s = beginStroke(EMPTY_TILES, {
+    const s = beginStroke(NO_PIXELS, {
       brush: brush({ size: radius * 2, hardness, flow: 1, opacity: 1 }),
       color: red, erase: false, selection: null, clip,
     });
@@ -61,30 +61,30 @@ describe("interpolation", () => {
 
 describe("strokes", () => {
   it("paints the brush colour", () => {
-    const s = beginStroke(EMPTY_TILES, { brush: brush({ size: 10, hardness: 1 }), color: red, erase: false, selection: null, clip });
+    const s = beginStroke(NO_PIXELS, { brush: brush({ size: 10, hardness: 1 }), color: red, erase: false, selection: null, clip });
     s.add({ x: 50, y: 50, pressure: 1 });
-    const tiles = s.finish();
-    expect(getPixel(tiles, 50, 50)).toEqual([255, 0, 0, 255]);
-    expect(getPixel(tiles, 60, 50)[3]).toBe(0);
+    const pixels = s.finish();
+    expect(getPixel(pixels, 50, 50)).toEqual([255, 0, 0, 255]);
+    expect(getPixel(pixels, 60, 50)[3]).toBe(0);
   });
 
   it("never exceeds stroke opacity where dabs overlap", () => {
-    const s = beginStroke(EMPTY_TILES, { brush: brush({ size: 10, opacity: 0.5, flow: 1 }), color: red, erase: false, selection: null, clip });
+    const s = beginStroke(NO_PIXELS, { brush: brush({ size: 10, opacity: 0.5, flow: 1 }), color: red, erase: false, selection: null, clip });
     for (let x = 40; x <= 60; x++) s.add({ x, y: 50, pressure: 1 });
     expect(getPixel(s.finish(), 50, 50)[3]).toBe(128);
   });
 
   it("builds up with low flow", () => {
-    const one = beginStroke(EMPTY_TILES, { brush: brush({ size: 10, flow: 0.2 }), color: red, erase: false, selection: null, clip });
+    const one = beginStroke(NO_PIXELS, { brush: brush({ size: 10, flow: 0.2 }), color: red, erase: false, selection: null, clip });
     one.add({ x: 50, y: 50, pressure: 1 });
-    const many = beginStroke(EMPTY_TILES, { brush: brush({ size: 10, flow: 0.2 }), color: red, erase: false, selection: null, clip });
+    const many = beginStroke(NO_PIXELS, { brush: brush({ size: 10, flow: 0.2 }), color: red, erase: false, selection: null, clip });
     for (let x = 45; x <= 55; x++) many.add({ x, y: 50, pressure: 1 });
     expect(getPixel(many.finish(), 50, 50)[3]).toBeGreaterThan(getPixel(one.finish(), 50, 50)[3]);
   });
 
   it("is clipped by the selection and the canvas", () => {
     const sel = rectMask(100, 100, rect(0, 0, 50, 100));
-    const s = beginStroke(EMPTY_TILES, { brush: brush({ size: 20, hardness: 1 }), color: red, erase: false, selection: sel, clip });
+    const s = beginStroke(NO_PIXELS, { brush: brush({ size: 20, hardness: 1 }), color: red, erase: false, selection: sel, clip });
     s.add({ x: 50, y: 50, pressure: 1 });
     s.add({ x: 99, y: 99, pressure: 1 });
     const t = s.finish();
@@ -94,7 +94,7 @@ describe("strokes", () => {
   });
 
   it("erases, leaving the base untouched", () => {
-    const base = tilesFromImage(100, 100, new Uint8ClampedArray(100 * 100 * 4).fill(255));
+    const base = pixelsFromImage(100, 100, new Uint8ClampedArray(100 * 100 * 4).fill(255));
     const s = beginStroke(base, { brush: brush({ size: 10, hardness: 1 }), color: red, erase: true, selection: null, clip });
     s.add({ x: 50, y: 50, pressure: 1 });
     expect(getPixel(s.finish(), 50, 50)[3]).toBe(0);
@@ -102,7 +102,7 @@ describe("strokes", () => {
   });
 
   it("scales size with pressure", () => {
-    const s = beginStroke(EMPTY_TILES, { brush: { ...brush({ size: 20, hardness: 1 }), pressureSize: true }, color: red, erase: false, selection: null, clip });
+    const s = beginStroke(NO_PIXELS, { brush: { ...brush({ size: 20, hardness: 1 }), pressureSize: true }, color: red, erase: false, selection: null, clip });
     s.add({ x: 50, y: 50, pressure: 0.25 });
     const t = s.finish();
     expect(getPixel(t, 50, 50)[3]).toBe(255);

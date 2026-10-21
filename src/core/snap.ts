@@ -1,6 +1,6 @@
 import type { Doc, Guide } from "./document";
 import { isEmpty, type Rect, type Vec2 } from "./geometry";
-import { contentBounds } from "./tiles";
+import { contentBounds } from "./pixels";
 
 /**
  * Photoshop's snapping (View ▸ Snap, View ▸ Snap To): a dragged point, or
@@ -69,7 +69,7 @@ export function snapTargets(doc: Doc, to: SnapTo, exclude: readonly string[] = [
   if (to.layers) {
     for (const l of doc.layers) {
       if (!l.visible || exclude.includes(l.id)) continue;
-      const b = contentBounds(l.tiles);
+      const b = contentBounds(l.pixels);
       if (!isEmpty(b)) box(b, "layer");
     }
   }

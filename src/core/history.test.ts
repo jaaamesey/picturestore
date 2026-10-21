@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { createDocument, updateLayer } from "./document";
 import { amend, canRedo, createHistory, currentDoc, dropOne, historyBytes, jump, limitSteps, push, redo, retainedBytes, undo } from "./history";
-import { fillTiles } from "./document";
+import { fillPixels } from "./document";
 import { rect } from "./geometry";
 
 const d0 = createDocument({ width: 4, height: 4 });
@@ -35,7 +35,7 @@ it("jumps", () => {
 
 it("shares unchanged tiles between snapshots", () => {
   const h = push(createHistory(d0), "rename", named("x"));
-  expect(h.entries[1].doc.layers[0].tiles).toBe(h.entries[0].doc.layers[0].tiles);
+  expect(h.entries[1].doc.layers[0].pixels).toBe(h.entries[0].doc.layers[0].pixels);
 });
 
 it("amends the current entry, dropping redo", () => {
@@ -46,13 +46,13 @@ it("amends the current entry, dropping redo", () => {
 
 const TILE = 256 * 256 * 4;
 const painted = (d: typeof d0, x: number) =>
-  updateLayer(d, id, { tiles: fillTiles(d.layers[0].tiles, rect(x, 0, 1, 1), { r: x % 255, g: 0, b: 0 }) });
+  updateLayer(d, id, { pixels: fillPixels(d.layers[0].pixels, rect(x, 0, 1, 1), { r: x % 255, g: 0, b: 0 }) });
 
 it("counts only the bytes each step newly retains", () => {
   const big = createDocument({ width: 1024, height: 256 }); // 4 tiles
   expect(retainedBytes(big, null)).toBe(4 * TILE);
   const id0 = big.layers[0].id;
-  const one = updateLayer(big, id0, { tiles: fillTiles(big.layers[0].tiles, rect(0, 0, 1, 1), { r: 1, g: 2, b: 3 }) });
+  const one = updateLayer(big, id0, { pixels: fillPixels(big.layers[0].pixels, rect(0, 0, 1, 1), { r: 1, g: 2, b: 3 }) });
   expect(retainedBytes(one, big)).toBe(TILE); // one tile copied, three shared
   expect(retainedBytes(updateLayer(one, id0, { name: "x" }), one)).toBe(0);
 });

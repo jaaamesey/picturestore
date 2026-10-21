@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { addLayer, createDocument, createLayer, fillTiles, type Doc } from "./document";
+import { addLayer, createDocument, createLayer, fillPixels, type Doc } from "./document";
 import { rect, vec } from "./geometry";
 import { snapPoint, snapRect, snapTargets, transformGuides, type SnapTo } from "./snap";
-import { EMPTY_TILES } from "./tiles";
+import { NO_PIXELS } from "./pixels";
 
 const ALL: SnapTo = { guides: true, grid: null, layers: true, bounds: true };
 
 /** 400×300 with a layer covering (100, 50)–(150, 90) and a vertical guide at x = 333. */
 function doc(): Doc {
-  const d = addLayer(createDocument({ width: 400, height: 300, background: null }), createLayer({ name: "box", tiles: fillTiles(EMPTY_TILES, rect(100, 50, 50, 40), { r: 1, g: 2, b: 3 }) }));
+  const d = addLayer(createDocument({ width: 400, height: 300, background: null }), createLayer({ name: "box", pixels: fillPixels(NO_PIXELS, rect(100, 50, 50, 40), { r: 1, g: 2, b: 3 }) }));
   return { ...d, guides: [{ orientation: "vertical", position: 333 }] };
 }
 

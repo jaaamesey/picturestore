@@ -1,11 +1,11 @@
 import { readPsd } from "ag-psd";
 import { describe, expect, it } from "vitest";
-import { addLayer, createDocument, createLayer, fillTiles, flatten, type Doc } from "../core/document";
+import { addLayer, createDocument, createLayer, fillPixels, flatten, type Doc } from "../core/document";
 import { rect } from "../core/geometry";
-import { EMPTY_TILES } from "../core/tiles";
+import { NO_PIXELS } from "../core/pixels";
 import { CPU_RASTERIZERS, smartObjectLayer, smartSource } from "../core/content";
 import { renderShape } from "../core/shape";
-import { getPixel } from "../core/tiles";
+import { getPixel } from "../core/pixels";
 import { quadOf } from "../core/warp";
 import { readPsdDocument, writePsdDocument } from "./psd";
 
@@ -18,7 +18,7 @@ function sampleDoc(): Doc {
     opacity: 0.75,
     blendMode: "screen",
     // Extends off-canvas (negative coordinates) to check that is preserved.
-    tiles: fillTiles(EMPTY_TILES, rect(-20, 150, 100, 80), { r: 200, g: 100, b: 0 }),
+    pixels: fillPixels(NO_PIXELS, rect(-20, 150, 100, 80), { r: 200, g: 100, b: 0 }),
   });
   return addLayer(d, layer);
 }
@@ -67,7 +67,7 @@ describe("PSD", () => {
 
   it("keeps smart objects live: placement, warp and embedded contents", async () => {
     const d = createDocument({ width: 200, height: 100 });
-    const src = smartSource("Photo", 20, 10, fillTiles(EMPTY_TILES, rect(0, 0, 20, 10), { r: 0, g: 200, b: 0 }));
+    const src = smartSource("Photo", 20, 10, fillPixels(NO_PIXELS, rect(0, 0, 20, 10), { r: 0, g: 200, b: 0 }));
     const placement = { source: rect(0, 0, 20, 10), quad: quadOf(rect(50, 20, 80, 40)), angle: 0, patch: null };
     const doc = addLayer(d, await smartObjectLayer(d, src, cpu, placement));
     const back = await readPsdDocument(new Uint8Array(writePsdDocument(doc)));
@@ -77,8 +77,8 @@ describe("PSD", () => {
     expect(l.content.placement.quad).toEqual(placement.quad);
     expect([l.content.source.width, l.content.source.height]).toEqual([20, 10]);
     // The embedded contents (written as a .psb) come back pixel-exact.
-    expect(getPixel(l.content.source.tiles, 5, 5)).toEqual([0, 200, 0, 255]);
-    expect(getPixel(l.tiles, 90, 40)).toEqual([0, 200, 0, 255]);
+    expect(getPixel(l.content.source.pixels, 5, 5)).toEqual([0, 200, 0, 255]);
+    expect(getPixel(l.pixels, 90, 40)).toEqual([0, 200, 0, 255]);
   });
 
   it("keeps solid-colour shapes live as vector paths", async () => {
@@ -87,7 +87,7 @@ describe("PSD", () => {
     const style = { fill: { r: 255, g: 0, b: 0 }, stroke: { color: { r: 0, g: 0, b: 255 }, width: 4, align: "center" as const } };
     const placement = { source: rect(0, 0, 60, 40), quad: quadOf(rect(20, 30, 60, 40)), angle: 0, patch: null };
     const tiles = renderShape(geometry, style, placement, rect(0, 0, 100, 100));
-    const doc = addLayer(d, createLayer({ name: "Rectangle 1", tiles, content: { kind: "shape", geometry, style, placement } }));
+    const doc = addLayer(d, createLayer({ name: "Rectangle 1", pixels: tiles, content: { kind: "shape", geometry, style, placement } }));
     const back = await readPsdDocument(new Uint8Array(writePsdDocument(doc)));
     const l = back.layers[1];
     expect(l.content.kind).toBe("shape");
@@ -98,7 +98,7 @@ describe("PSD", () => {
     const again = renderShape(l.content.geometry, l.content.style, l.content.placement, rect(0, 0, 100, 100));
     let maxDiff = 0;
     const a = flatten({ ...doc, layers: [doc.layers[1]] });
-    const b = flatten({ ...doc, layers: [{ ...doc.layers[1], tiles: again }] });
+    const b = flatten({ ...doc, layers: [{ ...doc.layers[1], pixels: again }] });
     for (let i = 0; i < a.length; i++) maxDiff = Math.max(maxDiff, Math.abs(a[i] - b[i]));
     expect(maxDiff).toBeLessThanOrEqual(2);
   });

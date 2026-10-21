@@ -15,7 +15,7 @@ import { placementMapping } from "../core/content";
 import { PIXELS, resolutionOf, createLayer, docRect, flatten, type Doc, type Layer, type LayerContent, type SmartSource } from "../core/document";
 import { boundsOf, isEmpty, rect, vec, type Vec2 } from "../core/geometry";
 import { documentKnots, type Knot, type ShapeStyle } from "../core/shape";
-import { EMPTY_TILES, contentBounds, readRect, tilesFromImage, type TileMap } from "../core/tiles";
+import { NO_PIXELS, contentBounds, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
 import { isIdentityPatch, quadOf, type Patch, type Quad } from "../core/warp";
 
 // ag-psd allocates pixel buffers through these hooks. Plain buffers avoid canvas
@@ -83,18 +83,18 @@ function mimeOf(b: Uint8Array): string {
 async function readSource(f: LinkedFile, decode: ImageDecoder): Promise<SmartSource | null> {
   const bytes = f.data;
   if (!bytes || bytes.length < 4) return null;
-  let width: number, height: number, tiles: TileMap;
+  let width: number, height: number, pixels: Pixels;
   if (isPsdBytes(bytes)) {
     const inner = await readPsdDocument(bytes, decode);
     ({ width, height } = inner);
-    tiles = tilesFromImage(width, height, flatten(inner));
+    pixels = pixelsFromImage(width, height, flatten(inner));
   } else {
     const img = await decode(bytes);
     if (!img) return null;
     ({ width, height } = img);
-    tiles = tilesFromImage(width, height, img.pixels);
+    pixels = pixelsFromImage(width, height, img.pixels);
   }
-  return { id: f.id, name: f.name.replace(/\.[^.]+$/, ""), width, height, tiles, file: { bytes, type: f.type?.trim() || mimeOf(bytes) } };
+  return { id: f.id, name: f.name.replace(/\.[^.]+$/, ""), width, height, pixels, file: { bytes, type: f.type?.trim() || mimeOf(bytes) } };
 }
 
 const quadFrom = (t: readonly number[]): Quad => [vec(t[0], t[1]), vec(t[2], t[3]), vec(t[4], t[5]), vec(t[6], t[7])];
@@ -186,11 +186,11 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
         walk(c.children, v, o);
         continue;
       }
-      let tiles = EMPTY_TILES;
+      let pixels = NO_PIXELS;
       if (c.imageData && c.imageData.width > 0 && c.imageData.height > 0) {
-        const pixels = new Uint8ClampedArray(to8bit(c.imageData));
-        applyMask(pixels, c);
-        tiles = tilesFromImage(c.imageData.width, c.imageData.height, pixels, c.left ?? 0, c.top ?? 0);
+        const data = new Uint8ClampedArray(to8bit(c.imageData));
+        applyMask(data, c);
+        pixels = pixelsFromImage(c.imageData.width, c.imageData.height, data, c.left ?? 0, c.top ?? 0);
       }
       // Photoshop's own rendering is kept as the layer's pixels; the content stays editable.
       const content = smartContent(c, sources) ?? shapeContent(c) ?? PIXELS;
@@ -200,7 +200,7 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
           visible: v,
           opacity: o,
           blendMode: c.blendMode && isBlendMode(c.blendMode) ? c.blendMode : "normal",
-          tiles,
+          pixels,
           content,
         }),
       );
@@ -209,7 +209,7 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
   walk(psd.children ?? [], true, 1);
 
   if (layers.length === 0 && psd.imageData) {
-    layers.push(createLayer({ name: "Background", tiles: tilesFromImage(psd.width, psd.height, to8bit(psd.imageData)) }));
+    layers.push(createLayer({ name: "Background", pixels: pixelsFromImage(psd.width, psd.height, to8bit(psd.imageData)) }));
   }
   if (layers.length === 0) layers.push(createLayer({ name: "Layer 1" }));
   const res = psd.imageResources?.resolutionInfo;
@@ -234,8 +234,8 @@ function linkedFile(src: SmartSource): LinkedFile {
       {
         width: src.width,
         height: src.height,
-        children: [{ name: src.name, left: 0, top: 0, right: src.width, bottom: src.height, imageData: { width: src.width, height: src.height, data: readRect(src.tiles, rect(0, 0, src.width, src.height)) } }],
-        imageData: { width: src.width, height: src.height, data: readRect(src.tiles, rect(0, 0, src.width, src.height)) },
+        children: [{ name: src.name, left: 0, top: 0, right: src.width, bottom: src.height, imageData: { width: src.width, height: src.height, data: readRect(src.pixels, rect(0, 0, src.width, src.height)) } }],
+        imageData: { width: src.width, height: src.height, data: readRect(src.pixels, rect(0, 0, src.width, src.height)) },
       },
       { generateThumbnail: false, noBackground: true },
     ),
@@ -311,7 +311,7 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
 export function writePsdDocument(doc: Doc): ArrayBuffer {
   const linked = new Map<string, LinkedFile>();
   const children: PsdLayer[] = doc.layers.map((l) => {
-    const b = contentBounds(l.tiles);
+    const b = contentBounds(l.pixels);
     const base = { name: l.name, opacity: l.opacity, blendMode: l.blendMode, hidden: !l.visible, ...contentFields(l.content, linked) };
     if (isEmpty(b)) return { ...base, left: 0, top: 0, right: 0, bottom: 0 };
     return {
@@ -320,7 +320,7 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
       top: b.y,
       right: b.x + b.w,
       bottom: b.y + b.h,
-      imageData: { width: b.w, height: b.h, data: readRect(l.tiles, b) },
+      imageData: { width: b.w, height: b.h, data: readRect(l.pixels, b) },
     };
   });
   const psd: Psd = {

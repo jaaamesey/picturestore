@@ -6,7 +6,7 @@ import { RULER_PX } from "../view";
 import { compositeOver, extractFloating } from "../../core/raster";
 import type { Filter } from "../../core/rasterize";
 import { transformMask, translateMask } from "../../core/selection";
-import { EMPTY_TILES, contentBounds, translateTiles } from "../../core/tiles";
+import { NO_PIXELS, contentBounds, translatePixels } from "../../core/pixels";
 import {
   dragTransform,
   flip,
@@ -54,7 +54,7 @@ export interface Target {
  * commit. Whole-pixel moves are exact copies; anything else is resampled.
  */
 function pixelTarget(doc: Doc, layer: Layer): Target | null {
-  const { floating, rest } = extractFloating(layer.tiles, doc.selection);
+  const { floating, rest } = extractFloating(layer.pixels, doc.selection);
   if (isEmpty(floating.bounds)) return null;
   const initial = initialTransform(floating.bounds);
   return {
@@ -62,8 +62,8 @@ function pixelTarget(doc: Doc, layer: Layer): Target | null {
     initial,
     frame: initial,
     show(ctx, s) {
-      ctx.preview({ ...updateLayer(doc, layer.id, { tiles: rest }), selection: null }, {
-        tiles: floating.tiles,
+      ctx.preview({ ...updateLayer(doc, layer.id, { pixels: rest }), selection: null }, {
+        pixels: floating.pixels,
         bounds: floating.bounds,
         mapping: toMapping(s),
         aboveLayerId: layer.id,
@@ -74,9 +74,9 @@ function pixelTarget(doc: Doc, layer: Layer): Target | null {
     async place(ctx, s, filter) {
       const offset = integerOffset(s);
       const sel = doc.selection;
-      const moved = offset ? translateTiles(floating.tiles, offset.x, offset.y) : await ctx.raster.resample(floating, toMapping(s), filter);
+      const moved = offset ? translatePixels(floating.pixels, offset.x, offset.y) : await ctx.raster.resample(floating, toMapping(s), filter);
       const selection = sel && (offset ? translateMask(sel, offset.x, offset.y) : transformMask(sel, toMapping(s)));
-      return { ...updateLayer(doc, layer.id, { tiles: compositeOver(rest, moved) }), selection };
+      return { ...updateLayer(doc, layer.id, { pixels: compositeOver(rest, moved) }), selection };
     },
   };
 }
@@ -99,7 +99,7 @@ function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { 
     show(ctx, s) {
       // Shapes preview as themselves: the renderer rasterizes the vector on the GPU, exactly, every frame.
       if (content.kind === "shape") return ctx.preview(updateLayer(doc, layer.id, { content: at(s) }));
-      ctx.preview(updateLayer(doc, layer.id, { tiles: EMPTY_TILES }), {
+      ctx.preview(updateLayer(doc, layer.id, { pixels: NO_PIXELS }), {
         ...sourceFloating(content.source),
         mapping: toMapping(s),
         aboveLayerId: layer.id,
@@ -108,8 +108,8 @@ function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { 
       });
     },
     async place(ctx, s, filter) {
-      const { content: c, tiles } = await withContent(layer, at(s), clip, ctx.raster, filter);
-      return updateLayer(doc, layer.id, { content: c, tiles });
+      const { content: c, pixels } = await withContent(layer, at(s), clip, ctx.raster, filter);
+      return updateLayer(doc, layer.id, { content: c, pixels });
     },
   };
 }
@@ -130,7 +130,7 @@ export function moveFrame(doc: Doc): TransformState | null {
   const layer = activeLayer(doc);
   if (!layer || !layer.visible) return null;
   if (layer.content.kind !== "pixels") return framedState(layer.content.placement);
-  const b = contentBounds(layer.tiles);
+  const b = contentBounds(layer.pixels);
   const box = doc.selection ? intersect(b, doc.selection.bounds) : b;
   return isEmpty(box) ? null : initialTransform(box);
 }

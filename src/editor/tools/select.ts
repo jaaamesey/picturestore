@@ -126,7 +126,7 @@ export const wandTool: Tool = {
     const layer = activeLayer(doc);
     if (!layer) return;
     const mode = modeFromModifiers(settings.selectionMode, e.shift, e.alt);
-    const shape = magicWand(layer.tiles, doc.width, doc.height, e, settings.tolerance, settings.contiguous);
+    const shape = magicWand(layer.pixels, doc.width, doc.height, e, settings.tolerance, settings.contiguous);
     applySelection(ctx, "Magic Wand", mode, shape);
   },
 };

@@ -133,7 +133,9 @@ e2e/        Playwright tests.
 **Immutable documents with structural sharing.** A `Doc` is a plain immutable value. Layer pixels live in a
 sparse grid of 256×256 RGBA tiles in document space (so layers can extend past the canvas), keyed by packed
 integers. Edits go through a copy-on-write `TileWriter`, so each new `Doc` shares every untouched layer and
-tile with its predecessor; undo history is a list of snapshots costing roughly what each step changed. Each
+tile with its predecessor. The tiling stays inside `core/pixels.ts` (and the GPU renderer): everything else
+sees a layer's `Pixels` as one image and works in regions — rectangles, row-span visitors, bounds, shifts,
+clips — so no other code computes where a pixel is stored; undo history is a list of snapshots costing roughly what each step changed. Each
 history entry records the bytes it newly retains (by object identity: new tiles, smart object sources), and
 the oldest states are dropped past 50 steps or the memory budget. Asynchronous commits (GPU resampling) block
 input until they land, and a result is discarded rather than applied if its base document changed.
@@ -145,7 +147,7 @@ their quad, which is exact even for perspective and warps — and lengths that b
 widths, later effect sizes and type) scale by Scale Styles' factor.
 
 **Layer content** is pixels, a smart object (an embedded source plus a placement: quad, orientation, warp) or a
-shape (vector geometry plus fill/stroke, also placed). A layer's tiles are always its rendered pixels, so the
+shape (vector geometry plus fill/stroke, also placed). A layer's `pixels` are always its rendered pixels, so the
 compositor and GPU never care which kind it is; transforming a smart object or shape edits its placement and
 re-renders. Shapes rasterize with the same exact-area coverage as selections, with adaptive Bézier
 flattening after mapping and strokes built from edge quads with miter/bevel joins.

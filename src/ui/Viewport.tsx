@@ -1,7 +1,7 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onSettled, untrack, useContext } from "solid-js";
 import type { Vec2 } from "../core/geometry";
 import type { transformFloatingCpu } from "../core/raster";
-import type { readRect } from "../core/tiles";
+import type { readRect } from "../core/pixels";
 import type { renderShape } from "../core/shape";
 import type { flatten } from "../core/document";
 import type { placementMapping } from "../core/content";

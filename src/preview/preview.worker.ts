@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import { CPU_RASTERIZERS } from "../core/content";
 import { imageSizePreview } from "../core/documentTransform";
-import type { Tile } from "../core/tiles";
+import type { Tile } from "../core/pixels";
 import { fromWire, type Request, type Response } from "./wire";
 
 /**

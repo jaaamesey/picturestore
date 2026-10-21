@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { CPU_RASTERIZERS, placementMapping } from "./content";
-import { addLayer, createDocument, createLayer, fillTiles, flatten, resolutionOf, type Doc, type Placement } from "./document";
+import { addLayer, createDocument, createLayer, fillPixels, flatten, resolutionOf, type Doc, type Placement } from "./document";
 import { affine3, imageSize, imageSizeWindow, resizeCanvas, transformPlacement } from "./documentTransform";
 import { rect, scaling, type Vec2 } from "./geometry";
 import { rectMask } from "./selection";
 import { renderShape } from "./shape";
-import { EMPTY_TILES, contentBounds, getPixel } from "./tiles";
+import { NO_PIXELS, contentBounds, getPixel } from "./pixels";
 import { IDENTITY_PATCH, mapPoint, quadOf } from "./warp";
 
 const cpu = CPU_RASTERIZERS;
@@ -14,13 +14,13 @@ const red = { r: 255, g: 0, b: 0 }, blue = { r: 0, g: 0, b: 255 };
 /** A 200×100 document: a red square (pixels) and a shape with a 4 px centred stroke. */
 function doc(): Doc {
   const d = createDocument({ width: 200, height: 100, background: null });
-  const pixels = createLayer({ name: "px", tiles: fillTiles(EMPTY_TILES, rect(10, 10, 20, 20), red) });
+  const pixels = createLayer({ name: "px", pixels: fillPixels(NO_PIXELS, rect(10, 10, 20, 20), red) });
   const geometry = { kind: "rectangle", radius: 5 } as const;
   const style = { fill: null, stroke: { color: blue, width: 4, align: "center" as const } };
   const placement = { source: rect(0, 0, 60, 40), quad: quadOf(rect(100, 30, 60, 40)), angle: 0, patch: null };
   const shape = createLayer({
     name: "shape",
-    tiles: renderShape(geometry, style, placementMapping(placement), rect(0, 0, 200, 100)),
+    pixels: renderShape(geometry, style, placementMapping(placement), rect(0, 0, 200, 100)),
     content: { kind: "shape", geometry, style, placement },
   });
   return { ...addLayer(addLayer(d, pixels), shape), selection: rectMask(200, 100, rect(10, 10, 20, 20)) };
@@ -31,13 +31,13 @@ describe("document transforms", () => {
     const d = doc();
     const big = await imageSize(d, { width: 400, height: 200, resolution: 144, filter: "bicubic", scaleStyles: true }, cpu);
     expect([big.width, big.height, resolutionOf(big)]).toEqual([400, 200, 144]);
-    expect(contentBounds(big.layers[1].tiles)).toEqual(rect(20, 20, 40, 40));
+    expect(contentBounds(big.layers[1].pixels)).toEqual(rect(20, 20, 40, 40));
     const s = big.layers[2].content;
     if (s.kind !== "shape") throw new Error();
     expect(s.placement.quad).toEqual(quadOf(rect(200, 60, 120, 80)));
     // The stroke scales with the image (Scale Styles), so the outline looks the same, just bigger.
     expect(s.style.stroke!.width).toBe(8);
-    const outline = contentBounds(big.layers[2].tiles);
+    const outline = contentBounds(big.layers[2].pixels);
     expect(outline).toEqual(rect(196, 56, 128, 88));
     expect(big.selection!.bounds).toEqual(rect(20, 20, 40, 40));
   });
@@ -57,8 +57,8 @@ describe("document transforms", () => {
   it("Canvas Size is the same transform: a whole-pixel translation, copied exactly", async () => {
     const d = doc();
     const moved = await resizeCanvas(d, 300, 100, { x: 1, y: 0.5 }, cpu);
-    expect(contentBounds(moved.layers[1].tiles)).toEqual(rect(110, 10, 20, 20));
-    expect(getPixel(moved.layers[1].tiles, 115, 15)).toEqual([255, 0, 0, 255]);
+    expect(contentBounds(moved.layers[1].pixels)).toEqual(rect(110, 10, 20, 20));
+    expect(getPixel(moved.layers[1].pixels, 115, 15)).toEqual([255, 0, 0, 255]);
     expect(moved.selection!.bounds).toEqual(rect(110, 10, 20, 20));
   });
 

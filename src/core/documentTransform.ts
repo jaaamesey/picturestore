@@ -3,7 +3,7 @@ import { PIXELS, flatten, type Doc, type Layer, type LayerContent, type Placemen
 import { boundsOf, integerTranslation, intersect, multiply, rect, rectCorners, roundOut, scaling, translation, type Mat, type Rect, type Vec2 } from "./geometry";
 import type { Filter } from "./rasterize";
 import { transformMask, translateMask } from "./selection";
-import { EMPTY_TILES, clipTiles, contentBounds, translateTiles } from "./tiles";
+import { NO_PIXELS, clipPixels, contentBounds, translatePixels } from "./pixels";
 import { transformGuides } from "./snap";
 import { invert3, isConvex, project, type Mat3, type Quad } from "./warp";
 
@@ -93,10 +93,10 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
   const affine = asAffine(t.matrix);
   const shift = affine && integerTranslation(affine);
   if (shift) {
-    const tiles = translateTiles(l.tiles, shift.x, shift.y);
-    return { ...l, tiles: t.clipToCanvas ? clipTiles(tiles, clip) : tiles };
+    const pixels = translatePixels(l.pixels, shift.x, shift.y);
+    return { ...l, pixels: t.clipToCanvas ? clipPixels(pixels, clip) : pixels };
   }
-  let bounds = contentBounds(l.tiles);
+  let bounds = contentBounds(l.pixels);
   if (t.clipToCanvas && affine) {
     // The source that lands on the canvas, with room for the filter's support (wider when reducing).
     const src = boundsOf(mapRect(invert3(t.matrix)!, clip));
@@ -104,11 +104,11 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
     const pad = Math.ceil(Math.max(3, 3 / k));
     bounds = intersect(bounds, roundOut(rect(src.x - pad, src.y - pad, src.w + pad * 2, src.h + pad * 2)));
   }
-  if (bounds.w <= 0 || bounds.h <= 0) return { ...l, tiles: EMPTY_TILES };
+  if (bounds.w <= 0 || bounds.h <= 0) return { ...l, pixels: NO_PIXELS };
   // Under perspective only the canvas is kept: content beyond the horizon has nowhere to go.
   const clipTo = t.clipToCanvas || !affine ? clip : undefined;
-  const tiles = await r.resample({ tiles: l.tiles, bounds }, { source: bounds, quad: mapRect(t.matrix, bounds), patch: null }, t.filter, clipTo);
-  return { ...l, tiles };
+  const pixels = await r.resample({ pixels: l.pixels, bounds }, { source: bounds, quad: mapRect(t.matrix, bounds), patch: null }, t.filter, clipTo);
+  return { ...l, pixels };
 }
 
 /** The whole document through a transform: every layer, the selection, the canvas and resolution. */
