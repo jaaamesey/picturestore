@@ -1,7 +1,7 @@
 import type { RGB } from "./color";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect } from "./geometry";
 import type { Mask } from "./selection";
-import { TILE_SIZE, tileKey, tileRect, tileWriter, tilesIn, type TileKey, type TileMap } from "./tiles";
+import { tileWriter, writeSpans, type TileMap } from "./tiles";
 
 export interface BrushSettings {
   /** Diameter in pixels. */
@@ -133,7 +133,7 @@ export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
   const { flow, opacity } = brush;
   const { r: cr, g: cg, b: cb } = color;
   const writer = tileWriter(base);
-  const deposit = new Map<TileKey, Float32Array>();
+  const deposit = new Map<Uint8ClampedArray, Float32Array>();
   const lut = falloffTable(brush.hardness);
   const radiusAt = (p: StrokePoint) => Math.max(0.5, (brush.size / 2) * (brush.pressureSize ? p.pressure : 1));
   const interpolate = createInterpolator((p) => Math.max(1, radiusAt(p) * 2 * brush.spacing));
@@ -151,32 +151,25 @@ export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
     const lutScale = LUT_SIZE / (R * R);
     const pixelBrush = R <= 0.5;
 
-    for (const [tx, ty] of tilesIn(region)) {
-      const key = tileKey(tx, ty);
-      const part = intersect(region, tileRect(tx, ty));
-      const src = base.get(key)?.data;
-      if (erase && !src) continue;
-      let dep = deposit.get(key);
-      if (!dep) deposit.set(key, (dep = new Float32Array(TILE_SIZE * TILE_SIZE)));
-      const out = writer.writable(tx, ty);
-      out.version++;
-      const o = out.data;
-      const ox = tx * TILE_SIZE;
-      const oy = ty * TILE_SIZE;
-
-      for (let y = part.y; y < part.y + part.h; y++) {
+    writeSpans(
+      writer,
+      region,
+      (o, i0, px, y, n, _words, src) => {
         const dy = y + 0.5 - p.y;
         const dy2 = dy * dy;
-        if (dy2 >= outer2) continue;
+        if (dy2 >= outer2) return;
         // Only the span of this row that lies within the dab's outer radius.
         const half = Math.sqrt(outer2 - dy2);
-        const x0 = Math.max(part.x, Math.ceil(p.x - half - 0.5));
-        const x1 = Math.min(part.x + part.w - 1, Math.floor(p.x + half - 0.5));
-        if (x1 < x0) continue;
+        const x0 = Math.max(px, Math.ceil(p.x - half - 0.5));
+        const x1 = Math.min(px + n - 1, Math.floor(p.x + half - 0.5));
+        if (x1 < x0) return;
+        // Paint deposited so far, per pixel of this storage (indexed like it).
+        let dep = deposit.get(o);
+        if (!dep) deposit.set(o, (dep = new Float32Array(o.length / 4)));
         const mrow = sel ? (y - sel.bounds.y) * sel.bounds.w - sel.bounds.x : 0;
         let dx = x0 + 0.5 - p.x;
         let d2 = dx * dx + dy2;
-        let pi = (y - oy) * TILE_SIZE + (x0 - ox);
+        let pi = (i0 >> 2) + (x0 - px);
         for (let x = x0; x <= x1; x++, pi++, d2 += 2 * dx + 1, dx += 1) {
           if (d2 >= outer2) continue;
           const q = d2 * lutScale;
@@ -215,8 +208,10 @@ export function beginStroke(base: TileMap, opts: StrokeOptions): Stroke {
           }
           o[i + 3] = oa * 255;
         }
-      }
-    }
+      },
+      // Erasing can't add pixels where there are none.
+      { stored: erase },
+    );
     return region;
   };
 

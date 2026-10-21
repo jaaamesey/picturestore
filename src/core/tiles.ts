@@ -64,6 +64,8 @@ export function isTransparent(t: Tile): boolean {
 export interface TileWriter {
   /** The working map; readers may iterate it while a stroke is in progress. */
   readonly tiles: Map<TileKey, Tile>;
+  /** What the writer started from (untouched by it). */
+  readonly base: TileMap;
   get(tx: number, ty: number): Tile | undefined;
   /** A tile that is safe to mutate: cloned (or created) on first request. */
   writable(tx: number, ty: number): Tile;
@@ -79,6 +81,7 @@ export function tileWriter(base: TileMap): TileWriter {
   const owned = new Set<Tile>();
   return {
     tiles,
+    base,
     get: (tx, ty) => tiles.get(tileKey(tx, ty)),
     writable(tx, ty) {
       const key = tileKey(tx, ty);
@@ -126,6 +129,103 @@ export function writeRect(w: TileWriter, r: Rect, data: Uint8ClampedArray | Uint
       t.data.set(data.subarray(src, src + part.w * 4), ((y - oy) * TILE_SIZE + (part.x - ox)) * 4);
     }
   }
+}
+
+/**
+ * One row of a region's pixels, as stored: `n` pixels starting at byte `i`
+ * of `data` (straight RGBA), the first at document (x, y). `words` views the
+ * same buffer as one u32 per pixel (index i / 4) for word-at-a-time work.
+ * For writes, `base` is the same row as it was before the writer touched it
+ * (undefined where nothing was stored).
+ *
+ * Pixel loops go through these visitors rather than walking tiles, so tile
+ * geometry stays in this module.
+ */
+export type SpanVisitor = (data: Uint8ClampedArray, i: number, x: number, y: number, n: number, words: Uint32Array, base: Uint8ClampedArray | undefined) => void;
+
+/** Visits the stored pixels of `tiles` within `r`, row by row (what isn't stored is transparent, and skipped). */
+export function readSpans(tiles: TileMap, r: Rect, visit: (data: Uint8ClampedArray, i: number, x: number, y: number, n: number) => void): void {
+  for (const [tx, ty] of tilesIn(r)) {
+    const t = tiles.get(tileKey(tx, ty));
+    if (!t) continue;
+    const part = intersect(r, tileRect(tx, ty));
+    const ox = tx << TILE_SHIFT, oy = ty << TILE_SHIFT;
+    for (let y = part.y; y < part.y + part.h; y++) visit(t.data, ((y - oy) * TILE_SIZE + (part.x - ox)) * 4, part.x, y, part.w);
+  }
+}
+
+export interface WriteOptions {
+  /** Only where the writer's base has pixels (erasing can't add any). */
+  readonly stored?: boolean;
+  /** Skips parts of the region that won't change (so shared storage isn't copied for nothing). */
+  readonly wanted?: (part: Rect) => boolean;
+}
+
+/** Visits the pixels of `r` for writing through `w`, row by row: storage is copied on first write, and each written part's version bumped for caches. */
+export function writeSpans(w: TileWriter, r: Rect, visit: SpanVisitor, o: WriteOptions = {}): void {
+  for (const [tx, ty] of tilesIn(r)) {
+    const base = w.base.get(tileKey(tx, ty))?.data;
+    if (o.stored && !base) continue;
+    const part = intersect(r, tileRect(tx, ty));
+    if (o.wanted && !o.wanted(part)) continue;
+    const t = w.writable(tx, ty);
+    t.version++;
+    const u = words(t);
+    const ox = tx << TILE_SHIFT, oy = ty << TILE_SHIFT;
+    for (let y = part.y; y < part.y + part.h; y++) visit(t.data, ((y - oy) * TILE_SIZE + (part.x - ox)) * 4, part.x, y, part.w, u, base);
+  }
+}
+
+/**
+ * `top` combined into `base`: where both have pixels, `combine` writes into
+ * a copy of base's storage from top's (same layout, the whole stored block);
+ * where only top has pixels they're shared as they are.
+ */
+export function combineTiles(base: TileMap, top: TileMap, combine: (dst: Uint8ClampedArray, src: Uint8ClampedArray) => void): TileMap {
+  if (base.size === 0) return top;
+  const out = tileWriter(base);
+  for (const [key, t] of top) {
+    const tx = keyX(key), ty = keyY(key);
+    if (base.has(key)) combine(out.writable(tx, ty).data, t.data);
+    else out.put(tx, ty, t);
+  }
+  return out.finish();
+}
+
+/**
+ * Random access to single pixels, as packed little-endian RGBA u32s (0 where
+ * nothing is stored), for algorithms that wander (flood fills).
+ */
+export function pixelReader(tiles: TileMap): (x: number, y: number) => number {
+  let lastKey = NaN, last: Uint32Array | undefined;
+  return (x, y) => {
+    const key = tileKey(x >> TILE_SHIFT, y >> TILE_SHIFT);
+    if (key !== lastKey) {
+      lastKey = key;
+      const t = tiles.get(key);
+      last = t && words(t);
+    }
+    return last ? last[((y & (TILE_SIZE - 1)) << TILE_SHIFT) + (x & (TILE_SIZE - 1))] : 0;
+  };
+}
+
+/**
+ * A 1/{@link PREVIEW_FACTOR}-scale image of the `width × height` area at the
+ * origin, assembled from cached per-tile previews (only changed tiles are
+ * re-filtered): what layer thumbnails are drawn from.
+ */
+export function previewImage(tiles: TileMap, width: number, height: number): { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> } {
+  const pw = Math.ceil(width / PREVIEW_FACTOR), ph = Math.ceil(height / PREVIEW_FACTOR);
+  const data = new Uint8ClampedArray(pw * ph * 4);
+  const n = TILE_SIZE / PREVIEW_FACTOR;
+  for (const [key, tile] of tiles) {
+    const ox = keyX(key) * n, oy = keyY(key) * n;
+    if (ox >= pw || oy >= ph || ox + n <= 0 || oy + n <= 0) continue;
+    const preview = tilePreview(tile);
+    const x0 = Math.max(0, -ox), x1 = Math.min(n, pw - ox);
+    for (let y = Math.max(0, -oy); y < n && oy + y < ph; y++) data.set(preview.subarray((y * n + x0) * 4, (y * n + x1) * 4), ((oy + y) * pw + ox + x0) * 4);
+  }
+  return { width: pw, height: ph, data };
 }
 
 /** Builds a tile map from an RGBA image positioned at (x, y). Transparent tiles are omitted. */

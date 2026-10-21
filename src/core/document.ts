@@ -4,19 +4,7 @@ import { intersect, isEmpty, rect, union, type Rect } from "./geometry";
 import type { Mask } from "./selection";
 import type { ShapeGeometry, ShapeStyle } from "./shape";
 import type { TransformState } from "./transform";
-import {
-  EMPTY_TILES,
-  TILE_SIZE,
-  contentBounds,
-  tileGridBounds,
-  tileKey,
-  tileRect,
-  tileWriter,
-  tilesIn,
-  translateTiles,
-  words,
-  type TileMap,
-} from "./tiles";
+import { EMPTY_TILES, clipTiles, contentBounds, readSpans, tileGridBounds, tileWriter, tilesFromImage, translateTiles, writeSpans, type TileMap } from "./tiles";
 import { quadOf } from "./warp";
 
 /** Where a smart object's or shape's source box lands in the document. */
@@ -111,58 +99,50 @@ export function fillTiles(base: TileMap, area: Rect, color: RGB, mask: Mask | nu
   const w = tileWriter(base);
   const region = mask ? intersect(area, mask.bounds) : area;
   const word = packOpaque(color);
-  for (const [tx, ty] of tilesIn(region)) {
-    const part = intersect(region, tileRect(tx, ty));
-    const t = w.writable(tx, ty);
-    const d = t.data;
-    const ox = tx * TILE_SIZE, oy = ty * TILE_SIZE;
-    if (!mask && opacity >= 1) {
-      const u = words(t);
-      for (let y = part.y; y < part.y + part.h; y++) {
-        const i = (y - oy) * TILE_SIZE + (part.x - ox);
-        u.fill(word, i, i + part.w);
-      }
-      continue;
+  writeSpans(w, region, (d, i, x0, y, n, u) => {
+    if (!mask && opacity >= 1) return void u.fill(word, i >> 2, (i >> 2) + n);
+    const mrow = mask ? (y - mask.bounds.y) * mask.bounds.w - mask.bounds.x : 0;
+    for (let x = x0; x < x0 + n; x++, i += 4) {
+      const a = opacity * (mask ? mask.data[mrow + x] * INV255 : 1);
+      if (a <= 0) continue;
+      const da = d[i + 3] * INV255;
+      const oa = a + da * (1 - a);
+      const keep = (da * (1 - a)) / oa;
+      const add = a / oa;
+      d[i] = color.r * add + d[i] * keep;
+      d[i + 1] = color.g * add + d[i + 1] * keep;
+      d[i + 2] = color.b * add + d[i + 2] * keep;
+      d[i + 3] = oa * 255;
     }
-    for (let y = part.y; y < part.y + part.h; y++) {
-      const mrow = mask ? (y - mask.bounds.y) * mask.bounds.w - mask.bounds.x : 0;
-      let i = ((y - oy) * TILE_SIZE + (part.x - ox)) * 4;
-      for (let x = part.x; x < part.x + part.w; x++, i += 4) {
-        const a = opacity * (mask ? mask.data[mrow + x] * INV255 : 1);
-        if (a <= 0) continue;
-        const da = d[i + 3] * INV255;
-        const oa = a + da * (1 - a);
-        const keep = (da * (1 - a)) / oa;
-        const add = a / oa;
-        d[i] = color.r * add + d[i] * keep;
-        d[i + 1] = color.g * add + d[i + 1] * keep;
-        d[i + 2] = color.b * add + d[i + 2] * keep;
-        d[i + 3] = oa * 255;
-      }
-    }
-  }
+  });
   return w.finish();
 }
 
 /** Erases pixels under `mask` (or everything). */
 export function clearTiles(base: TileMap, mask: Mask | null): TileMap {
-  if (!mask) return EMPTY_TILES;
-  const w = tileWriter(base);
+  return mask ? maskTiles(base, mask, "outside") : EMPTY_TILES;
+}
+
+/**
+ * Keeps pixels by the mask's coverage: "inside" scales alpha by it (what a
+ * selection lifts), "outside" by its inverse (what's left behind).
+ */
+export function maskTiles(base: TileMap, mask: Mask, keep: "inside" | "outside"): TileMap {
   const b = mask.bounds;
-  for (const [tx, ty] of tilesIn(b)) {
-    if (!w.get(tx, ty)) continue;
-    const part = intersect(b, tileRect(tx, ty));
-    const d = w.writable(tx, ty).data;
-    const ox = tx * TILE_SIZE, oy = ty * TILE_SIZE;
-    for (let y = part.y; y < part.y + part.h; y++) {
+  // Inside, nothing beyond the mask survives.
+  const w = tileWriter(keep === "inside" ? clipTiles(base, b) : base);
+  writeSpans(
+    w,
+    b,
+    (d, i, x0, y, n) => {
       const mrow = (y - b.y) * b.w - b.x;
-      let i = ((y - oy) * TILE_SIZE + (part.x - ox)) * 4 + 3;
-      for (let x = part.x; x < part.x + part.w; x++, i += 4) {
-        const m = mask.data[mrow + x];
-        if (m) d[i] = (d[i] * (255 - m)) / 255;
+      for (let x = x0, a = i + 3; x < x0 + n; x++, a += 4) {
+        const m = keep === "inside" ? mask.data[mrow + x] : 255 - mask.data[mrow + x];
+        if (m !== 255) d[a] = (d[a] * m) / 255;
       }
-    }
-  }
+    },
+    { stored: true },
+  );
   return w.finish();
 }
 
@@ -285,16 +265,7 @@ export function flatten(d: Doc, area: Rect = docRect(d), layers: readonly Layer[
   for (const layer of layers) {
     if (!layer.visible || layer.opacity <= 0) continue;
     const kernel = KERNELS[layer.blendMode];
-    for (const [tx, ty] of tilesIn(area)) {
-      const t = layer.tiles.get(tileKey(tx, ty));
-      if (!t) continue;
-      const part = intersect(area, tileRect(tx, ty));
-      for (let y = part.y; y < part.y + part.h; y++) {
-        const si = ((y - ty * TILE_SIZE) * TILE_SIZE + (part.x - tx * TILE_SIZE)) * 4;
-        const di = ((y - area.y) * area.w + (part.x - area.x)) * 4;
-        kernel(acc, di, t.data, si, part.w, layer.opacity);
-      }
-    }
+    readSpans(layer.tiles, area, (data, i, x, y, n) => kernel(acc, ((y - area.y) * area.w + (x - area.x)) * 4, data, i, n, layer.opacity));
   }
   const out = new Uint8ClampedArray(acc.length);
   for (let i = 0; i < acc.length; i += 4) {
@@ -318,16 +289,7 @@ export function mergeDown(d: Doc, id: string): Doc {
   // Merge over the union of both layers' tiles, which may extend past the canvas.
   const area = union(tileGridBounds(below.tiles), tileGridBounds(top.tiles));
   const merged = flatten(d, area, [{ ...below, opacity: 1, visible: true, blendMode: "normal" }, top]);
-  const w = tileWriter(EMPTY_TILES);
-  for (const [tx, ty] of tilesIn(area)) {
-    const part = tileRect(tx, ty);
-    const t = w.writable(tx, ty);
-    for (let y = 0; y < TILE_SIZE; y++) {
-      const src = ((part.y + y - area.y) * area.w + (part.x - area.x)) * 4;
-      t.data.set(merged.subarray(src, src + TILE_SIZE * 4), y * TILE_SIZE * 4);
-    }
-  }
   const layers = [...d.layers];
-  layers.splice(i - 1, 2, { ...below, tiles: w.finish(), content: PIXELS });
+  layers.splice(i - 1, 2, { ...below, tiles: tilesFromImage(area.w, area.h, merged, area.x, area.y), content: PIXELS });
   return { ...d, layers, activeLayerId: below.id };
 }

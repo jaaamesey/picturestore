@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal, onSettled, useContext } from "solid-js";
 import { BLEND_MODES, type BlendMode } from "../../core/blend";
 import { activeLayer, type Layer } from "../../core/document";
-import { PREVIEW_FACTOR, TILE_SIZE, keyX, keyY, tilePreview, type TileMap } from "../../core/tiles";
+import { previewImage, type TileMap } from "../../core/tiles";
 import { AppContext } from "../context";
 import { LAYER_MENU } from "../MenuBar";
 import { IconButton, NumberField } from "../controls";
@@ -11,9 +11,9 @@ import { createSortable } from "../sortable";
 const THUMB = 36;
 
 /**
- * Thumbnail assembled from each tile's cached, area-averaged 1/16 preview, then
- * scaled with the browser's high-quality filter. Only tiles that changed since
- * the last update are re-filtered, and thin strokes don't vanish.
+ * Thumbnail from the layer's area-averaged 1/16 preview (cached, so only
+ * what changed is re-filtered), scaled with the browser's high-quality
+ * filter, so thin strokes don't vanish.
  */
 function Thumbnail(props: { tiles: TileMap; width: number; height: number }) {
   let canvas!: HTMLCanvasElement;
@@ -23,22 +23,9 @@ function Thumbnail(props: { tiles: TileMap; width: number; height: number }) {
       const s = THUMB / Math.max(dw, dh);
       const w = Math.max(1, Math.round(dw * s));
       const h = Math.max(1, Math.round(dh * s));
-      const pw = Math.ceil(dw / PREVIEW_FACTOR);
-      const ph = Math.ceil(dh / PREVIEW_FACTOR);
-      const img = new ImageData(pw, ph);
-      const n = TILE_SIZE / PREVIEW_FACTOR;
-      for (const [key, tile] of tiles) {
-        const ox = keyX(key) * n, oy = keyY(key) * n;
-        if (ox >= pw || oy >= ph || ox + n <= 0 || oy + n <= 0) continue;
-        const preview = tilePreview(tile);
-        for (let y = Math.max(0, -oy); y < n && oy + y < ph; y++) {
-          const x0 = Math.max(0, -ox);
-          const x1 = Math.min(n, pw - ox);
-          img.data.set(preview.subarray((y * n + x0) * 4, (y * n + x1) * 4), ((oy + y) * pw + ox + x0) * 4);
-        }
-      }
-      const source = new OffscreenCanvas(pw, ph);
-      source.getContext("2d")!.putImageData(img, 0, 0);
+      const img = previewImage(tiles, dw, dh);
+      const source = new OffscreenCanvas(img.width, img.height);
+      source.getContext("2d")!.putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext("2d")!;

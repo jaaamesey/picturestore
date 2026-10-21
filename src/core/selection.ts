@@ -1,7 +1,7 @@
 import { intersect, isEmpty, rect, roundOut, union, vec, type Rect, type Vec2 } from "./geometry";
 import { rasterizeContours } from "./coverage";
 import { rasterizeMapping } from "./rasterize";
-import { TILE_SHIFT, TILE_SIZE, tileKey, tileOf, type TileMap } from "./tiles";
+import { pixelReader, type TileMap } from "./tiles";
 import { mappingBounds, type Mapping } from "./warp";
 
 /**
@@ -148,24 +148,16 @@ export function magicWand(
   const sy = Math.floor(seed.y);
   if (sx < 0 || sy < 0 || sx >= width || sy >= height) return null;
 
-  // Tile data per (tileRow, tileColumn) for O(1) pixel access.
-  const cols = tileOf(width - 1) + 1;
-  const rows = tileOf(height - 1) + 1;
-  const grid: (Uint8ClampedArray | undefined)[] = new Array(cols * rows);
-  for (let ty = 0; ty < rows; ty++) for (let tx = 0; tx < cols; tx++) grid[ty * cols + tx] = tiles.get(tileKey(tx, ty))?.data;
-
-  const offset = (x: number, y: number) => (((y & (TILE_SIZE - 1)) << TILE_SHIFT) + (x & (TILE_SIZE - 1))) << 2;
-  const seedTile = grid[tileOf(sy) * cols + tileOf(sx)];
-  const so = offset(sx, sy);
-  const [r0, g0, b0, a0] = seedTile ? [seedTile[so], seedTile[so + 1], seedTile[so + 2], seedTile[so + 3]] : [0, 0, 0, 0];
+  // Packed RGBA, little-endian: red in the low byte, alpha in the high one.
+  const pixel = pixelReader(tiles);
+  const s0 = pixel(sx, sy);
+  const r0 = s0 & 255, g0 = (s0 >>> 8) & 255, b0 = (s0 >>> 16) & 255, a0 = s0 >>> 24;
   const matches = (x: number, y: number) => {
-    const t = grid[(y >> TILE_SHIFT) * cols + (x >> TILE_SHIFT)];
-    if (!t) return a0 <= tolerance;
-    const o = offset(x, y);
-    const a = t[o + 3];
+    const p = pixel(x, y);
+    const a = p >>> 24;
     if (Math.abs(a - a0) > tolerance) return false;
     if (a0 === 0 && a === 0) return true;
-    return Math.abs(t[o] - r0) <= tolerance && Math.abs(t[o + 1] - g0) <= tolerance && Math.abs(t[o + 2] - b0) <= tolerance;
+    return Math.abs((p & 255) - r0) <= tolerance && Math.abs(((p >>> 8) & 255) - g0) <= tolerance && Math.abs(((p >>> 16) & 255) - b0) <= tolerance;
   };
 
   const data = new Uint8Array(width * height);

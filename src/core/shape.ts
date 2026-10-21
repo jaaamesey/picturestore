@@ -1,7 +1,7 @@
 import type { RGB } from "./color";
 import { rasterizeContours, type Coverage } from "./coverage";
-import { intersect, isEmpty, rect, union, vec, type Rect, type Vec2 } from "./geometry";
-import { EMPTY_TILES, TILE_SIZE, tileRect, tileWriter, tilesIn, type TileMap } from "./tiles";
+import { isEmpty, rect, union, vec, type Rect, type Vec2 } from "./geometry";
+import { EMPTY_TILES, tileWriter, writeSpans, type TileMap } from "./tiles";
 import { mapPoint, squareToQuad, type Mapping } from "./warp";
 
 /**
@@ -217,17 +217,16 @@ export function strokePolygons(contours: readonly (readonly Vec2[])[], width: nu
 function paintCoverage(tiles: TileMap, c: Coverage, color: RGB): TileMap {
   const w = tileWriter(tiles);
   const { region, data } = c;
-  for (const [tx, ty] of tilesIn(region)) {
-    const part = intersect(region, tileRect(tx, ty));
-    let touched = false;
-    for (let y = part.y; y < part.y + part.h && !touched; y++)
-      for (let x = part.x; x < part.x + part.w; x++) if (data[(y - region.y) * region.w + (x - region.x)]) { touched = true; break; }
-    if (!touched) continue;
-    const d = w.writable(tx, ty).data;
-    for (let y = part.y; y < part.y + part.h; y++) {
-      let i = ((y - ty * TILE_SIZE) * TILE_SIZE + (part.x - tx * TILE_SIZE)) * 4;
-      let ci = (y - region.y) * region.w + (part.x - region.x);
-      for (let x = part.x; x < part.x + part.w; x++, i += 4, ci++) {
+  const covered = (part: Rect) => {
+    for (let y = part.y; y < part.y + part.h; y++)
+      for (let x = part.x; x < part.x + part.w; x++) if (data[(y - region.y) * region.w + (x - region.x)]) return true;
+    return false;
+  };
+  writeSpans(
+    w,
+    region,
+    (d, i, x0, y, n) => {
+      for (let ci = (y - region.y) * region.w + (x0 - region.x), end = ci + n; ci < end; ci++, i += 4) {
         const a = data[ci] / 255;
         if (a <= 0) continue;
         const da = d[i + 3] / 255;
@@ -238,8 +237,9 @@ function paintCoverage(tiles: TileMap, c: Coverage, color: RGB): TileMap {
         d[i + 2] = color.b * (a / oa) + d[i + 2] * keep;
         d[i + 3] = oa * 255;
       }
-    }
-  }
+    },
+    { wanted: covered },
+  );
   return w.finish();
 }
 
