@@ -245,6 +245,32 @@ export function translateTiles(tiles: TileMap, dx: number, dy: number): TileMap 
   return w.finish();
 }
 
+/** Only the pixels within `r` (whole pixels): tiles inside are shared, tiles across its edge are copied and cleared outside it. */
+export function clipTiles(tiles: TileMap, r: Rect): TileMap {
+  const out = new Map<TileKey, Tile>();
+  for (const [key, t] of tiles) {
+    const tr = tileRect(keyX(key), keyY(key));
+    const x0 = Math.max(r.x, tr.x), y0 = Math.max(r.y, tr.y), x1 = Math.min(r.x + r.w, tr.x + TILE_SIZE), y1 = Math.min(r.y + r.h, tr.y + TILE_SIZE);
+    if (x0 >= x1 || y0 >= y1) continue;
+    if (x0 === tr.x && y0 === tr.y && x1 === tr.x + TILE_SIZE && y1 === tr.y + TILE_SIZE) {
+      out.set(key, t);
+      continue;
+    }
+    const c = cloneTile(t);
+    const px = words(c);
+    for (let y = 0; y < TILE_SIZE; y++) {
+      const row = y * TILE_SIZE, inY = y + tr.y >= y0 && y + tr.y < y1;
+      if (!inY) px.fill(0, row, row + TILE_SIZE);
+      else {
+        px.fill(0, row, row + (x0 - tr.x));
+        px.fill(0, row + (x1 - tr.x), row + TILE_SIZE);
+      }
+    }
+    out.set(key, c);
+  }
+  return out;
+}
+
 /** Byte offset of a pixel within its tile. */
 export const pixelIndex = (x: number, y: number) => ((y & (TILE_SIZE - 1)) * TILE_SIZE + (x & (TILE_SIZE - 1))) * 4;
 

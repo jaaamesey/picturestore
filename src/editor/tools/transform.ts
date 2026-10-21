@@ -145,6 +145,10 @@ const LABELS: Record<TransformMode, string> = {
 
 const RESIZE_CURSORS = ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"];
 
+/** The resize cursor for dragging along screen direction (dx, dy). */
+export const resizeCursorToward = (dx: number, dy: number) =>
+  RESIZE_CURSORS[Math.round((((((Math.atan2(dy, dx) * 180) / Math.PI) % 180) + 180) % 180) / 45) % 4];
+
 /** A resize cursor matching a handle's on-screen direction from the box centre. */
 function resizeCursor(s: TransformState, hit: TransformHit): string {
   const h = handles(s);
@@ -156,7 +160,7 @@ function resizeCursor(s: TransformState, hit: TransformHit): string {
 }
 
 /** A curved double arrow, like Photoshop's rotate cursor. */
-const ROTATE_CURSOR =
+export const ROTATE_CURSOR =
   `url("data:image/svg+xml,${encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M5 9a9 9 0 0 1 14 0" fill="none" stroke="white" stroke-width="4"/><path d="M5 9a9 9 0 0 1 14 0M3 6l2 3.5 3.5-2M21 6l-2 3.5-3.5-2" fill="none" stroke="black" stroke-width="1.6"/></svg>',
   )}") 12 8, alias`;
@@ -290,6 +294,7 @@ export function createTransformController(): TransformController {
   return {
     id: "transform",
     latestMoveOnly: true,
+    commitOnSwitch: true,
     begin(ctx, { returnTo: back, mode: m = "free", grab, place }) {
       target = transformTarget(place?.doc ?? ctx.doc);
       if (!target) return false;

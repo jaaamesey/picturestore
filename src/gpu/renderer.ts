@@ -30,10 +30,13 @@ export interface Scene {
 }
 
 /** Screen = doc × zoom + pan, in CSS pixels. */
+/** Screen = R(rotation) · doc × zoom + pan, in CSS pixels. */
 export interface View {
   readonly zoom: number;
   readonly panX: number;
   readonly panY: number;
+  /** Radians, clockwise on screen (the Crop tool rotates the image under its box this way). */
+  readonly rotation?: number;
 }
 
 export interface Renderer {
@@ -97,6 +100,8 @@ const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
 const TILE_UNIFORM_SIZE = 32; // sizeof(Draw), rounded up
 const MESH_UNIFORM_SIZE = 48; // sizeof(Mesh)
 const WORKSPACE = [0.16, 0.16, 0.17, 1];
+/** The workspace around the canvas, for overlays that match it (the crop shield). */
+export const WORKSPACE_CSS = `rgb(${WORKSPACE.slice(0, 3).map((v) => Math.round(v * 255)).join(" ")})`;
 const CHUNK = 2048; // resample output is rendered and read back in chunks of at most this size
 
 export async function requestDevice(): Promise<GPUDevice> {
@@ -861,6 +866,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     new Uint32Array(u, 24, 1)[0] = hasSelection ? 1 : 0;
     new Float32Array(u, 28, 1)[0] = lod;
     new Float32Array(u, 32, 4).set(WORKSPACE);
+    const rot = view.rotation ?? 0;
+    new Float32Array(u, 56, 2).set([Math.cos(rot), Math.sin(rot)]);
     new Uint32Array(u, 48, 1)[0] = level > 0 ? 1 : 0;
     device.queue.writeBuffer(viewUniforms, 0, u);
 

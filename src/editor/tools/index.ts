@@ -4,6 +4,8 @@ import { bucketTool, createPaintTool } from "./paint";
 import { createLassoTool, createMarqueeTool, wandTool } from "./select";
 import { createShapeTool } from "./shape";
 import { createMoveTool, createTransformController, type TransformController } from "./transform";
+import { createCropTool, type CropController } from "./crop";
+import { createPerspectiveCropTool } from "./perspectiveCrop";
 
 export interface ToolInfo {
   readonly id: Exclude<ToolId, "transform">;
@@ -23,6 +25,8 @@ export const TOOLBAR: readonly ToolInfo[] = [
   { id: "marquee-ellipse", label: "Elliptical Marquee", key: "m" },
   { id: "lasso", label: "Lasso", key: "l" },
   { id: "wand", label: "Magic Wand", key: "w" },
+  { id: "crop", label: "Crop Tool", key: "c" },
+  { id: "perspective-crop", label: "Perspective Crop Tool", key: "c" },
   { id: "brush", label: "Brush Tool", key: "b" },
   { id: "eraser", label: "Eraser", key: "e" },
   { id: "bucket", label: "Paint Bucket", key: "g" },
@@ -46,17 +50,21 @@ export const SHAPE_TOOLS: readonly ToolId[] = ["rectangle", "ellipse", "triangle
 export interface Tools {
   readonly byId: Record<ToolId, Tool>;
   readonly transform: TransformController;
+  readonly crop: CropController;
 }
 
 /** Tools keep per-interaction state, so each editor gets its own instances. */
 export function createTools(): Tools {
   const transform = createTransformController();
+  const crop = createCropTool();
   const list: Tool[] = [
     createMoveTool(transform),
     createMarqueeTool("rect"),
     createMarqueeTool("ellipse"),
     createLassoTool(),
     wandTool,
+    crop,
+    createPerspectiveCropTool(),
     createPaintTool("brush"),
     createPaintTool("eraser"),
     bucketTool,
@@ -70,5 +78,5 @@ export function createTools(): Tools {
     zoomTool,
     transform,
   ];
-  return { byId: Object.fromEntries(list.map((t) => [t.id, t])) as Record<ToolId, Tool>, transform };
+  return { byId: Object.fromEntries(list.map((t) => [t.id, t])) as Record<ToolId, Tool>, transform, crop };
 }

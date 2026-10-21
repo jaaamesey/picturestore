@@ -51,8 +51,11 @@ export const settled = (page: Page) => page.evaluate(() => window.__ps!.settled!
 /** Page coordinates of a document point under the current view. */
 export async function docPoint(page: Page, x: number, y: number) {
   const box = (await page.getByTestId("viewport").boundingBox())!;
-  const v = await page.evaluate(() => (window.__ps!.editor as { active(): { view(): { zoom: number; panX: number; panY: number } } }).active().view());
-  return { x: box.x + v.panX + x * v.zoom, y: box.y + v.panY + y * v.zoom };
+  const v = await page.evaluate(() =>
+    (window.__ps!.editor as { active(): { view(): { zoom: number; panX: number; panY: number; rotation?: number } } }).active().view(),
+  );
+  const c = Math.cos(v.rotation ?? 0), s = Math.sin(v.rotation ?? 0);
+  return { x: box.x + v.panX + (c * x - s * y) * v.zoom, y: box.y + v.panY + (s * x + c * y) * v.zoom };
 }
 
 export async function drag(page: Page, from: [number, number], to: [number, number], steps = 10) {

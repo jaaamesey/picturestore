@@ -4,11 +4,12 @@ import { addLayer, createDocument, fillTiles, updateLayer, type Doc } from "../.
 import { rect } from "../../core/geometry";
 import { rectMask } from "../../core/selection";
 import { EMPTY_TILES, contentBounds, getPixel } from "../../core/tiles";
-import type { FloatingLayer } from "../../gpu/renderer";
+import type { FloatingLayer, View } from "../../gpu/renderer";
 import { DEFAULT_SETTINGS } from "../editor";
-import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings } from "../types";
+import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings, Writable } from "../types";
 import { createTools } from "./index";
 import { moveFrame } from "./transform";
+import { screenToDoc } from "../view";
 import { CPU_RASTERIZERS, smartObjectLayer, smartSource, wholePixelMove } from "../../core/content";
 import { convertToSmartObject, createLayer } from "../../core/document";
 import { IDENTITY_PATCH, quadOf } from "../../core/warp";
@@ -27,26 +28,28 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     preview: null as Doc | null,
     floating: null as FloatingLayer | null,
     overlay: null as Overlay | null,
-    view: { zoom: 1, panX: 0, panY: 0 },
+    view: { zoom: 1, panX: 0, panY: 0 } as View,
     fg: { r: 255, g: 0, b: 0 },
     tool: "move" as ToolId,
     pending: Promise.resolve() as Promise<void>,
     /** Rasterize prompts the tools raised. */
     prompts: [] as string[],
+    settings: structuredClone({ ...settings, ...options }) as Writable<ToolSettings>,
   };
   const ctx = (): ToolContext => ({
     doc: s.doc,
     view: s.view,
-    settings: { ...settings, ...options },
+    settings: structuredClone(s.settings),
     foreground: s.fg,
     preview: (d, f = null) => ((s.preview = d), (s.floating = f)),
     commit: (label, d) => (s.history.push(label), (s.doc = d), (s.preview = null), (s.floating = null)),
-    commitAsync(label, pending) {
+    commitAsync(label, pending, landed) {
       s.pending = pending.then((d) => {
         s.history.push(label);
         s.doc = d;
         s.preview = null;
         s.floating = null;
+        landed?.();
       });
     },
     raster: CPU_RASTERIZERS,
@@ -60,6 +63,8 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     setView: (v) => (s.view = v),
     setForeground: (c) => (s.fg = c),
     setTool: (id) => (s.tool = id),
+    viewport: { width: 800, height: 600 },
+    updateSettings: (fn) => fn(s.settings),
   });
   const ev = (x: number, y: number, mods: Partial<ToolEvent> = {}): ToolEvent => ({
     x, y, screenX: x, screenY: y, pressure: 1, shift: false, alt: false, mod: false, clicks: 1, ...mods,
@@ -475,5 +480,193 @@ describe("rasterize prompts", () => {
     h.s.doc = rasterized;
     proceed!(h.ctx());
     expect(h.s.history).toEqual(["Paint Bucket"]);
+  });
+});
+
+describe("crop", () => {
+  /** A 100×100 document: white background, and a red 20×20 square at (40, 40) on the active layer. */
+  const doc = () => {
+    const d = blank();
+    return updateLayer(d, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(40, 40, 20, 20), { r: 255, g: 0, b: 0 }) });
+  };
+  /** Pointer events at screen points, through the current (possibly rotated) view. */
+  const pointer = (h: ReturnType<typeof harness>) => {
+    const at = (x: number, y: number, mods: Partial<ToolEvent> = {}): ToolEvent => {
+      const d = screenToDoc(h.s.view, { x, y });
+      return { ...h.ev(d.x, d.y, mods), screenX: x, screenY: y };
+    };
+    const tool = () => h.tools.byId[h.s.tool];
+    return async (from: [number, number], to: [number, number], mods: Partial<ToolEvent> = {}) => {
+      tool().down!(h.ctx(), at(...from, mods));
+      for (let i = 1; i <= 8; i++) tool().move!(h.ctx(), at(from[0] + ((to[0] - from[0]) * i) / 8, from[1] + ((to[1] - from[1]) * i) / 8, mods));
+      tool().up!(h.ctx(), at(...to, mods));
+      await h.s.pending;
+    };
+  };
+  const cropBox = (h: ReturnType<typeof harness>) => (h.s.overlay?.kind === "crop" ? h.s.overlay.box : null);
+  const start = (d: Doc, crop: Partial<ToolSettings["crop"]> = {}) => {
+    const h = harness(d, { crop: { ...settings.crop, ...crop } });
+    h.s.tool = "crop";
+    h.tools.crop.activate!(h.ctx());
+    return { h, drag: pointer(h) };
+  };
+
+  it("shows the whole canvas at once, and an untouched box crops nothing", () => {
+    const { h } = start(doc());
+    expect(cropBox(h)).toEqual({ cx: 50, cy: 50, w: 100, h: 100, angle: 0 });
+    h.tools.crop.commit!(h.ctx());
+    expect(h.s.history).toEqual([]);
+    expect(h.s.overlay).toBeNull();
+  });
+
+  it("starts from the selection's bounds", () => {
+    const { h } = start({ ...doc(), selection: rectMask(100, 100, rect(10, 20, 30, 40)) });
+    expect(cropBox(h)).toEqual({ cx: 25, cy: 40, w: 30, h: 40, angle: 0 });
+  });
+
+  it("draws a box, crops to it exactly, then hides it until the next click", async () => {
+    const { h, drag } = start(doc(), { classic: true });
+    await drag([30, 30], [70, 60]);
+    expect(cropBox(h)).toEqual({ cx: 50, cy: 45, w: 40, h: 30, angle: 0 });
+    h.tools.crop.commit!(h.ctx());
+    await h.s.pending;
+    expect(h.s.history).toEqual(["Crop"]);
+    expect([h.s.doc.width, h.s.doc.height]).toEqual([40, 30]);
+    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 20, 20));
+    expect(h.s.overlay).toBeNull();
+    await drag([5, 5], [5, 5]);
+    expect(cropBox(h)).toEqual({ cx: 20, cy: 15, w: 40, h: 30, angle: 0 });
+  });
+
+  it("keeps cropped pixels beyond the canvas unless Delete Cropped Pixels is on", async () => {
+    for (const deletePixels of [false, true]) {
+      const { h, drag } = start(doc(), { classic: true, deletePixels });
+      await drag([50, 0], [50, 0]); // a click on an edge changes nothing
+      await drag([20, 15], [50, 100]);
+      h.tools.crop.commit!(h.ctx());
+      await h.s.pending;
+      expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(deletePixels ? rect(20, 25, 10, 20) : rect(20, 25, 20, 20));
+    }
+  });
+
+  it("resizes from a handle, snapping to the canvas edge, and grows the canvas beyond it", async () => {
+    const { h, drag } = start(doc(), { classic: true });
+    await drag([100, 50], [97, 50]); // snaps back to the edge
+    expect(cropBox(h)!.w).toBe(100);
+    await drag([100, 50], [130, 50]);
+    expect(cropBox(h)).toEqual({ cx: 65, cy: 50, w: 130, h: 100, angle: 0 });
+    h.tools.crop.commit!(h.ctx());
+    await h.s.pending;
+    expect(h.s.doc.width).toBe(130);
+    // The added canvas is transparent (there's no locked Background layer to fill).
+    expect(getPixel(h.s.doc.layers[0].tiles, 120, 50)[3]).toBe(0);
+  });
+
+  it("turns the image under a fixed box (the view rotates), and crops it rotated", async () => {
+    const { h, drag } = start(doc());
+    // Drag outside the box, a quarter turn clockwise about its centre (50, 50).
+    await drag([150, 50], [50, 150]);
+    expect(h.s.view.rotation).toBeCloseTo(Math.PI / 2, 9);
+    const b = cropBox(h)!;
+    expect(b.angle).toBeCloseTo(-Math.PI / 2, 9);
+    expect([b.cx, b.cy]).toEqual([50, 50]);
+    h.tools.crop.commit!(h.ctx());
+    await h.s.pending;
+    expect([h.s.doc.width, h.s.doc.height]).toEqual([100, 100]);
+    expect(h.s.view.rotation ?? 0).toBe(0);
+  });
+
+  it("straightens: the line comes out level and the box shrinks to leave no empty corners", async () => {
+    const { h, drag } = start(doc(), { classic: true });
+    await drag([10, 40], [90, 50], { mod: true });
+    const b = cropBox(h)!;
+    expect(b.angle).toBeCloseTo(Math.atan2(10, 80), 9);
+    expect(b.w).toBeLessThan(100);
+    h.tools.crop.commit!(h.ctx());
+    await h.s.pending;
+    expect([h.s.doc.width, h.s.doc.height]).toEqual([Math.round(b.w), Math.round(b.h)]);
+    // No transparent corners.
+    expect(getPixel(h.s.doc.layers[0].tiles, 1, 1)[3]).toBe(255);
+  });
+
+  it("fits the box to a ratio, and resamples to W x H x Resolution", async () => {
+    const { h, drag } = start(doc(), {
+      classic: true,
+      constraint: { mode: "size", width: { value: 2, unit: "inches" }, height: { value: 1, unit: "inches" }, resolution: 100 },
+    });
+    expect(cropBox(h)).toEqual({ cx: 50, cy: 50, w: 100, h: 50, angle: 0 });
+    await drag([100, 75], [100, 75]);
+    h.tools.crop.commit!(h.ctx());
+    await h.s.pending;
+    expect([h.s.doc.width, h.s.doc.height, h.s.doc.resolution]).toEqual([200, 100, 100]);
+  });
+
+  it("Escape resets the box and the view", async () => {
+    const { h, drag } = start(doc());
+    const view = h.s.view;
+    await drag([150, 50], [50, 150]);
+    h.tools.crop.cancel!(h.ctx());
+    expect(h.s.view).toEqual(view);
+    expect(cropBox(h)).toEqual({ cx: 50, cy: 50, w: 100, h: 100, angle: 0 });
+  });
+
+  it("switching tools crops", async () => {
+    const { h, drag } = start(doc(), { classic: true });
+    await drag([30, 30], [70, 60]);
+    // The editor commits tools that commit on switch.
+    expect(h.tools.crop.commitOnSwitch).toBe(true);
+  });
+
+  it("toggles its options from the keyboard", () => {
+    const { h } = start(doc(), { classic: true });
+    const key = (key: string, shift = false) => h.tools.crop.key!(h.ctx(), { key, shift });
+    expect(key("h")).toBe(true);
+    expect(h.s.settings.crop.showCropped).toBe(false);
+    expect(key("o")).toBe(true);
+    expect(h.s.settings.crop.overlay).toBe("grid");
+    expect(key("p")).toBe(true);
+    expect(h.s.settings.crop.classic).toBe(false);
+    // I is the Eyedropper until the box is adjusted.
+    expect(key("i")).toBe(false);
+    expect(key("x")).toBe(true);
+    expect(key("b")).toBe(false);
+  });
+});
+
+describe("perspective crop", () => {
+  it("straightens four clicked corners onto a rectangle", async () => {
+    const d = blank();
+    const h = harness(d);
+    h.s.tool = "perspective-crop";
+    const t = h.tools.byId["perspective-crop"];
+    t.activate!(h.ctx());
+    for (const [x, y] of [[10, 10], [90, 20], [80, 90], [20, 80]]) {
+      t.down!(h.ctx(), h.ev(x, y));
+      t.up!(h.ctx(), h.ev(x, y));
+    }
+    expect(h.s.overlay).toMatchObject({ kind: "perspective-crop", valid: true });
+    t.commit!(h.ctx());
+    await h.s.pending;
+    expect(h.s.history).toEqual(["Perspective Crop"]);
+    // Opaque everywhere: the quad lay within the white background.
+    expect(getPixel(h.s.doc.layers[0].tiles, 1, 1)[3]).toBe(255);
+    expect(getPixel(h.s.doc.layers[0].tiles, h.s.doc.width - 2, h.s.doc.height - 2)[3]).toBe(255);
+  });
+
+  it("refuses a quad that folds over itself", () => {
+    const h = harness(blank());
+    const t = h.tools.byId["perspective-crop"];
+    h.s.tool = "perspective-crop";
+    t.activate!(h.ctx());
+    t.down!(h.ctx(), h.ev(10, 10));
+    t.move!(h.ctx(), h.ev(60, 60));
+    t.up!(h.ctx(), h.ev(60, 60));
+    // Drag a corner across the opposite one.
+    t.down!(h.ctx(), h.ev(10, 10));
+    t.move!(h.ctx(), h.ev(80, 80));
+    t.up!(h.ctx(), h.ev(80, 80));
+    expect(h.s.overlay).toMatchObject({ valid: false });
+    t.commit!(h.ctx());
+    expect(h.s.history).toEqual([]);
   });
 });

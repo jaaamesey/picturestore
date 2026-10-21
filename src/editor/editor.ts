@@ -1,7 +1,7 @@
-import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
 import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
-import { canvasOffset, imageSize, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
+import { affine3, canvasOffset, imageSize, resizeCanvas, setResolution, transformDocument, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -47,7 +47,7 @@ import {
   type History,
 } from "../core/history";
 import { invertSelection, selectAll } from "../core/selection";
-import { intersect, isEmpty, rect, roundOut, type Rect } from "../core/geometry";
+import { intersect, isEmpty, rect, roundOut, translation, type Rect } from "../core/geometry";
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "../core/shape";
@@ -59,9 +59,9 @@ import { createPreviewWorker } from "../preview/client";
 import { SHAPE_TOOLS, createTools } from "./tools";
 import { shapeGeometry, shapeStyle } from "./tools/shape";
 import type { TransformCommand } from "./tools/transform";
-import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolSettings } from "./types";
+import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolKey, ToolSettings, Writable } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
-import { fitView, followRemap, nextZoomStep, prevZoomStep, screenToDoc, zoomAt } from "./view";
+import { fitView, followRemap, nextZoomStep, placeAt, prevZoomStep, screenToDoc, zoomAt } from "./view";
 
 /** One open document (a tab): its history, transient preview state and viewport. */
 export interface DocumentSession {
@@ -144,6 +144,22 @@ export const DEFAULT_SETTINGS: ToolSettings = {
   selectionMode: "replace",
   tolerance: 32,
   contiguous: true,
+  crop: {
+    constraint: { mode: "ratio", width: null, height: null, resolution: null },
+    deletePixels: true,
+    overlay: "thirds",
+    orientation: 0,
+    showOverlay: "auto",
+    classic: false,
+    showCropped: true,
+    autoCenter: true,
+    shield: true,
+    shieldColor: null,
+    shieldOpacity: 0.75,
+    autoAdjustOpacity: true,
+    straighten: false,
+  },
+  perspectiveCrop: { width: null, height: null, resolution: null, showGrid: true },
 };
 
 export type Editor = ReturnType<typeof createEditor>;
@@ -172,8 +188,6 @@ export const RASTERIZE_PROMPTS = {
 
 /** What the editor uses the GPU renderer for, besides display. */
 type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape">;
-
-type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };
 
 /**
  * Application state and actions. Documents are immutable values held in
@@ -289,7 +303,9 @@ export function createEditor() {
           renderRequested();
         },
         commit: (label, doc) => commitTo(s, label, doc),
-        commitAsync: (label, doc) => commitAsync(s, label, doc),
+        commitAsync: (label, doc, landed) => commitAsync(s, label, doc, null, landed),
+        viewport: viewportSize(),
+        updateSettings: (fn) => setSettings(fn),
         raster,
         requireEditable(layer, proceed) {
           if (layer.content.kind === "pixels") return true;
@@ -422,17 +438,30 @@ export function createEditor() {
     }
 
     /**
-     * Switching away from Free Transform applies it. Re-entrant calls (the
-     * transform session restoring its previous tool as it ends) are ignored.
+     * Switching away from Free Transform or Crop applies it. Re-entrant calls
+     * (the transform session restoring its previous tool as it ends) are ignored.
      */
     function setTool(id: ToolId) {
       if (switching || id === currentTool) return;
       const prev = tools.byId[currentTool];
       switching = true;
       setToolId(id);
-      withTool((ctx) => (prev.id === "transform" ? prev.commit?.(ctx) : prev.cancel?.(ctx)));
+      withTool((ctx) => (prev.commitOnSwitch ? prev.commit?.(ctx) : prev.cancel?.(ctx)));
+      withTool((ctx) => tools.byId[id].activate?.(ctx));
       switching = false;
     }
+
+    // Tools catch up with the document (undo, another tab) and their settings (the crop ratio, Classic Mode).
+    createEffect(
+      () => {
+        const s = active();
+        const c = settings.crop;
+        return [s, s?.doc(), toolId(), c.constraint, c.classic, c.autoCenter];
+      },
+      () => {
+        if (pending === 0) withTool((ctx) => tools.byId[currentTool].sync?.(ctx));
+      },
+    );
 
     /** Runs an action unless a commit is still being computed; allocation failures are contained. */
     const whenIdle = <A extends unknown[]>(fn: (...args: A) => void) => {
@@ -480,7 +509,7 @@ export function createEditor() {
       const s = active();
       if (!s) return;
       const { width, height } = viewportSize();
-      s.setView(fitView(s.doc().width, s.doc().height, width, height, 24, maxZoom));
+      s.setView(fitView(s.doc().width, s.doc().height, width, height, 24, maxZoom, s.view().rotation));
     }
 
     function actualPixels() {
@@ -488,7 +517,7 @@ export function createEditor() {
       if (!s) return;
       const { width, height } = viewportSize();
       const d = s.doc();
-      s.setView({ zoom: 1, panX: Math.round((width - d.width) / 2), panY: Math.round((height - d.height) / 2) });
+      s.setView(placeAt(1, s.view().rotation ?? 0, { x: d.width / 2, y: d.height / 2 }, { x: Math.round(width / 2), y: Math.round(height / 2) }));
     }
 
     /** True when the last transform command found a session already open. */
@@ -728,6 +757,27 @@ export function createEditor() {
         const s = active();
         return s ? (tools.byId[toolId()].cursor?.(context(s), e) ?? "default") : "default";
       },
+      /** A plain key for the current tool (the Crop tool's H, O, X, P, I); true when it used it. */
+      toolKey(e: ToolKey): boolean {
+        let used = false;
+        if (pending === 0) withTool((ctx) => (used = !!tools.byId[currentTool].key?.(ctx, e)));
+        return used;
+      },
+      /** Rotate Crop Box: portrait ⇄ landscape. */
+      rotateCropBox: whenIdle(() => currentTool === "crop" && withTool((ctx) => tools.crop.rotateBox(ctx))),
+      /** Image ▸ Crop: to the selection's bounds, deleting what's outside. */
+      cropToSelection: whenIdle(() => {
+        const s = active();
+        const b = s?.doc().selection?.bounds;
+        if (!s || !b) return;
+        cancelTool();
+        const d = s.doc();
+        const t = { matrix: affine3(translation(-b.x, -b.y)), width: b.w, height: b.h, lengthScale: 1, filter: "nearest" as const, clipToCanvas: true };
+        // What was on screen stays put, as with Canvas Size.
+        commitAsync(s, "Crop", transformDocument(d, t, raster), null, () =>
+          s.setView(followRemap(s.view(), viewportSize(), { width: b.w, height: b.h }, (p) => ({ x: p.x - b.x, y: p.y - b.y }), false)),
+        );
+      }),
       /** Enter: commits the current tool's operation (e.g. Free Transform). */
       commitTool: whenIdle(() => withTool((ctx) => tools.byId[currentTool].commit?.(ctx))),
       cancelTool,

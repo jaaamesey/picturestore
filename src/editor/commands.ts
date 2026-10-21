@@ -37,6 +37,7 @@ export interface CommandSpec {
 
 const hasDoc = (ed: Editor) => ed.active() !== null;
 const hasSelection = (ed: Editor) => !!ed.active()?.doc().selection;
+const cropping = (ed: Editor) => ed.tool() === "crop" || ed.tool() === "perspective-crop";
 const layerCount = (ed: Editor) => ed.active()?.doc().layers.length ?? 0;
 const layerKind = (ed: Editor) => {
   const d = ed.active()?.doc();
@@ -115,6 +116,10 @@ export const COMMANDS = {
   // Image
   "image.imageSize": { label: "Image Size…", shortcuts: ["Alt+Mod+I"], run: (_, s) => s.imageSize(), enabled: hasDoc },
   "image.canvasSize": { label: "Canvas Size…", shortcuts: ["Alt+Mod+C"], run: (_, s) => s.canvasSize(), enabled: hasDoc },
+  "image.crop": { label: "Crop", run: (ed) => ed.cropToSelection(), enabled: hasSelection },
+  "crop.commit": { label: "Crop", run: (ed) => ed.commitTool(), enabled: cropping },
+  "crop.reset": { label: "Reset Crop", run: (ed) => ed.cancelTool(), enabled: cropping },
+  "crop.rotateBox": { label: "Rotate Crop Box", run: (ed) => ed.rotateCropBox(), enabled: (ed) => ed.tool() === "crop" },
 
   // Layer
   "layer.new": { label: "New Layer", shortcuts: ["Mod+Shift+N"], run: (ed) => ed.newLayer(), enabled: hasDoc },

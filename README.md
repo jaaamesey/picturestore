@@ -55,6 +55,21 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   contents), and with Scale Styles (on by default; proportional resizes only) stroke widths scale too. Without
   Resample only the resolution changes.
 - **Image ▸ Canvas Size** (Alt+Ctrl+C): new width/height, Relative, and a 3×3 anchor.
+- **Crop tool** (C), as Photoshop's: the box appears at once (the selection's bounds, else the whole canvas);
+  drag inside an untouched box to draw a new one, drag handles or edges to resize (Shift keeps proportions,
+  Alt from the centre, edges snap to the canvas), inside to move and outside to rotate. By default the image
+  moves and turns under an upright box that re-centres itself (Auto Center Preview): the view itself rotates,
+  so the preview costs nothing. Classic Mode (P) moves and turns the box instead. The options bar has the
+  ratio/size menu (Ratio, W x H x Resolution, Original Ratio, Photoshop's presets, Front Image) with fields that
+  take units ("4 in"), ⇄ (X) and Clear; Straighten (or hold Ctrl) levels a drawn line and shrinks the box so no
+  empty corners show; overlays (Rule of Thirds, Grid, Diagonal, Triangle, Golden Ratio, Golden Spiral; O cycles,
+  Shift+O flips; always/auto/never) and a grid while rotating; Show Cropped Area (H), crop shield colour and
+  opacity; and Delete Cropped Pixels (unchecked, pixels outside are kept). Enter, ✓, a double-click or
+  switching tools crops; Esc or Reset Crop restores the box and view. Cropping beyond the canvas extends it.
+- **Perspective Crop tool** (Shift+C): click four corners (or drag a rectangle and move its corners), then
+  commit to straighten the quad onto a rectangle — of its true proportions, recovered from the perspective
+  (Zhang & He's rectangle estimation), unless W/H/Resolution are given. A perspective grid shows the mapping;
+  folded quads are refused. **Image ▸ Crop** crops to the selection's bounds.
   Pixel tools on a smart object or shape ask to rasterize it first, with Photoshop's prompts; agreeing
   rasterizes and then carries on with the action (Fill, Clear, Cut, Paint Bucket), as Photoshop does.
 - **Shapes**: Rectangle (corner radius), Ellipse, Triangle, Polygon (sides, star ratio) and Line (weight) tools
@@ -109,8 +124,8 @@ history entry records the bytes it newly retains (by object identity: new tiles,
 the oldest states are dropped past 50 steps or the memory budget. Asynchronous commits (GPU resampling) block
 input until they land, and a result is discarded rather than applied if its base document changed.
 
-**Document transforms** (`core/documentTransform.ts`): Canvas Size and Image Size (and later Rotate/Flip
-Canvas, Crop) are one affine map of document space. Pixel layers are resampled (whole-pixel moves copied
+**Document transforms** (`core/documentTransform.ts`): Canvas Size, Image Size, Crop and Perspective Crop
+(and later Rotate/Flip Canvas) are one projective map of document space. Pixel layers are resampled (whole-pixel moves copied
 exactly); non-raster content says how it follows the map in one table — placements compose the map onto
 their quad, which is exact even for perspective and warps — and lengths that belong to content (stroke
 widths, later effect sizes and type) scale by Scale Styles' factor.
@@ -168,7 +183,7 @@ readback presentation path, enabled with `?present=readback`.
 ## Roadmap
 
 Roughly in Photopea's order: layer groups and masks (also needed for lossless PSD round-trips of documents
-that use them), adjustment layers and filters (GPU), text, custom shapes and path editing, crop/canvas size/image size, warp grids
+that use them), adjustment layers and filters (GPU), text, custom shapes and path editing, warp grids
 beyond the single patch (splits, 3×3–5×5) and warp presets, snapping while transforming, more selection tools
 (polygonal lasso, quick select, feather/modify), brush presets and smoothing, and GPU painting for very large
 brushes.

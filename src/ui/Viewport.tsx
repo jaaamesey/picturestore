@@ -6,14 +6,16 @@ import type { renderShape } from "../core/shape";
 import type { flatten } from "../core/document";
 import type { placementMapping } from "../core/content";
 import { handles, warpPoints, type TransformMode, type TransformState } from "../core/transform";
-import { IDENTITY_PATCH, PATCH_ANCHORS, evalPatch, project, squareToQuad } from "../core/warp";
+import { IDENTITY_PATCH, PATCH_ANCHORS, evalPatch, isConvex, project, squareToQuad, type Quad } from "../core/warp";
 import { moveFrame } from "../editor/tools/transform";
+import { boxCorners, boxToDoc, overlayLines } from "../core/crop";
+import { toHex } from "../core/color";
 import type { Overlay, ToolEvent } from "../editor/types";
 import { docToScreen, screenToDoc, zoomAt } from "../editor/view";
-import { createRenderer, type Renderer, type View } from "../gpu/renderer";
+import { WORKSPACE_CSS, createRenderer, type Renderer, type View } from "../gpu/renderer";
 import { AppContext } from "./context";
 import { MemoryIndicator } from "./MemoryIndicator";
-import { LAYER_MENU, SELECTION_MENU, TRANSFORM_MENU, type MenuItem } from "./MenuBar";
+import { CROP_MENU, LAYER_MENU, SELECTION_MENU, TRANSFORM_MENU, type MenuItem } from "./MenuBar";
 
 declare global {
   interface Window {
@@ -118,6 +120,8 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
     }
     if (toolPointer !== e.pointerId) return;
     toolPointer = null;
+    // A drag isn't a click: the next press starts a new count rather than making a double-click.
+    if (Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) >= 5) lastDown = { ...lastDown, time: 0 };
     editor.pointerUp(toEvent(e));
   };
 
@@ -261,6 +265,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
         const t = editor.tool();
         const items: readonly MenuItem[] =
           t === "transform" ? ["edit.freeTransform", "-", ...TRANSFORM_MENU]
+          : t === "crop" || t === "perspective-crop" ? CROP_MENU
           : SELECTION_TOOLS.includes(t) ? SELECTION_MENU
           : ["edit.freeTransform", "-", ...LAYER_MENU];
         openMenu(e.clientX, e.clientY, items);
@@ -270,7 +275,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
         {(s) => (
           <svg class="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
             <Show when={s().overlay()}>
-              {(o) => <OverlayShape overlay={o()} view={s().view()} showReference={editor.settings.transform.showReference} />}
+              {(o) => <OverlayShape overlay={o()} view={s().view()} showReference={editor.settings.transform.showReference} hover={hover()} />}
             </Show>
             <Show when={moveControls()}>{(f) => <MoveControls frame={f()} view={s().view()} />}</Show>
             <Show when={hover() && brushRadius() > 0}>
@@ -295,30 +300,23 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
 /** Marching-ants strokes: a white line under an animated black dash. */
 const ANTS = ["ants-base", "ants-dash"] as const;
 
-function OverlayShape(props: { overlay: Overlay; view: View; showReference: boolean }) {
+function OverlayShape(props: { overlay: Overlay; view: View; showReference: boolean; hover: ToolEvent | null }) {
   const pt = (p: Vec2) => docToScreen(props.view, p);
   return (
     <Switch>
       <Match when={props.overlay.kind === "marquee" && props.overlay}>
         {(m) => {
-          const r = () => {
-            const a = pt({ x: m().rect.x, y: m().rect.y });
-            return { x: a.x, y: a.y, w: m().rect.w * props.view.zoom, h: m().rect.h * props.view.zoom };
+          // As polygons, so they follow a rotated view.
+          const outline = () => {
+            const { x, y, w, h } = m().rect;
+            const n = m().shape === "rect" ? 4 : 64;
+            const at = (i: number) =>
+              m().shape === "rect"
+                ? { x: x + (i === 1 || i === 2 ? w : 0), y: y + (i >= 2 ? h : 0) }
+                : { x: x + (w / 2) * (1 + Math.cos((i / n) * 2 * Math.PI)), y: y + (h / 2) * (1 + Math.sin((i / n) * 2 * Math.PI)) };
+            return pointsAttr(Array.from({ length: n }, (_, i) => pt(at(i))).map((p) => ({ x: p.x + 0.5, y: p.y + 0.5 })));
           };
-          return (
-            <Show
-              when={m().shape === "rect"}
-              fallback={
-                <For each={ANTS}>
-                  {(cls) => <ellipse class={cls} cx={r().x + r().w / 2} cy={r().y + r().h / 2} rx={r().w / 2} ry={r().h / 2} />}
-                </For>
-              }
-            >
-              <For each={ANTS}>
-                {(cls) => <rect class={cls} x={r().x + 0.5} y={r().y + 0.5} width={r().w} height={r().h} />}
-              </For>
-            </Show>
-          );
+          return <For each={ANTS}>{(cls) => <polygon class={cls} points={outline()} />}</For>;
         }}
       </Match>
       <Match when={props.overlay.kind === "lasso" && props.overlay}>
@@ -331,6 +329,8 @@ function OverlayShape(props: { overlay: Overlay; view: View; showReference: bool
       <Match when={props.overlay.kind === "transform" && props.overlay}>
         {(t) => <TransformBox state={t().state} mode={t().mode} view={props.view} showReference={props.showReference} />}
       </Match>
+      <Match when={props.overlay.kind === "crop" && props.overlay}>{(c) => <CropOverlayView overlay={c()} view={props.view} hover={props.hover} />}</Match>
+      <Match when={props.overlay.kind === "perspective-crop" && props.overlay}>{(c) => <PerspectiveCropView overlay={c()} view={props.view} />}</Match>
     </Switch>
   );
 }
@@ -404,6 +404,140 @@ function WarpMesh(props: { state: TransformState; view: View }) {
           )
         }
       </For>
+    </g>
+  );
+}
+
+type CropOverlayData = Extract<Overlay, { kind: "crop" }>;
+
+const SHIELD_PATH = "M-100000 -100000H100000V100000H-100000Z";
+const polygonPath = (pts: readonly Vec2[]) => `M${pts.map((p) => `${p.x} ${p.y}`).join("L")}Z`;
+
+/** Darkens (or, with Show Cropped Area off, hides) everything outside `outline`. */
+function CropShield(props: { outline: readonly Vec2[]; editing: boolean }) {
+  const { editor } = useContext(AppContext);
+  const c = () => editor.settings.crop;
+  const opacity = () => (!c().showCropped ? 1 : c().shield ? c().shieldOpacity * (c().autoAdjustOpacity && props.editing ? 0.5 : 1) : 0);
+  const color = () => (!c().showCropped || !c().shieldColor ? WORKSPACE_CSS : toHex(c().shieldColor!));
+  return (
+    <Show when={opacity() > 0}>
+      <path data-testid="crop-shield" d={`${SHIELD_PATH}${polygonPath(props.outline)}`} fill-rule="evenodd" fill={color()} opacity={opacity()} />
+    </Show>
+  );
+}
+
+/** A line drawn white over a faint dark one, visible on any image. */
+function GuideLine(props: { points: readonly Vec2[]; width?: number; opacity?: number }) {
+  return (
+    <g opacity={props.opacity ?? 1}>
+      <polyline points={pointsAttr(props.points)} fill="none" stroke="black" stroke-opacity="0.35" stroke-width={(props.width ?? 1) + 2} />
+      <polyline points={pointsAttr(props.points)} fill="none" stroke="white" stroke-width={props.width ?? 1} />
+    </g>
+  );
+}
+
+/** Photoshop's crop box: the shield, the overlay, an outline with corner brackets and edge bars, and a size or angle readout. */
+function CropOverlayView(props: { overlay: CropOverlayData; view: View; hover: ToolEvent | null }) {
+  const { editor } = useContext(AppContext);
+  const c = () => editor.settings.crop;
+  const pt = (p: Vec2) => docToScreen(props.view, p);
+  const corners = () => boxCorners(props.overlay.box).map(pt);
+  const editing = () => props.overlay.drag !== null && props.overlay.drag !== "straighten";
+  const box = () => props.overlay.box;
+  /** Overlay lines, in screen space. Rotating always shows a fine grid, as in Photoshop. */
+  const lines = () => {
+    const b = box(), drag = props.overlay.drag;
+    const mode = c().showOverlay;
+    if (mode === "never" || (mode === "auto" && !editing())) return [];
+    const sw = b.w * props.view.zoom;
+    const rotating = drag === "rotate";
+    const kind = rotating ? "grid" : c().overlay;
+    const cell = b.w / Math.max(2, Math.round(sw / (rotating ? 24 : 48)));
+    return overlayLines(kind, c().orientation, b.w, b.h, cell).map((l) => l.map((p) => pt(boxToDoc(b, p))));
+  };
+  const bracket = (i: number) => {
+    const p = corners()[i], next = corners()[(i + 1) % 4], prev = corners()[(i + 3) % 4];
+    const along = (q: Vec2) => {
+      const len = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+      const l = Math.min(18, len / 3);
+      return { x: p.x + ((q.x - p.x) / len) * l, y: p.y + ((q.y - p.y) / len) * l };
+    };
+    return [along(prev), p, along(next)];
+  };
+  const bar = (i: number) => {
+    const a = corners()[i], b = corners()[(i + 1) % 4];
+    const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const l = Math.min(9, len / 6);
+    return [
+      { x: m.x - ((b.x - a.x) / len) * l, y: m.y - ((b.y - a.y) / len) * l },
+      { x: m.x + ((b.x - a.x) / len) * l, y: m.y + ((b.y - a.y) / len) * l },
+    ];
+  };
+  const readout = () => {
+    const d = props.overlay.drag, h = props.hover;
+    if (!h || !d || d === "move") return null;
+    const deg = (a: number) => `${Math.round(((a * 180) / Math.PI) * 10) / 10}°`;
+    // The image's turn (the box's, in Classic Mode).
+    if (d === "rotate") return [deg(c().classic ? box().angle : -box().angle)];
+    if (d === "straighten") {
+      const [a, b] = props.overlay.line!;
+      return [deg(Math.atan2(b.y - a.y, b.x - a.x))];
+    }
+    return [`W: ${Math.round(box().w)} px`, `H: ${Math.round(box().h)} px`];
+  };
+  return (
+    <g data-testid="crop-box" data-angle={box().angle} data-w={box().w} data-h={box().h}>
+      <CropShield outline={corners()} editing={editing()} />
+      <For each={lines()}>{(l) => <GuideLine points={l} opacity={0.7} />}</For>
+      <GuideLine points={[...corners(), corners()[0]]} />
+      <For each={[0, 1, 2, 3]}>{(i) => <GuideLine points={bracket(i)} width={3} />}</For>
+      <For each={[0, 1, 2, 3]}>{(i) => <GuideLine points={bar(i)} width={3} />}</For>
+      <Show when={props.overlay.line}>{(l) => <GuideLine points={l().map(pt)} />}</Show>
+      <Show when={readout()}>
+        {(lines) => (
+          <g transform={`translate(${props.hover!.screenX + 18} ${props.hover!.screenY + 18})`} data-testid="crop-readout">
+            <rect width="78" height={lines().length * 15 + 6} rx="3" fill="black" opacity="0.75" />
+            <For each={lines()}>
+              {(t, i) => (
+                <text x="6" y={15 * (i() + 1)} fill="white" font-size="11">
+                  {t}
+                </text>
+              )}
+            </For>
+          </g>
+        )}
+      </Show>
+    </g>
+  );
+}
+
+/** The Perspective Crop tool's quad: corners clicked so far, or the quad with its perspective grid. */
+function PerspectiveCropView(props: { overlay: Extract<Overlay, { kind: "perspective-crop" }>; view: View }) {
+  const { editor } = useContext(AppContext);
+  const pts = () => props.overlay.points.map((p) => docToScreen(props.view, p));
+  const quad = () => (pts().length === 4 ? (pts() as unknown as Quad) : null);
+  const color = () => (props.overlay.valid ? ACCENT : "#e5484d");
+  /** Corners, then the edges' midpoints. */
+  const handlePoints = () => (quad() ? [...pts(), ...pts().map((p, i) => ({ x: (p.x + pts()[(i + 1) % 4].x) / 2, y: (p.y + pts()[(i + 1) % 4].y) / 2 }))] : pts());
+  /** Grid lines at even steps of the straightened rectangle (a homography maps them). */
+  const grid = () => {
+    const q = quad();
+    if (!q || !editor.settings.perspectiveCrop.showGrid || !isConvex(q)) return [];
+    const H = squareToQuad(q);
+    if (!H) return [];
+    const side = Math.max(...q.map((p, i) => Math.hypot(q[(i + 1) % 4].x - p.x, q[(i + 1) % 4].y - p.y)));
+    const n = Math.max(2, Math.min(24, Math.round(side / 40)));
+    const out: Vec2[][] = [];
+    for (let i = 1; i < n; i++) out.push([project(H, i / n, 0), project(H, i / n, 1)], [project(H, 0, i / n), project(H, 1, i / n)]);
+    return out;
+  };
+  return (
+    <g data-testid="perspective-crop" data-valid={props.overlay.valid ? "true" : "false"}>
+      <Show when={quad()}>{(q) => <CropShield outline={q()} editing={props.overlay.dragging} />}</Show>
+      <For each={grid()}>{(l) => <polyline points={pointsAttr(l)} fill="none" stroke={color()} stroke-width="1" opacity="0.6" />}</For>
+      <polyline points={pointsAttr(quad() ? [...pts(), pts()[0]] : pts())} fill="none" stroke={color()} stroke-width="1" />
+      <For each={handlePoints()}>{(p) => <Handle at={p} />}</For>
     </g>
   );
 }

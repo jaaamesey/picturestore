@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CPU_RASTERIZERS, placementMapping } from "./content";
 import { addLayer, createDocument, createLayer, fillTiles, flatten, resolutionOf, type Doc, type Placement } from "./document";
-import { imageSize, imageSizeWindow, resizeCanvas, transformPlacement } from "./documentTransform";
+import { affine3, imageSize, imageSizeWindow, resizeCanvas, transformPlacement } from "./documentTransform";
 import { rect, scaling, type Vec2 } from "./geometry";
 import { rectMask } from "./selection";
 import { renderShape } from "./shape";
@@ -70,7 +70,7 @@ describe("document transforms", () => {
       patch: IDENTITY_PATCH.map((p, k) => (k === 6 ? { x: p.x + 0.1, y: p.y + 0.05 } : p)),
     };
     const m = scaling(2, 3);
-    const t = transformPlacement(warped, m);
+    const t = transformPlacement(warped, affine3(m));
     const at = (p: Placement, s: number, u: number): Vec2 => mapPoint(placementMapping(p), s, u);
     for (const [s, u] of [[0, 0], [0.3, 0.7], [1, 1], [0.5, 0.2]]) {
       const before = at(warped, s, u), after = at(t, s, u);

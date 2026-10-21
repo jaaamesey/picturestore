@@ -33,6 +33,9 @@ export const LAYER_MENU: readonly MenuItem[] = [
   "layer.mergeDown",
 ];
 
+/** Right-click on the canvas with the Crop tools. */
+export const CROP_MENU: readonly MenuItem[] = ["crop.commit", "crop.reset", "-", "crop.rotateBox"];
+
 /** Right-click on the canvas with a selection tool. */
 export const SELECTION_MENU: readonly MenuItem[] = [
   "select.deselect",
@@ -71,7 +74,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       { submenu: "Preferences", items: ["edit.preferences", "edit.preferences.fileHandling", "edit.preferences.performance"] },
     ],
   },
-  { title: "Image", items: ["image.imageSize", "image.canvasSize"] },
+  { title: "Image", items: ["image.imageSize", "image.canvasSize", "-", "image.crop"] },
   {
     title: "Layer",
     items: [

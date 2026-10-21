@@ -313,6 +313,7 @@ export function App() {
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (editor.toolKey({ key: e.key, shift: e.shiftKey })) return e.preventDefault();
       if (e.key === "Enter") return editor.commitTool();
       if (e.key === "Escape") return editor.cancelTool();
       if (e.key === "x" || e.key === "X") return editor.swapColors();

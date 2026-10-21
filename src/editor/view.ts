@@ -7,24 +7,42 @@ export const ZOOM_STEPS = [
 export const MIN_ZOOM = ZOOM_STEPS[0];
 export const MAX_ZOOM = ZOOM_STEPS[ZOOM_STEPS.length - 1];
 
-export const screenToDoc = (v: View, p: Vec2): Vec2 => ({ x: (p.x - v.panX) / v.zoom, y: (p.y - v.panY) / v.zoom });
-export const docToScreen = (v: View, p: Vec2): Vec2 => ({ x: p.x * v.zoom + v.panX, y: p.y * v.zoom + v.panY });
+/** Screen = R(rotation) · doc × zoom + pan. */
+export function screenToDoc(v: View, p: Vec2): Vec2 {
+  const x = (p.x - v.panX) / v.zoom, y = (p.y - v.panY) / v.zoom;
+  if (!v.rotation) return { x, y };
+  const c = Math.cos(v.rotation), s = Math.sin(v.rotation);
+  return { x: c * x + s * y, y: -s * x + c * y };
+}
+
+export function docToScreen(v: View, p: Vec2): Vec2 {
+  if (!v.rotation) return { x: p.x * v.zoom + v.panX, y: p.y * v.zoom + v.panY };
+  const c = Math.cos(v.rotation), s = Math.sin(v.rotation);
+  return { x: (c * p.x - s * p.y) * v.zoom + v.panX, y: (s * p.x + c * p.y) * v.zoom + v.panY };
+}
+
+/** A view at `zoom` and `rotation` that puts document point `doc` at screen point `screen`. */
+export function placeAt(zoom: number, rotation: number, doc: Vec2, screen: Vec2): View {
+  const p = docToScreen({ zoom, rotation, panX: 0, panY: 0 }, doc);
+  return { zoom, rotation, panX: screen.x - p.x, panY: screen.y - p.y };
+}
 
 /** Zooms to `zoom` keeping the document point under `anchor` (screen) fixed. */
 export function zoomAt(v: View, zoom: number, anchor: Vec2): View {
   const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
-  const d = screenToDoc(v, anchor);
-  return { zoom: z, panX: anchor.x - d.x * z, panY: anchor.y - d.y * z };
+  return placeAt(z, v.rotation ?? 0, screenToDoc(v, anchor), anchor);
 }
 
 export const nextZoomStep = (zoom: number) => ZOOM_STEPS.find((z) => z > zoom * 1.001) ?? MAX_ZOOM;
 export const prevZoomStep = (zoom: number) => [...ZOOM_STEPS].reverse().find((z) => z < zoom / 1.001) ?? MIN_ZOOM;
 
-/** Centres the document, scaled to fit within the viewport (never above 100%). */
-export function fitView(docW: number, docH: number, vw: number, vh: number, padding = 24, maxZoom = 1): View {
-  const zoom = Math.min(maxZoom, (vw - padding * 2) / docW, (vh - padding * 2) / docH);
-  const z = Math.max(MIN_ZOOM, zoom);
-  return { zoom: z, panX: Math.round((vw - docW * z) / 2), panY: Math.round((vh - docH * z) / 2) };
+/** Centres the document, scaled to fit within the viewport (never above 100%); turned by `rotation`, its turned bounds fit. */
+export function fitView(docW: number, docH: number, vw: number, vh: number, padding = 24, maxZoom = 1, rotation = 0): View {
+  const c = Math.abs(Math.cos(rotation)), s = Math.abs(Math.sin(rotation));
+  const bw = docW * c + docH * s, bh = docW * s + docH * c;
+  const z = Math.max(MIN_ZOOM, Math.min(maxZoom, (vw - padding * 2) / bw, (vh - padding * 2) / bh));
+  if (!rotation) return { zoom: z, panX: Math.round((vw - docW * z) / 2), panY: Math.round((vh - docH * z) / 2) };
+  return placeAt(z, rotation, { x: docW / 2, y: docH / 2 }, { x: vw / 2, y: vh / 2 });
 }
 
 /**
@@ -45,6 +63,7 @@ export function followRemap(
 ): View {
   const c = { x: viewport.width / 2, y: viewport.height / 2 };
   const p = map(screenToDoc(v, c));
+  // The new document is upright (a crop's rotation is applied to it).
   let panX = c.x - p.x * v.zoom, panY = c.y - p.y * v.zoom;
   if (centreIfFits && size.width * v.zoom <= viewport.width) panX = (viewport.width - size.width * v.zoom) / 2;
   if (centreIfFits && size.height * v.zoom <= viewport.height) panY = (viewport.height - size.height * v.zoom) / 2;

@@ -1,19 +1,21 @@
 import { withContent, type Rasterizers } from "./content";
-import { flatten, type Doc, type Layer, type LayerContent, type Placement } from "./document";
-import { apply, integerTranslation, intersect, invert, multiply, rect, roundOut, scaling, transformRect, translation, type Mat, type Rect } from "./geometry";
+import { PIXELS, flatten, type Doc, type Layer, type LayerContent, type Placement } from "./document";
+import { boundsOf, integerTranslation, intersect, multiply, rect, rectCorners, roundOut, scaling, translation, type Mat, type Rect, type Vec2 } from "./geometry";
 import type { Filter } from "./rasterize";
 import { transformMask, translateMask } from "./selection";
-import { EMPTY_TILES, contentBounds, translateTiles } from "./tiles";
+import { EMPTY_TILES, clipTiles, contentBounds, translateTiles } from "./tiles";
+import { invert3, isConvex, project, type Mat3, type Quad } from "./warp";
 
 /**
- * A change to the whole document as an affine map of its space: Canvas
- * Size (a translation), Image Size (a scale) and, later, Rotate/Flip Canvas
- * and Crop. Every kind of layer content says how it follows one, so new
- * kinds (text, effects) only need an entry in {@link CONTENT_TRANSFORMS}.
+ * A change to the whole document as a projective map of its space: Canvas
+ * Size (a translation), Image Size (a scale), Crop (a rotation, and a scale
+ * for a fixed output size), Perspective Crop (a homography) and, later,
+ * Rotate/Flip Canvas. Every kind of layer content says how it follows one,
+ * so new kinds (text, effects) only need an entry in {@link CONTENT_TRANSFORMS}.
  */
 export interface DocTransform {
   /** Old document space → new. */
-  readonly matrix: Mat;
+  readonly matrix: Mat3;
   readonly width: number;
   readonly height: number;
   /**
@@ -26,23 +28,36 @@ export interface DocTransform {
   readonly filter: Filter;
   readonly resolution?: number;
   /**
-   * Only the result within the new canvas is needed (previews): pixel layers
-   * resample just the part of their content that lands on it. Otherwise
-   * layers keep everything, off-canvas content included.
+   * Pixel layers keep only what lands on the new canvas (previews, which
+   * then resample just that part; Crop's Delete Cropped Pixels). Otherwise
+   * they keep everything, off-canvas content included. Smart objects and
+   * shapes always keep all their content.
    */
   readonly clipToCanvas?: boolean;
 }
 
+/** An affine {@link Mat} as a {@link Mat3}. */
+export const affine3 = ([a, b, c, d, e, f]: Mat): Mat3 => [a, c, e, b, d, f, 0, 0, 1];
+
+/** The affine part of `m`, or null when it has perspective. */
+export const asAffine = (m: Mat3, eps = 1e-12): Mat | null =>
+  Math.abs(m[6]) > eps || Math.abs(m[7]) > eps ? null : [m[0] / m[8], m[3] / m[8], m[1] / m[8], m[4] / m[8], m[2] / m[8], m[5] / m[8]];
+
+export const mapPoint = (m: Mat3, p: Vec2): Vec2 => project(m, p.x, p.y);
+const mapRect = (m: Mat3, r: Rect): Quad => rectCorners(r).map((p) => mapPoint(m, p)) as unknown as Quad;
+
 /**
  * Placements map their source box through a homography given by the quad;
- * composing an affine map onto that is exactly the quad's corners mapped.
+ * composing a projective map onto that is exactly the quad's corners mapped.
  * Warps apply before the homography, so they're untouched. The orientation
  * follows the box's top edge.
  */
-export function transformPlacement(p: Placement, m: Mat): Placement {
-  const [a, b, c, d] = p.quad.map((q) => apply(m, q));
-  const dir = apply([m[0], m[1], m[2], m[3], 0, 0], { x: Math.cos(p.angle), y: Math.sin(p.angle) });
-  return { ...p, quad: [a, b, c, d], angle: Math.atan2(dir.y, dir.x) };
+export function transformPlacement(p: Placement, m: Mat3): Placement {
+  const [a, b, c, d] = p.quad.map((q) => mapPoint(m, q));
+  // Where the orientation points, at the quad's centre (any point, for an affine map).
+  const o = { x: (p.quad[0].x + p.quad[2].x) / 2, y: (p.quad[0].y + p.quad[2].y) / 2 };
+  const mo = mapPoint(m, o), md = mapPoint(m, { x: o.x + Math.cos(p.angle), y: o.y + Math.sin(p.angle) });
+  return { ...p, quad: [a, b, c, d], angle: Math.atan2(md.y - mo.y, md.x - mo.x) };
 }
 
 type NonRaster = Exclude<LayerContent, { kind: "pixels" }>;
@@ -68,25 +83,30 @@ export function transformContent(c: NonRaster, t: DocTransform): NonRaster {
  */
 export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers): Promise<Layer> {
   const clip = rect(0, 0, t.width, t.height);
-  if (l.content.kind !== "pixels") return withContent(l, transformContent(l.content, t), clip, r, t.filter);
-  const shift = integerTranslation(t.matrix);
-  if (shift) return { ...l, tiles: translateTiles(l.tiles, shift.x, shift.y) };
+  if (l.content.kind !== "pixels") {
+    const content = transformContent(l.content, t);
+    // Content crossing a perspective's horizon has no exact transform: it's rasterized, as it looks.
+    if (isConvex(content.placement.quad)) return withContent(l, content, clip, r, t.filter);
+    l = { ...l, content: PIXELS };
+  }
+  const affine = asAffine(t.matrix);
+  const shift = affine && integerTranslation(affine);
+  if (shift) {
+    const tiles = translateTiles(l.tiles, shift.x, shift.y);
+    return { ...l, tiles: t.clipToCanvas ? clipTiles(tiles, clip) : tiles };
+  }
   let bounds = contentBounds(l.tiles);
-  if (t.clipToCanvas) {
+  if (t.clipToCanvas && affine) {
     // The source that lands on the canvas, with room for the filter's support (wider when reducing).
-    const src = transformRect(invert(t.matrix), clip);
-    const k = Math.max(Math.hypot(t.matrix[0], t.matrix[1]), Math.hypot(t.matrix[2], t.matrix[3]));
+    const src = boundsOf(mapRect(invert3(t.matrix)!, clip));
+    const k = Math.max(Math.hypot(affine[0], affine[1]), Math.hypot(affine[2], affine[3]));
     const pad = Math.ceil(Math.max(3, 3 / k));
     bounds = intersect(bounds, roundOut(rect(src.x - pad, src.y - pad, src.w + pad * 2, src.h + pad * 2)));
   }
   if (bounds.w <= 0 || bounds.h <= 0) return { ...l, tiles: EMPTY_TILES };
-  const corners = [
-    apply(t.matrix, { x: bounds.x, y: bounds.y }),
-    apply(t.matrix, { x: bounds.x + bounds.w, y: bounds.y }),
-    apply(t.matrix, { x: bounds.x + bounds.w, y: bounds.y + bounds.h }),
-    apply(t.matrix, { x: bounds.x, y: bounds.y + bounds.h }),
-  ] as const;
-  const tiles = await r.resample({ tiles: l.tiles, bounds }, { source: bounds, quad: corners, patch: null }, t.filter, t.clipToCanvas ? clip : undefined);
+  // Under perspective only the canvas is kept: content beyond the horizon has nowhere to go.
+  const clipTo = t.clipToCanvas || !affine ? clip : undefined;
+  const tiles = await r.resample({ tiles: l.tiles, bounds }, { source: bounds, quad: mapRect(t.matrix, bounds), patch: null }, t.filter, clipTo);
   return { ...l, tiles };
 }
 
@@ -94,19 +114,15 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
 export async function transformDocument(doc: Doc, t: DocTransform, r: Rasterizers): Promise<Doc> {
   const layers = await Promise.all(doc.layers.map((l) => transformLayer(l, t, r)));
   const sel = doc.selection && { ...doc.selection, width: t.width, height: t.height };
-  const shift = integerTranslation(t.matrix);
+  const affine = asAffine(t.matrix);
+  const shift = affine && integerTranslation(affine);
   const selection =
     sel &&
     (shift
       ? translateMask(sel, shift.x, shift.y)
       : transformMask(sel, {
           source: sel.bounds,
-          quad: [
-            apply(t.matrix, { x: sel.bounds.x, y: sel.bounds.y }),
-            apply(t.matrix, { x: sel.bounds.x + sel.bounds.w, y: sel.bounds.y }),
-            apply(t.matrix, { x: sel.bounds.x + sel.bounds.w, y: sel.bounds.y + sel.bounds.h }),
-            apply(t.matrix, { x: sel.bounds.x, y: sel.bounds.y + sel.bounds.h }),
-          ],
+          quad: mapRect(t.matrix, sel.bounds),
           patch: null,
         }));
   return { ...doc, width: t.width, height: t.height, layers, selection, resolution: t.resolution ?? doc.resolution };
@@ -130,7 +146,7 @@ export const canvasOffset = (doc: Pick<Doc, "width" | "height">, width: number, 
  */
 export function resizeCanvas(doc: Doc, width: number, height: number, anchor: Anchor, r: Rasterizers): Promise<Doc> {
   const { x: dx, y: dy } = canvasOffset(doc, width, height, anchor);
-  return transformDocument(doc, { matrix: translation(dx, dy), width, height, lengthScale: 1, filter: "nearest" }, r);
+  return transformDocument(doc, { matrix: affine3(translation(dx, dy)), width, height, lengthScale: 1, filter: "nearest" }, r);
 }
 
 export interface ImageSizeOptions {
@@ -157,7 +173,7 @@ export function imageSize(doc: Doc, o: ImageSizeOptions, r: Rasterizers): Promis
   const { sx, sy, lengthScale } = imageSizeScales(doc, o);
   return transformDocument(
     doc,
-    { matrix: scaling(sx, sy), width: o.width, height: o.height, lengthScale, filter: o.filter, resolution: o.resolution },
+    { matrix: affine3(scaling(sx, sy)), width: o.width, height: o.height, lengthScale, filter: o.filter, resolution: o.resolution },
     r,
   );
 }
@@ -183,7 +199,7 @@ export function imageSizeWindow(doc: Doc, o: ImageSizeOptions, window: Rect, r: 
   const width = Math.max(1, Math.round(window.w * scale)), height = Math.max(1, Math.round(window.h * scale));
   return transformDocument(
     { ...doc, selection: null },
-    { matrix, width, height, lengthScale: lengthScale * scale, filter: o.filter, clipToCanvas: true },
+    { matrix: affine3(matrix), width, height, lengthScale: lengthScale * scale, filter: o.filter, clipToCanvas: true },
     r,
   );
 }

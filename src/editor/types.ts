@@ -1,4 +1,5 @@
 import type { BrushSettings } from "../core/brush";
+import type { CropBox, CropConstraint, CropOverlay, Length } from "../core/crop";
 import type { RGB } from "../core/color";
 import type { Rasterizers } from "../core/content";
 import type { Doc, Layer } from "../core/document";
@@ -26,6 +27,8 @@ export type ToolId =
   | "triangle"
   | "polygon"
   | "line"
+  | "crop"
+  | "perspective-crop"
   | "transform";
 
 export type ShapeToolId = "rectangle" | "ellipse" | "triangle" | "polygon" | "line";
@@ -55,8 +58,42 @@ export interface TransformSettings {
   readonly interpolation: Filter;
 }
 
+export interface CropSettings {
+  /** The ratio menu and fields: a ratio, or W x H x Resolution. */
+  readonly constraint: CropConstraint;
+  /** Unchecked, cropped-away pixels are kept beyond the canvas (smart objects and shapes always keep theirs). */
+  readonly deletePixels: boolean;
+  readonly overlay: CropOverlay;
+  /** Flips asymmetric overlays (Shift+O). */
+  readonly orientation: number;
+  readonly showOverlay: "always" | "auto" | "never";
+  /** Classic Mode: the box moves and turns over the image, instead of the image under the box. */
+  readonly classic: boolean;
+  /** Off (H): nothing is shown outside the box. */
+  readonly showCropped: boolean;
+  /** The box is kept centred in the window (not in Classic Mode). */
+  readonly autoCenter: boolean;
+  readonly shield: boolean;
+  /** null matches the canvas (the workspace colour). */
+  readonly shieldColor: RGB | null;
+  readonly shieldOpacity: number;
+  /** The shield lightens while the box is being edited. */
+  readonly autoAdjustOpacity: boolean;
+  /** The Straighten tool is armed (or hold Ctrl). */
+  readonly straighten: boolean;
+}
+
+export interface PerspectiveCropSettings {
+  readonly width: Length | null;
+  readonly height: Length | null;
+  readonly resolution: number | null;
+  readonly showGrid: boolean;
+}
+
 export interface ToolSettings {
   readonly transform: TransformSettings;
+  readonly crop: CropSettings;
+  readonly perspectiveCrop: PerspectiveCropSettings;
   readonly shape: ShapeSettings;
   readonly brush: BrushSettings;
   readonly eraser: BrushSettings;
@@ -72,7 +109,23 @@ export type Overlay =
   | { readonly kind: "lasso"; readonly points: readonly Vec2[] }
   | { readonly kind: "transform"; readonly state: TransformState; readonly mode: TransformMode }
   /** The Move tool's bounding box, following content while it's dragged. */
-  | { readonly kind: "frame"; readonly state: TransformState };
+  | { readonly kind: "frame"; readonly state: TransformState }
+  | {
+      readonly kind: "crop";
+      readonly box: CropBox;
+      /** What's being dragged, if anything. */
+      readonly drag: "resize" | "move" | "rotate" | "draw" | "straighten" | null;
+      /** The Straighten tool's line, in document space. */
+      readonly line?: readonly [Vec2, Vec2];
+    }
+  | {
+      readonly kind: "perspective-crop";
+      /** Corners clicked so far, or the quad (TL, TR, BR, BL). */
+      readonly points: readonly Vec2[];
+      /** Whether the quad can be straightened (it's convex). */
+      readonly valid: boolean;
+      readonly dragging: boolean;
+    };
 
 export interface ToolEvent {
   /** Document coordinates (fractional). */
@@ -106,9 +159,14 @@ export interface ToolContext {
   commit(label: string, doc: Doc): void;
   /**
    * Like `commit`, for results computed asynchronously (GPU resampling). The
-   * preview stays up and input is blocked until it settles.
+   * preview stays up and input is blocked until it settles; `landed` runs
+   * once it's recorded.
    */
-  commitAsync(label: string, doc: Promise<Doc>): void;
+  commitAsync(label: string, doc: Promise<Doc>, landed?: () => void): void;
+  /** The viewport's size, in CSS pixels. */
+  readonly viewport: { readonly width: number; readonly height: number };
+  /** Changes tool settings from within a tool (keyboard toggles). */
+  updateSettings(fn: (s: Writable<ToolSettings>) => void): void;
   /** Commit-quality resampling and shape rasterization (on the GPU in the app). */
   readonly raster: Rasterizers;
   /**
@@ -144,4 +202,20 @@ export interface Tool {
   commit?(ctx: ToolContext): void;
   /** Escape, or switching away mid-operation. */
   cancel?(ctx: ToolContext): void;
+  /** Switching away applies the operation (Free Transform, Crop) rather than cancelling it. */
+  readonly commitOnSwitch?: boolean;
+  /** The tool was selected. */
+  activate?(ctx: ToolContext): void;
+  /** The document, its tab, or the tool's settings changed: catch up. */
+  sync?(ctx: ToolContext): void;
+  /** A key without Ctrl/Alt while the tool is selected; true when the tool used it. */
+  key?(ctx: ToolContext, e: ToolKey): boolean;
 }
+
+export interface ToolKey {
+  readonly key: string;
+  readonly shift: boolean;
+}
+
+/** Deeply mutable, for store setters. */
+export type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };

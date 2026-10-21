@@ -12,6 +12,7 @@ import type { Filter } from "../core/rasterize";
 import { locatorPoint, numeric, withNumeric, type NumericTransform, type TransformMode, type TransformState } from "../core/transform";
 import { AppContext } from "./context";
 import { IconButton, NumberField, Separator } from "./controls";
+import { CropOptions, PerspectiveCropOptions } from "./CropOptions";
 
 const MODES: readonly { mode: SelectionMode; label: string; glyph: string }[] = [
   { mode: "replace", label: "New selection", glyph: "▢" },
@@ -364,6 +365,12 @@ export function OptionsBar() {
         </Match>
         <Match when={editor.tool() === "bucket"}>
           <ToleranceOptions />
+        </Match>
+        <Match when={editor.tool() === "crop"}>
+          <CropOptions />
+        </Match>
+        <Match when={editor.tool() === "perspective-crop"}>
+          <PerspectiveCropOptions />
         </Match>
       </Switch>
     </div>

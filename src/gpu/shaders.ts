@@ -282,6 +282,8 @@ struct View {
   workspace: vec4<f32>,
   /** 1 when the composite is stored below document resolution (GPU memory pressure). */
   reduced: u32,
+  /** The view's rotation (cos, sin). */
+  rot: vec2<f32>,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var composite: texture_2d<f32>;
@@ -296,11 +298,13 @@ fn selected(doc: vec2<f32>) -> bool {
 }
 
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-  let doc = (pos.xy - V.pan) / V.zoom;
+  let d = (pos.xy - V.pan) / V.zoom;
+  let doc = vec2<f32>(V.rot.x * d.x + V.rot.y * d.y, -V.rot.y * d.x + V.rot.x * d.y);
   if (any(doc < vec2<f32>(0.0)) || any(doc >= V.docSize)) { return V.workspace; }
 
   var c: vec4<f32>;
-  if (V.lod <= 0.0 && V.reduced == 0u) {
+  // Rotated views sample (bilinear) rather than pick a texel.
+  if (V.lod <= 0.0 && V.reduced == 0u && V.rot.y == 0.0) {
     c = textureLoad(composite, vec2<i32>(doc), 0);
   } else {
     c = textureSampleLevel(composite, samp, doc / V.docSize, V.lod);
