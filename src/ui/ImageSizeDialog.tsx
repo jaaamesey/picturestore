@@ -1,4 +1,6 @@
-import { For, Show, createSignal, onSettled, untrack } from "solid-js";
+import { For, Show, createEffect, createSignal, onSettled, untrack } from "solid-js";
+import { rect, type Rect } from "../core/geometry";
+import { createLatest } from "./latest";
 import type { Filter } from "../core/rasterize";
 import {
   FIT_PRESETS,
@@ -43,7 +45,8 @@ type MethodId = (typeof RESAMPLE_METHODS)[number]["id"];
  */
 export function ImageSizeDialog(props: {
   original: Original;
-  preview: Promise<ImageData | null>;
+  /** The result within a window of the new image, at 100% (see `Editor.imageSizePreview`). */
+  renderPreview: (r: ImageSizeResult, window: Rect) => Promise<ImageData | null>;
   onApply: (r: ImageSizeResult) => void;
   onClose: () => void;
 }) {
@@ -66,20 +69,69 @@ export function ImageSizeDialog(props: {
   const [preset, setPreset] = createSignal<string>("original");
   let canvas!: HTMLCanvasElement;
 
+  // --- Preview: the result at 100%, like Photoshop's; drag inside it to look around. ---
+  /** Which part of the new image is shown, as fractions of it (kept as sizes change). */
+  const [centre, setCentre] = createSignal({ x: 0.5, y: 0.5 });
+  const resultOf = (st: SizeState): ImageSizeResult => ({
+    width: st.width,
+    height: st.height,
+    resolution: st.resolution,
+    resample: st.resample,
+    filter: resampleFilter(method()),
+    // As in Photoshop, styles only scale with proportions kept.
+    scaleStyles: scaleStyles() && st.constrain,
+  });
+  const result = () => resultOf(state());
+  const windowFor = (r: ImageSizeResult, c: { x: number; y: number }): Rect => {
+    const w = Math.min(PREVIEW, r.width), h = Math.min(PREVIEW, r.height);
+    const x = Math.min(r.width - w, Math.max(0, Math.round(c.x * r.width - w / 2)));
+    const y = Math.min(r.height - h, Math.max(0, Math.round(c.y * r.height - h / 2)));
+    return rect(x, y, w, h);
+  };
+  // Resampling is the expensive part: at most one preview every 200 ms, latest settings winning.
+  const previews = createLatest(
+    ({ r, w }: { r: ImageSizeResult; w: Rect }) => props.renderPreview(r, w),
+    (img) => {
+      if (!img || !canvas) return;
+      canvas.width = img.width;
+      canvas.height = img.height;
+      canvas.getContext("2d")!.putImageData(img, 0, 0);
+    },
+    200,
+  );
+  createEffect(
+    () => {
+      const r = result();
+      return { r, w: windowFor(r, centre()) };
+    },
+    (args) => previews.request(args),
+  );
+  const pan = (e: PointerEvent) => {
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const start = { x: e.clientX, y: e.clientY, c: centre() };
+    const move = (m: PointerEvent) => {
+      const r = result();
+      // Dragging moves the image under the pointer, 1:1.
+      setCentre({
+        x: Math.min(1, Math.max(0, start.c.x - (m.clientX - start.x) / r.width)),
+        y: Math.min(1, Math.max(0, start.c.y - (m.clientY - start.y) / r.height)),
+      });
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+
   const value = (axis: "width" | "height", unit: LengthUnit) => display(fromPixels(state()[axis], unit, state().resolution, o[axis]), unit);
   const disabledUnit = (u: LengthUnit) => !state().resample && !isPhysical(u);
 
   const ok = () => {
     if (document.activeElement instanceof HTMLInputElement) document.activeElement.blur();
-    props.onApply({
-      width: current.width,
-      height: current.height,
-      resolution: current.resolution,
-      resample: current.resample,
-      filter: resampleFilter(method()),
-      // As in Photoshop, styles only scale with proportions kept.
-      scaleStyles: scaleStyles() && current.constrain,
-    });
+    props.onApply(resultOf(current));
     props.onClose();
   };
 
@@ -92,13 +144,10 @@ export function ImageSizeDialog(props: {
       e.stopImmediatePropagation();
     };
     window.addEventListener("keydown", onKey, { capture: true });
-    void props.preview.then((img) => {
-      if (!img || !canvas) return;
-      canvas.width = img.width;
-      canvas.height = img.height;
-      canvas.getContext("2d")!.putImageData(img, 0, 0);
-    });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", onKey, { capture: true });
+      previews.dispose();
+    };
   });
 
   const unitSelect = (unit: () => LengthUnit, onUnit: (u: LengthUnit) => void, testId: string) => (
@@ -130,8 +179,14 @@ export function ImageSizeDialog(props: {
   return (
     <div class="fixed inset-0 z-50 grid place-items-center bg-black/50">
       <div class="flex gap-4 rounded-sm border border-line bg-panel p-4 shadow-2xl" role="dialog" aria-label="Image Size" data-testid="image-size">
-        <div class="checkerboard grid shrink-0 place-items-center border border-line" style={{ width: `${PREVIEW}px`, height: `${PREVIEW}px` }}>
-          <canvas ref={canvas} class="max-h-full max-w-full" style={{ "image-rendering": "auto" }} />
+        <div
+          class="checkerboard grid shrink-0 cursor-grab place-items-center overflow-hidden border border-line active:cursor-grabbing"
+          style={{ width: `${PREVIEW}px`, height: `${PREVIEW}px` }}
+          title="Preview at 100% (drag to look around)"
+          data-testid="image-size-preview"
+          onPointerDown={pan}
+        >
+          <canvas ref={canvas} style={{ "image-rendering": "pixelated" }} />
         </div>
         <div class="flex w-80 flex-col gap-2.5">
           <div class="relative flex items-center justify-between">

@@ -45,7 +45,8 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   Rasterize Layer, and Edit Contents (opens the contents as a document; saving it updates every instance). If
   the contents' canvas size changes, the layer keeps its transform — same scale, rotation, perspective and warp
   — with the new contents centred where the old ones were, as in Photoshop.
-- **Image ▸ Image Size** (Alt+Ctrl+I), as Photoshop's: preview, size readout, Dimensions, Fit To presets,
+- **Image ▸ Image Size** (Alt+Ctrl+I), as Photoshop's: a live preview of the result at 100% (drag to look
+  around; it runs the real transform on just that window, at most every 200 ms), size readout, Dimensions, Fit To presets,
   linked Width/Height in pixels, percent or physical units, Resolution (ppi or ppcm, saved in PSDs), and
   Resample (Automatic, Bicubic, Nearest Neighbor, Bilinear). Everything scales: pixel layers are resampled,
   smart objects and shapes scale exactly as vectors (smart objects re-render from their full-resolution

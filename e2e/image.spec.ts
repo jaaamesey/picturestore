@@ -77,3 +77,30 @@ test("Image Size scales pixels, shapes and their strokes together; without Resam
   const after = await doc(page);
   expect([after.width, after.height, after.resolution]).toEqual([800, 600, 300]);
 });
+
+test("the Image Size preview shows the result at 100%, follows the settings, and pans", async ({ page }) => {
+  await newDocument(page, 400, 300);
+  await rectOnLayer(page, 180, 130, 220, 170, "ff0000"); // a 40 px red square in the middle
+  await page.keyboard.press("Alt+Control+i");
+  const preview = page.getByTestId("image-size-preview").locator("canvas");
+  const at = (x: number, y: number) =>
+    preview.evaluate((c: HTMLCanvasElement, [x, y]) => [...c.getContext("2d")!.getImageData(x, y, 1, 1).data], [x, y]);
+  // A 220 px window on the middle of the image: the square spans 90–130 of it.
+  await expect.poll(() => at(100, 100)).toEqual([255, 0, 0, 255]);
+  expect(await at(140, 110)).toEqual([255, 255, 255, 255]);
+
+  // At 200% the square is 80 px, 70–150 of the window: the preview catches up.
+  await page.getByTestId("image-size-width-unit").selectOption("percent");
+  await page.getByTestId("image-size-width").fill("200");
+  await page.getByTestId("image-size-width").press("Tab");
+  await expect.poll(() => at(140, 110)).toEqual([255, 0, 0, 255]);
+
+  // Dragging moves the image under the pointer.
+  const box = (await page.getByTestId("image-size-preview").boundingBox())!;
+  await page.mouse.move(box.x + 110, box.y + 110);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 170, box.y + 110, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(() => at(190, 110)).toEqual([255, 0, 0, 255]);
+  expect(await at(120, 110)).toEqual([255, 255, 255, 255]);
+});

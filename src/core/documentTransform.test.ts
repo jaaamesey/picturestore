@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CPU_RASTERIZERS, placementMapping } from "./content";
-import { addLayer, createDocument, createLayer, fillTiles, resolutionOf, type Doc, type Placement } from "./document";
-import { imageSize, resizeCanvas, transformPlacement } from "./documentTransform";
+import { addLayer, createDocument, createLayer, fillTiles, flatten, resolutionOf, type Doc, type Placement } from "./document";
+import { imageSize, imageSizeWindow, resizeCanvas, transformPlacement } from "./documentTransform";
 import { rect, scaling, type Vec2 } from "./geometry";
 import { rectMask } from "./selection";
 import { renderShape } from "./shape";
@@ -77,5 +77,33 @@ describe("document transforms", () => {
       expect(after.x).toBeCloseTo(before.x * 2, 9);
       expect(after.y).toBeCloseTo(before.y * 3, 9);
     }
+  });
+});
+
+describe("Image Size preview windows", () => {
+  it("are exactly the same window of the full result: pixels, shapes and strokes", async () => {
+    const d = doc();
+    const o = { width: 500, height: 250, resolution: 72, filter: "bicubic" as const, scaleStyles: true };
+    const full = await imageSize(d, o, cpu);
+    const window = rect(230, 60, 120, 90); // over the shape's top-left corner
+    const part = await imageSizeWindow(d, o, window, cpu);
+    expect([part.width, part.height]).toEqual([120, 90]);
+    const a = flatten(full, window), b = flatten(part);
+    let max = 0;
+    for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i] - b[i]));
+    expect(max).toBeLessThanOrEqual(1);
+    // And something is actually in it.
+    expect(b.some((v, i) => i % 4 === 3 && v > 0)).toBe(true);
+  });
+
+  it("cover reductions too, where the filter reaches further", async () => {
+    const d = doc();
+    const o = { width: 50, height: 25, resolution: 72, filter: "bicubic" as const, scaleStyles: true };
+    const full = await imageSize(d, o, cpu);
+    const window = rect(0, 0, 30, 20);
+    const a = flatten(full, window), b = flatten(await imageSizeWindow(d, o, window, cpu));
+    let max = 0;
+    for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i] - b[i]));
+    expect(max).toBeLessThanOrEqual(1);
   });
 });

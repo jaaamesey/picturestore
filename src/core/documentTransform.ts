@@ -1,9 +1,9 @@
 import { withContent, type Rasterizers } from "./content";
 import type { Doc, Layer, LayerContent, Placement } from "./document";
-import { apply, integerTranslation, rect, scaling, translation, type Mat } from "./geometry";
+import { apply, integerTranslation, intersect, invert, multiply, rect, roundOut, scaling, transformRect, translation, type Mat, type Rect } from "./geometry";
 import type { Filter } from "./rasterize";
 import { transformMask, translateMask } from "./selection";
-import { contentBounds, translateTiles } from "./tiles";
+import { EMPTY_TILES, contentBounds, translateTiles } from "./tiles";
 
 /**
  * A change to the whole document as an affine map of its space: Canvas
@@ -25,6 +25,12 @@ export interface DocTransform {
   /** Resampling for pixel layers (whole-pixel translations are exact copies regardless). */
   readonly filter: Filter;
   readonly resolution?: number;
+  /**
+   * Only the result within the new canvas is needed (previews): pixel layers
+   * resample just the part of their content that lands on it. Otherwise
+   * layers keep everything, off-canvas content included.
+   */
+  readonly clipToCanvas?: boolean;
 }
 
 /**
@@ -65,15 +71,22 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
   if (l.content.kind !== "pixels") return withContent(l, transformContent(l.content, t), clip, r, t.filter);
   const shift = integerTranslation(t.matrix);
   if (shift) return { ...l, tiles: translateTiles(l.tiles, shift.x, shift.y) };
-  const bounds = contentBounds(l.tiles);
-  if (bounds.w <= 0 || bounds.h <= 0) return l;
+  let bounds = contentBounds(l.tiles);
+  if (t.clipToCanvas) {
+    // The source that lands on the canvas, with room for the filter's support (wider when reducing).
+    const src = transformRect(invert(t.matrix), clip);
+    const k = Math.max(Math.hypot(t.matrix[0], t.matrix[1]), Math.hypot(t.matrix[2], t.matrix[3]));
+    const pad = Math.ceil(Math.max(3, 3 / k));
+    bounds = intersect(bounds, roundOut(rect(src.x - pad, src.y - pad, src.w + pad * 2, src.h + pad * 2)));
+  }
+  if (bounds.w <= 0 || bounds.h <= 0) return { ...l, tiles: EMPTY_TILES };
   const corners = [
     apply(t.matrix, { x: bounds.x, y: bounds.y }),
     apply(t.matrix, { x: bounds.x + bounds.w, y: bounds.y }),
     apply(t.matrix, { x: bounds.x + bounds.w, y: bounds.y + bounds.h }),
     apply(t.matrix, { x: bounds.x, y: bounds.y + bounds.h }),
   ] as const;
-  const tiles = await r.resample({ tiles: l.tiles, bounds }, { source: bounds, quad: corners, patch: null }, t.filter);
+  const tiles = await r.resample({ tiles: l.tiles, bounds }, { source: bounds, quad: corners, patch: null }, t.filter, t.clipToCanvas ? clip : undefined);
   return { ...l, tiles };
 }
 
@@ -143,6 +156,24 @@ export function imageSize(doc: Doc, o: ImageSizeOptions, r: Rasterizers): Promis
   return transformDocument(
     doc,
     { matrix: scaling(sx, sy), width: o.width, height: o.height, lengthScale, filter: o.filter, resolution: o.resolution },
+    r,
+  );
+}
+
+/**
+ * What Image Size would produce within `window` (a rectangle of the new
+ * image), as its own small document: the real transform, so shapes and
+ * smart objects re-render as they will, restricted to the window so the
+ * cost depends on its size, not the document's.
+ */
+export function imageSizeWindow(doc: Doc, o: ImageSizeOptions, window: Rect, r: Rasterizers): Promise<Doc> {
+  const sx = o.width / doc.width, sy = o.height / doc.height;
+  const proportional = Math.abs(sx - sy) <= 1.01 / Math.min(doc.width, doc.height);
+  const lengthScale = o.scaleStyles && proportional ? Math.sqrt(sx * sy) : 1;
+  const matrix = multiply(translation(-window.x, -window.y), scaling(sx, sy));
+  return transformDocument(
+    { ...doc, selection: null },
+    { matrix, width: window.w, height: window.h, lengthScale, filter: o.filter, clipToCanvas: true },
     r,
   );
 }

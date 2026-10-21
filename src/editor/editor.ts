@@ -1,7 +1,7 @@
 import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
 import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
-import { imageSize, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
+import { imageSize, imageSizeWindow, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -170,7 +170,7 @@ export const RASTERIZE_PROMPTS = {
 } as const;
 
 /** What the editor uses the GPU renderer for, besides display. */
-type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape" | "thumbnail">;
+type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape">;
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };
 
@@ -836,8 +836,19 @@ export function createEditor() {
         if (o.width === d.width && o.height === d.height && o.resolution === resolutionOf(d)) return;
         commitAsync(s, "Image Size", imageSize(d, o, raster));
       }),
-      /** A small composite of the active document, for previews (null without a GPU). */
-      thumbnail: (max: number) => gpu?.thumbnail(max) ?? Promise.resolve(null),
+      /**
+       * Image Size's preview: what it would produce within `window` (a
+       * rectangle of the new image), at 100%. Without resampling (or at the
+       * same size) the pixels don't change, so it's just that part of the image.
+       */
+      async imageSizePreview(o: ImageSizeOptions & { resample: boolean }, window: Rect): Promise<ImageData | null> {
+        const s = active();
+        if (!s || window.w < 1 || window.h < 1) return null;
+        const d = s.doc();
+        const same = !o.resample || (o.width === d.width && o.height === d.height);
+        const pixels = same ? flatten(d, window) : flatten(await imageSizeWindow(d, o, window, raster));
+        return new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, window.w, window.h);
+      },
       /** Image ▸ Canvas Size. */
       canvasSize: whenIdle((width: number, height: number, anchor: Anchor) => {
         const s = active();
