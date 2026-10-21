@@ -50,9 +50,9 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
 - **Shapes**: Rectangle (corner radius), Ellipse, Triangle, Polygon (sides, star ratio) and Line (weight) tools
   (U / Shift+U, toolbar flyout). Shift constrains, Alt draws from the centre. Shape mode makes live shape
   layers with fill and stroke (width, inside/centre/outside); with a shape selected the options bar edits it.
-  Pixels mode fills into the active layer. Shapes transform exactly (vectors are re-rendered, strokes keep
-  their width); while dragging, their pixels are carried through the transform on the GPU, as raster layers'
-  are, so moving large shapes is as smooth.
+  Pixels mode fills into the active layer. Shapes are drawn on the GPU from their vectors every frame
+  they change — drawing, moving, transforming (warps included) and editing options are exact and live — and
+  strokes keep their width under transforms.
 - **Clipboard**: Cut, Copy, Copy Merged, Paste (centred on the selection or the visible canvas) and Paste in
   Place. Copies also go to the system clipboard as PNG; images pasted from other apps become new layers (or a
   new document when none is open). Layer via Copy / Cut (Ctrl+J / Ctrl+Shift+J).
@@ -121,6 +121,14 @@ GPU's perspective-correct interpolation reproduce the homography exactly. Commit
 per-pixel LOD and Keys bicubic over a premultiplied mip chain, in bounded chunks. `core/rasterize.ts` is the CPU
 reference (a perspective-correct triangle rasterizer with per-pixel mip selection) used for selection masks and
 by a GPU-vs-CPU parity test.
+
+**Shapes are rasterized on the GPU** (`gpu/vector.ts`), with the same exact-area coverage as the CPU
+reference: the CPU only flattens the outline (adaptive Bézier subdivision after mapping, so perspective and
+warps stay within 0.1 px) and builds stroke polygons; a compute shader deposits each segment's signed-area
+contribution into a fixed-point accumulator with atomics, a two-level parallel prefix sum resolves winding
+per row, and a resolve pass clips strokes against the fill and writes straight into the layer's atlas tiles,
+a tile row at a time. Commits read the same rasterization back as the layer's pixels. An e2e test holds the
+GPU to within 2 levels of the CPU reference, on screen and in readback.
 
 **Algorithms chosen for the hot paths**: exact-area polygon coverage (font-rs style accumulation) for lasso and
 ellipse selections; scanline span fill for the magic wand; a radial falloff LUT over squared distance with

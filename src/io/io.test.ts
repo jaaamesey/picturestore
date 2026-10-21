@@ -3,15 +3,13 @@ import { describe, expect, it } from "vitest";
 import { addLayer, createDocument, createLayer, fillTiles, flatten, type Doc } from "../core/document";
 import { rect } from "../core/geometry";
 import { EMPTY_TILES } from "../core/tiles";
-import { smartObjectLayer, smartSource } from "../core/content";
-import { transformFloatingCpu } from "../core/raster";
+import { CPU_RASTERIZERS, smartObjectLayer, smartSource } from "../core/content";
 import { renderShape } from "../core/shape";
 import { getPixel } from "../core/tiles";
 import { quadOf } from "../core/warp";
 import { readPsdDocument, writePsdDocument } from "./psd";
 
-const cpu = async (f: Parameters<typeof transformFloatingCpu>[0], m: Parameters<typeof transformFloatingCpu>[1], filter: Parameters<typeof transformFloatingCpu>[2], clip: Parameters<typeof transformFloatingCpu>[3]) =>
-  transformFloatingCpu(f, m, filter, clip);
+const cpu = CPU_RASTERIZERS;
 
 function sampleDoc(): Doc {
   const d = createDocument({ width: 300, height: 200, background: { r: 10, g: 20, b: 30 } });

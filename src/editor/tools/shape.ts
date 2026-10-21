@@ -1,7 +1,7 @@
-import { addLayer, activeLayer, createLayer, docRect, fillTiles, numberedName, updateLayer, type Doc, type Placement } from "../../core/document";
+import { addLayer, activeLayer, createLayer, docRect, numberedName, updateLayer, type Doc, type Placement } from "../../core/document";
 import { rect, vec, type Rect, type Vec2 } from "../../core/geometry";
-import { combine, toMask } from "../../core/selection";
-import { fillCoverage, renderShape, type ShapeGeometry, type ShapeStyle } from "../../core/shape";
+import { compositeOver, extractFloating } from "../../core/raster";
+import type { ShapeGeometry, ShapeStyle } from "../../core/shape";
 import { placementMapping } from "../../core/content";
 import { quadOf, type Quad } from "../../core/warp";
 import type { ShapeSettings, ShapeToolId, Tool, ToolContext, ToolEvent } from "../types";
@@ -72,20 +72,31 @@ export function createShapeTool(id: ShapeToolId): Tool {
     return r.w >= 1 && r.h >= 1 ? boxPlacement(r) : null;
   };
 
-  /** The document with the shape drawn, as a new shape layer or into the active layer's pixels. */
-  const draw = (ctx: ToolContext, p: Placement): Doc | null => {
+  /**
+   * What's shown while dragging: the shape as a live shape layer, without
+   * pixels — the renderer rasterizes it on the GPU every frame. In Pixels
+   * mode it's shown as a foreground-filled shape over the active layer.
+   */
+  const preview = (ctx: ToolContext, p: Placement): Doc | null => {
     const { doc, settings } = ctx;
     const geometry = shapeGeometry(id, settings.shape);
-    if (settings.shape.mode === "pixels") {
-      const layer = activeLayer(doc);
-      if (!layer) return null;
-      const cov = fillCoverage(geometry, placementMapping(p), docRect(doc));
-      const mask = cov && combine(doc.selection, toMask(cov.data, cov.region, doc.width, doc.height), doc.selection ? "intersect" : "replace");
-      return mask ? updateLayer(doc, layer.id, { tiles: fillTiles(layer.tiles, mask.bounds, ctx.foreground, mask) }) : doc;
-    }
-    const style = shapeStyle(settings.shape, ctx.foreground);
-    const tiles = renderShape(geometry, style, placementMapping(p), docRect(doc));
-    return addLayer(doc, createLayer({ name: numberedName(doc, NAMES[id]), tiles, content: { kind: "shape", geometry, style, placement: p } }));
+    const pixels = settings.shape.mode === "pixels";
+    if (pixels && !activeLayer(doc)) return null;
+    const style: ShapeStyle = pixels ? { fill: ctx.foreground, stroke: null } : shapeStyle(settings.shape, ctx.foreground);
+    return addLayer(doc, createLayer({ name: numberedName(doc, NAMES[id]), content: { kind: "shape", geometry, style, placement: p } }));
+  };
+
+  /** The committed document: the new shape layer (or the active layer's pixels) with its pixels from the GPU. */
+  const commit = async (ctx: ToolContext, shown: Doc): Promise<Doc> => {
+    const { doc } = ctx;
+    const added = activeLayer(shown)!;
+    if (added.content.kind !== "shape") return doc;
+    const { geometry, style, placement: p } = added.content;
+    const tiles = await ctx.raster.shape(geometry, style, placementMapping(p), docRect(doc));
+    if (ctx.settings.shape.mode !== "pixels") return updateLayer(shown, added.id, { tiles });
+    const layer = activeLayer(doc)!;
+    const clipped = doc.selection ? extractFloating(tiles, doc.selection).floating.tiles : tiles;
+    return updateLayer(doc, layer.id, { tiles: compositeOver(layer.tiles, clipped) });
   };
 
   return {
@@ -104,15 +115,17 @@ export function createShapeTool(id: ShapeToolId): Tool {
     move(ctx, e) {
       if (!start) return;
       placement = placementFor(ctx, e);
-      ctx.preview(placement && draw(ctx, placement));
+      ctx.preview(placement && preview(ctx, placement));
     },
     up(ctx, e) {
       if (!start) return;
       placement = placementFor(ctx, e);
       start = null;
-      const doc = placement && draw(ctx, placement);
-      if (doc && doc !== ctx.doc) ctx.commit(`${NAMES[id]} Tool`, doc);
-      else ctx.preview(null);
+      const shown = placement && preview(ctx, placement);
+      if (!shown) return ctx.preview(null);
+      // The preview stays up until the pixels are back.
+      ctx.preview(shown);
+      ctx.commitAsync(`${NAMES[id]} Tool`, commit(ctx, shown));
     },
     cancel(ctx) {
       if (!start) return;

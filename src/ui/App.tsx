@@ -3,6 +3,8 @@ import { flatten } from "../core/document";
 import { rect } from "../core/geometry";
 import { transformFloatingCpu } from "../core/raster";
 import { readRect } from "../core/tiles";
+import { renderShape } from "../core/shape";
+import { placementMapping } from "../core/content";
 import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
 import { createEditor, type DocumentSession } from "../editor/editor";
 import { MAX_LEVEL, requestDevice } from "../gpu/renderer";
@@ -287,7 +289,7 @@ export function App() {
       ...window.__ps,
       editor,
       pixel: (x, y) => [...flatten(editor.active()!.displayed(), rect(x, y, 1, 1))],
-      reference: { transformFloatingCpu, readRect },
+      reference: { transformFloatingCpu, readRect, renderShape, flatten, placementMapping },
       saveRecovery: () => recoveryTick(true),
     };
     void offerRecovery();

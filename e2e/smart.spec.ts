@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { cpuPixel, drag, expectHistory, historyLabels, newDocument, rectOnLayer, setForeground } from "./helpers";
+import { cpuPixel, drag, expectHistory, gpuPixels, historyLabels, newDocument, rectOnLayer, setForeground } from "./helpers";
 
 const rows = (page: Page) => page.getByTestId("layer-row");
 const kinds = (page: Page) => rows(page).evaluateAll((r) => r.map((x) => x.getAttribute("data-kind")));
@@ -29,20 +29,24 @@ test("shape tools draw live shape layers; options edit the selected shape", asyn
   await page.keyboard.press("u");
   await expect(page.getByTestId("tool-rectangle")).toHaveAttribute("aria-pressed", "true");
   await drag(page, [50, 50], [150, 120]);
+  // Drawn on the GPU; the layer's pixels are read back for the history step.
+  await expectHistory(page, "Rectangle Tool");
   await expect(rows(page).first()).toHaveAttribute("data-layer-name", "Rectangle 1");
   expect((await kinds(page))[0]).toBe("shape");
   expect(await cpuPixel(page, 100, 80)).toEqual([255, 0, 0, 255]);
+  expect(await gpuPixels(page, [[100, 80]])).toEqual([[255, 0, 0, 255]]);
 
   // Fill: none, with an outside stroke.
   await page.getByTestId("shape-fill").click();
   await page.getByTestId("shape-fill-none").click();
-  expect(await cpuPixel(page, 100, 80)).toEqual([255, 255, 255, 255]);
+  await expect.poll(() => cpuPixel(page, 100, 80)).toEqual([255, 255, 255, 255]);
   await page.getByTestId("shape-stroke").click();
   await page.getByTestId("hex-input").fill("0000ff");
   await page.getByTestId("hex-input").press("Enter");
   await page.getByTestId("color-ok").click();
   await page.getByTestId("shape-stroke-align").selectOption("outside");
-  expect(await cpuPixel(page, 48, 80)).toEqual([0, 0, 255, 255]);
+  await expect.poll(() => cpuPixel(page, 48, 80)).toEqual([0, 0, 255, 255]);
+  expect(await gpuPixels(page, [[48, 80]])).toEqual([[0, 0, 255, 255]]);
   expect((await historyLabels(page)).filter((l) => l === "Shape Properties").length).toBeLessThanOrEqual(3);
 
   // Shift+U cycles through the group; the flyout lists it.
@@ -59,6 +63,7 @@ test("painting on a shape asks to rasterize it, with Photoshop's prompt", async 
   await newDocument(page);
   await page.keyboard.press("u");
   await drag(page, [50, 50], [150, 120]);
+  await expectHistory(page, "Rectangle Tool");
   await page.keyboard.press("b");
   await drag(page, [60, 60], [70, 70]);
   await expect(page.getByTestId("confirm-dialog")).toContainText("This shape layer must be rasterized before proceeding.");

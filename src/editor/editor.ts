@@ -1,6 +1,6 @@
 import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
-import { resizeCanvas, resizedPlacement, smartObjectLayer, withContent, type Anchor } from "../core/content";
+import { placementMapping, resizeCanvas, resizedPlacement, smartObjectLayer, withContent, type Anchor, type Rasterizers } from "../core/content";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -24,6 +24,7 @@ import {
   updateLayer,
   type Doc,
   type Layer,
+  type LayerContent,
   type NewDocumentOptions,
   type SmartSource,
 } from "../core/document";
@@ -47,7 +48,7 @@ import { invertSelection, selectAll } from "../core/selection";
 import { intersect, isEmpty, rect, roundOut, type Rect } from "../core/geometry";
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
-import { renderShape } from "../core/shape";
+import { renderShape, type ShapeGeometry, type ShapeStyle } from "../core/shape";
 import { EMPTY_TILES, contentBounds, tilesFromImage, type TileMap } from "../core/tiles";
 import type { TransformMode, TransformState } from "../core/transform";
 import { mappingBounds, type Mapping } from "../core/warp";
@@ -166,7 +167,8 @@ export const RASTERIZE_PROMPTS = {
   shape: "This shape layer must be rasterized before proceeding. Its vector mask will no longer be editable. Rasterize the shape?",
 } as const;
 
-type Resampler = Renderer["resample"];
+/** What the editor uses the GPU renderer for, besides display. */
+type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape">;
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };
 
@@ -224,7 +226,7 @@ export function createEditor() {
       });
     };
     let renderRequested: () => void = () => {};
-    let gpuResample: Resampler | null = null;
+    let gpu: GpuRaster | null = null;
     let reportError: (message: string) => void = (m) => console.error(m);
     let gpuReset: () => void = () => {};
     let askConfirm: (message: string) => Promise<boolean> = async () => false;
@@ -235,9 +237,9 @@ export function createEditor() {
       const bounds = roundOut(mappingBounds(mapping));
       const dest = clip ? intersect(bounds, clip) : bounds;
       if (isEmpty(dest) || isEmpty(f.bounds)) return EMPTY_TILES;
-      if (gpuResample) {
+      if (gpu) {
         try {
-          const pixels = await gpuResample(f, mapping, dest, filter);
+          const pixels = await gpu.resample(f, mapping, dest, filter);
           return tilesFromImage(dest.w, dest.h, pixels, dest.x, dest.y);
         } catch (err) {
           // Out of GPU memory (or the device was lost): the CPU reference gives the same result, just slower.
@@ -247,6 +249,20 @@ export function createEditor() {
       }
       return transformFloatingCpu(f, mapping, filter, clip);
     }
+
+    /** A shape's pixels: rasterized on the GPU and read back; the CPU reference without one. */
+    async function rasterizeShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): Promise<TileMap> {
+      if (gpu) {
+        try {
+          return await gpu.rasterizeShape(g, style, m, clip);
+        } catch (err) {
+          console.warn("GPU shape rasterization failed; falling back to the CPU:", err);
+        }
+      }
+      return renderShape(g, style, m, clip);
+    }
+
+    const raster: Rasterizers = { resample, shape: rasterizeShape };
 
     /** Asks to rasterize a smart object or shape (Photoshop's prompt), then does so as its own step. */
     async function offerRasterize(s: SessionInternals, layer: Layer) {
@@ -268,7 +284,7 @@ export function createEditor() {
         },
         commit: (label, doc) => commitTo(s, label, doc),
         commitAsync: (label, doc) => commitAsync(s, label, doc),
-        resample,
+        raster,
         requireEditable(layer) {
           if (layer.content.kind === "pixels") return true;
           void offerRasterize(s, layer);
@@ -360,18 +376,20 @@ export function createEditor() {
      * (it can't through the UI), the stale result is dropped rather than
      * overwriting newer history.
      */
-    function commitAsync(s: SessionInternals, label: string, result: Promise<Doc>) {
+    function commitAsync(s: SessionInternals, label: string, result: Promise<Doc>, key: string | null = null) {
       const base = s.doc();
       void track(result).then(
         (doc) => {
-          if (s.doc() === base) commitTo(s, label, doc);
+          if (s.doc() === base) commitTo(s, label, doc, key);
           else s.setPreview(null);
+          if (pending === 0) runShapeEdit();
         },
         (err: unknown) => {
           s.setPreview(null);
           s.setFloating(null);
           if (isOutOfMemory(err)) outOfMemory();
           else reportError(`${label} failed: ${err instanceof Error ? err.message : String(err)}`);
+          if (pending === 0) runShapeEdit();
         },
       );
     }
@@ -541,7 +559,7 @@ export function createEditor() {
       if (!s) return;
       cancelTool();
       const base = s.doc();
-      void track(smartObjectLayer(base, source, resample)).then(
+      void track(smartObjectLayer(base, source, raster)).then(
         (layer) => {
           if (active() !== s || s.doc() !== base || currentTool === "transform") return;
           const doc = addLayer(base, layer);
@@ -585,7 +603,7 @@ export function createEditor() {
           if (l.content.kind !== "smart" || l.content.source.id !== link.sourceId) continue;
           // As in Photoshop: same transform, centred where the old contents were.
           const placement = resizedPlacement(l.content.placement, cd.width, cd.height);
-          const { content, tiles } = await withContent(l, { kind: "smart", source, placement }, clip, resample);
+          const { content, tiles } = await withContent(l, { kind: "smart", source, placement }, clip, raster);
           d = updateLayer(d, l.id, { content, tiles });
         }
         return d;
@@ -601,6 +619,13 @@ export function createEditor() {
      * Shape options apply to the next shape and, with a shape tool active, to
      * the selected shape layer (consecutive changes coalesce into one step).
      */
+    /**
+     * Shape options apply to the next shape and, with a shape tool active, to
+     * the selected shape layer. The change shows at once (the renderer draws
+     * the vector); its pixels follow from the GPU. Changes made meanwhile
+     * (dragging a colour) collapse into the latest, which always lands, and
+     * consecutive changes coalesce into one history step.
+     */
     function setShapeOptions(patch: Partial<ShapeSettings>) {
       const next = { ...snapshot(settings).shape, ...patch };
       setSettings((st) => void Object.assign(st.shape, patch));
@@ -615,16 +640,26 @@ export function createEditor() {
           ? shapeGeometry(g.kind as ShapeToolId, next)
           : g;
       if (style === c.style && geometry === g) return;
-      const mapping = { source: c.placement.source, quad: c.placement.quad, patch: c.placement.patch };
-      edit(
-        "Shape Properties",
-        (d) =>
-          updateLayer(d, l.id, {
-            content: { ...c, style, geometry },
-            tiles: renderShape(geometry, style, mapping, docRect(d)),
-          }),
-        `shape:${l.id}`,
-      );
+      shapeEdit = { s, id: l.id, content: { ...c, style, geometry } };
+      s.setPreview(updateLayer(s.doc(), l.id, { content: shapeEdit.content }));
+      renderRequested();
+      if (pending === 0) runShapeEdit();
+    }
+
+    let shapeEdit: { s: SessionInternals; id: string; content: Extract<LayerContent, { kind: "shape" }> } | null = null;
+
+    function runShapeEdit() {
+      const e = shapeEdit;
+      shapeEdit = null;
+      if (!e || !sessions().includes(e.s)) return;
+      const d = e.s.doc();
+      const l = d.layers.find((x) => x.id === e.id);
+      if (!l || l.content.kind !== "shape") return;
+      const { content } = e;
+      const shown = updateLayer(d, e.id, { content });
+      e.s.setPreview(shown);
+      const pixels = raster.shape(content.geometry, content.style, placementMapping(content.placement), docRect(d));
+      commitAsync(e.s, "Shape Properties", pixels.then((tiles) => updateLayer(d, e.id, { content, tiles })), `shape:${e.id}`);
     }
 
     return {
@@ -714,9 +749,9 @@ export function createEditor() {
       onRenderRequest: (fn: () => void) => {
         renderRequested = fn;
       },
-      /** The viewport's renderer provides commit-quality GPU resampling. */
-      setResampler: (fn: Resampler | null) => {
-        gpuResample = fn;
+      /** The viewport's renderer provides commit-quality GPU resampling and shape rasterization. */
+      setGpu: (r: GpuRaster | null) => {
+        gpu = r;
       },
       onError: (fn: (message: string) => void) => {
         reportError = fn;
@@ -789,7 +824,7 @@ export function createEditor() {
         if (!s) return;
         cancelTool();
         const d = s.doc();
-        if (width !== d.width || height !== d.height) commitAsync(s, "Canvas Size", resizeCanvas(d, width, height, anchor, resample));
+        if (width !== d.width || height !== d.height) commitAsync(s, "Canvas Size", resizeCanvas(d, width, height, anchor, raster));
       }),
       updateSmartObject,
 

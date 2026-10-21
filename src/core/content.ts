@@ -1,15 +1,29 @@
 import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type Placement, type SmartSource } from "./document";
 import { rect, vec, type Rect } from "./geometry";
 import { translateMask } from "./selection";
-import type { Floating } from "./raster";
+import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
-import { renderShape } from "./shape";
+import { renderShape, type ShapeGeometry, type ShapeStyle } from "./shape";
 import { translateTiles, type TileMap } from "./tiles";
 import type { TransformState } from "./transform";
 import { project, quadOf, reparameterizePatch, squareToQuad, type Mapping, type Quad } from "./warp";
 
-/** Commit-quality resampling (GPU in the app, CPU reference in tests), clipped to `clip`. */
-export type Resample = (f: Floating, m: Mapping, filter: Filter, clip: Rect) => Promise<TileMap>;
+/** Commit-quality resampling, clipped to `clip` if given (layers may extend past the canvas). */
+export type Resample = (f: Floating, m: Mapping, filter: Filter, clip?: Rect) => Promise<TileMap>;
+/** A shape's pixels, clipped to `clip`. */
+export type ShapeRasterizer = (g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect) => Promise<TileMap>;
+
+/** How content becomes pixels: on the GPU in the app; {@link CPU_RASTERIZERS} are the reference. */
+export interface Rasterizers {
+  readonly resample: Resample;
+  readonly shape: ShapeRasterizer;
+}
+
+/** CPU reference implementations: for tests, GPU parity checks, and fallback. */
+export const CPU_RASTERIZERS: Rasterizers = {
+  resample: async (f, m, filter, clip) => transformFloatingCpu(f, m, filter, clip),
+  shape: async (g, style, m, clip) => renderShape(g, style, m, clip),
+};
 
 export const placementMapping = (p: Placement): Mapping => ({ source: p.source, quad: p.quad, patch: p.patch });
 
@@ -24,20 +38,20 @@ export const toPlacement = (s: TransformState): Placement => ({ source: s.source
 export const sourceFloating = (s: SmartSource): Floating => ({ tiles: s.tiles, bounds: rect(0, 0, s.width, s.height) });
 
 /** Renders non-pixel content through its placement, clipped to the canvas. */
-export async function renderContent(content: LayerContent, clip: Rect, resample: Resample, filter: Filter = "bicubic"): Promise<TileMap | null> {
+export async function renderContent(content: LayerContent, clip: Rect, r: Rasterizers, filter: Filter = "bicubic"): Promise<TileMap | null> {
   switch (content.kind) {
     case "pixels":
       return null;
     case "shape":
-      return renderShape(content.geometry, content.style, placementMapping(content.placement), clip);
+      return r.shape(content.geometry, content.style, placementMapping(content.placement), clip);
     case "smart":
-      return resample(sourceFloating(content.source), placementMapping(content.placement), filter, clip);
+      return r.resample(sourceFloating(content.source), placementMapping(content.placement), filter, clip);
   }
 }
 
 /** The layer with new content, re-rendered. */
-export async function withContent(layer: Layer, content: LayerContent, clip: Rect, resample: Resample, filter?: Filter): Promise<Layer> {
-  const tiles = await renderContent(content, clip, resample, filter);
+export async function withContent(layer: Layer, content: LayerContent, clip: Rect, r: Rasterizers, filter?: Filter): Promise<Layer> {
+  const tiles = await renderContent(content, clip, r, filter);
   return { ...layer, content, tiles: tiles ?? layer.tiles };
 }
 
@@ -82,10 +96,10 @@ export function resizedPlacement(p: Placement, width: number, height: number): P
 }
 
 /** A new smart object layer for a decoded image. */
-export async function smartObjectLayer(doc: Doc, source: SmartSource, resample: Resample, placement?: Placement): Promise<Layer> {
+export async function smartObjectLayer(doc: Doc, source: SmartSource, r: Rasterizers, placement?: Placement): Promise<Layer> {
   const p = placement ?? initialPlacement(source.width, source.height, doc.width, doc.height);
   const layer = createLayer({ name: source.name });
-  return withContent(layer, { kind: "smart", source, placement: p }, rect(0, 0, doc.width, doc.height), resample);
+  return withContent(layer, { kind: "smart", source, placement: p }, rect(0, 0, doc.width, doc.height), r);
 }
 
 export const smartSource = (name: string, width: number, height: number, tiles: TileMap, file: SmartSource["file"] = null): SmartSource => ({
@@ -110,7 +124,7 @@ export interface Anchor {
  * Layers keep everything, including what falls outside the new canvas;
  * smart objects and shapes move their placement and re-render.
  */
-export async function resizeCanvas(doc: Doc, width: number, height: number, anchor: Anchor, resample: Resample): Promise<Doc> {
+export async function resizeCanvas(doc: Doc, width: number, height: number, anchor: Anchor, r: Rasterizers): Promise<Doc> {
   const dx = Math.round((width - doc.width) * anchor.x);
   const dy = Math.round((height - doc.height) * anchor.y);
   const clip = rect(0, 0, width, height);
@@ -120,7 +134,7 @@ export async function resizeCanvas(doc: Doc, width: number, height: number, anch
       const { placement } = l.content;
       const [a, b, c, d] = placement.quad.map((p) => vec(p.x + dx, p.y + dy));
       const moved = { ...placement, quad: [a, b, c, d] as const };
-      return withContent(l, { ...l.content, placement: moved }, clip, resample);
+      return withContent(l, { ...l.content, placement: moved }, clip, r);
     }),
   );
   const sel = doc.selection;

@@ -3,13 +3,12 @@ import { DEFAULT_BRUSH } from "../../core/brush";
 import { addLayer, createDocument, fillTiles, updateLayer, type Doc } from "../../core/document";
 import { rect } from "../../core/geometry";
 import { rectMask } from "../../core/selection";
-import { transformFloatingCpu } from "../../core/raster";
 import { EMPTY_TILES, contentBounds, getPixel } from "../../core/tiles";
 import type { FloatingLayer } from "../../gpu/renderer";
 import { DEFAULT_SETTINGS } from "../editor";
 import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings } from "../types";
 import { createTools } from "./index";
-import { smartObjectLayer, smartSource } from "../../core/content";
+import { CPU_RASTERIZERS, smartObjectLayer, smartSource } from "../../core/content";
 import { convertToSmartObject, createLayer } from "../../core/document";
 import { quadOf } from "../../core/warp";
 
@@ -49,7 +48,7 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
         s.floating = null;
       });
     },
-    resample: async (f, mapping, filter, clip) => transformFloatingCpu(f, mapping, filter, clip),
+    raster: CPU_RASTERIZERS,
     requireEditable(layer) {
       if (layer.content.kind === "pixels") return true;
       s.prompts.push(layer.content.kind);
@@ -300,6 +299,7 @@ describe("shape tools", () => {
     t.down!(h.ctx(), h.ev(50, 50));
     t.move!(h.ctx(), h.ev(70, 60, { shift: true, alt: true }));
     t.up!(h.ctx(), h.ev(70, 60, { shift: true, alt: true }));
+    await h.s.pending;
     expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(30, 30, 40, 40));
   });
 
@@ -325,15 +325,24 @@ describe("shape tools", () => {
     expect(px.s.history).toEqual([]);
   });
 
-  it("previews shape moves by carrying its pixels on the GPU, then commits the vector exactly", async () => {
+  it("previews shapes as vectors (the renderer draws them), and commits their pixels", async () => {
     const h = harness(blank());
-    await h.drag("rectangle", [10, 10], [30, 30]);
+    const t = h.tools.byId.rectangle;
+    t.down!(h.ctx(), h.ev(10, 10));
+    t.move!(h.ctx(), h.ev(30, 30));
+    // Nothing is rasterized while drawing: the preview is the shape itself.
+    expect(layerOf(h.s.preview!).content.kind).toBe("shape");
+    expect(layerOf(h.s.preview!).tiles.size).toBe(0);
+    t.up!(h.ctx(), h.ev(30, 30));
+    await h.s.pending;
+    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(10, 10, 20, 20));
+
     const move = h.tools.byId.move;
     move.down!(h.ctx(), h.ev(20, 20));
     move.move!(h.ctx(), h.ev(45, 25));
-    // No re-rasterising while dragging: the layer's pixels float through a mapping.
-    expect(layerOf(h.s.preview!).tiles.size).toBe(0);
-    expect(h.s.floating!.mapping.quad[0]).toEqual({ x: 35, y: 15 });
+    const p = layerOf(h.s.preview!).content;
+    expect(p.kind === "shape" && p.placement.quad[0]).toEqual({ x: 35, y: 15 });
+    expect(h.s.floating).toBeNull();
     move.up!(h.ctx(), h.ev(45, 25));
     await h.s.pending;
     expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(35, 15, 20, 20));
@@ -355,7 +364,7 @@ describe("smart objects", () => {
   const withSmart = async () => {
     const d = blank();
     const placement = { source: rect(0, 0, 10, 10), quad: quadOf(rect(20, 20, 10, 10)), angle: 0, patch: null };
-    const layer = await smartObjectLayer(d, smartSource("img", 10, 10, green), async (f, m, filter, clip) => transformFloatingCpu(f, m, filter, clip), placement);
+    const layer = await smartObjectLayer(d, smartSource("img", 10, 10, green), CPU_RASTERIZERS, placement);
     return addLayer(d, layer);
   };
 

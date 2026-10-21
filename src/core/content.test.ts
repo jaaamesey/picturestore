@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { initialPlacement, placementMapping, resizeCanvas, resizedPlacement, smartObjectLayer, smartSource, type Resample } from "./content";
+import { initialPlacement, placementMapping, resizeCanvas, resizedPlacement, smartObjectLayer, smartSource, CPU_RASTERIZERS } from "./content";
 import { addLayer, convertToSmartObject, createDocument, createLayer, fillTiles, rasterizeLayer } from "./document";
 import { rect } from "./geometry";
-import { transformFloatingCpu } from "./raster";
 import { EMPTY_TILES, contentBounds, getPixel, tilesFromImage } from "./tiles";
 import { IDENTITY_PATCH, mapPoint, quadOf, type Mapping } from "./warp";
 import type { Placement } from "./document";
 
-const cpu: Resample = async (f, m, filter, clip) => transformFloatingCpu(f, m, filter, clip);
+const cpu = CPU_RASTERIZERS;
 
 describe("smart objects", () => {
   const checker = new Uint8ClampedArray(64 * 64 * 4).map((_, i) => (i % 4 === 3 ? 255 : (Math.floor(i / 4) % 64) * 4));
@@ -29,7 +28,7 @@ describe("smart objects", () => {
     if (layer.content.kind !== "smart") throw new Error();
     const tiny = { ...layer.content.placement, quad: quadOf(rect(0, 0, 8, 8)) };
     const back = { ...tiny, quad: quadOf(rect(0, 0, 64, 64)) };
-    const restored = await cpu({ tiles: source.tiles, bounds: rect(0, 0, 64, 64) }, placementMapping(back), "bicubic", rect(0, 0, 200, 200));
+    const restored = await cpu.resample({ tiles: source.tiles, bounds: rect(0, 0, 64, 64) }, placementMapping(back), "bicubic", rect(0, 0, 200, 200));
     expect(getPixel(restored, 10, 5)).toEqual(getPixel(source.tiles, 10, 5));
   });
 

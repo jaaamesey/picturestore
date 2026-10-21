@@ -2,6 +2,9 @@ import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onSet
 import type { Vec2 } from "../core/geometry";
 import type { transformFloatingCpu } from "../core/raster";
 import type { readRect } from "../core/tiles";
+import type { renderShape } from "../core/shape";
+import type { flatten } from "../core/document";
+import type { placementMapping } from "../core/content";
 import { handles, warpPoints, type TransformMode, type TransformState } from "../core/transform";
 import { IDENTITY_PATCH, PATCH_ANCHORS, evalPatch, project, squareToQuad } from "../core/warp";
 import { moveFrame } from "../editor/tools/transform";
@@ -22,7 +25,13 @@ declare global {
       /** Reference (CPU) composite of the displayed document at a pixel. */
       pixel?: (x: number, y: number) => number[];
       /** CPU reference implementations, for GPU parity tests. */
-      reference?: { transformFloatingCpu: typeof transformFloatingCpu; readRect: typeof readRect };
+      reference?: {
+        transformFloatingCpu: typeof transformFloatingCpu;
+        readRect: typeof readRect;
+        renderShape: typeof renderShape;
+        flatten: typeof flatten;
+        placementMapping: typeof placementMapping;
+      };
       /** Writes recovery information now, regardless of the interval. */
       saveRecovery?: () => Promise<void>;
     };
@@ -154,7 +163,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       };
       window.__ps = { ...window.__ps, editor, renderer, settled };
       editor.onRenderRequest(() => (needsRender = true));
-      editor.setResampler(renderer.resample);
+      editor.setGpu(renderer);
       editor.onGpuReset(() => {
         renderer.resetLevel();
         editor.setGpuLevel(0);
@@ -179,7 +188,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       raf = requestAnimationFrame(frame);
       return () => {
         cancelAnimationFrame(raf);
-        editor.setResampler(null);
+        editor.setGpu(null);
         renderer.destroy();
         canvas.remove();
       };

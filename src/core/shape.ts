@@ -314,3 +314,59 @@ export function documentKnots(g: ShapeGeometry, m: Mapping): Knot[][] {
   const map = boxMapper(m);
   return shapeContours(g, m.source).map((c) => c.map((k) => ({ anchor: map(k.anchor), in: map(k.in), out: map(k.out) })));
 }
+
+/** How a stroke is clipped against the fill: none (no stroke), centred, inside or outside. */
+export const STROKE_MODES = { none: 0, center: 1, inside: 2, outside: 3 } as const;
+
+/**
+ * A shape as line segments for the GPU rasterizer (`gpu/vector.ts`), which
+ * implements the same exact-area coverage as {@link rasterizeContours}:
+ * the fill outline and, for strokes, the stroke polygons (doubled for inside
+ * and outside alignment, then clipped by the fill) — the same geometry
+ * {@link renderShape} draws. Coordinates are document space × `scale`.
+ */
+export interface ShapeSegments {
+  /** x0, y0, x1, y1 per edge of the fill outline (always present: inside/outside strokes clip against it). */
+  readonly fill: Float32Array;
+  readonly stroke: Float32Array;
+  readonly strokeMode: (typeof STROKE_MODES)[keyof typeof STROKE_MODES];
+  /** Straight RGBA in [0, 1]; alpha 0 when absent. */
+  readonly fillColor: readonly [number, number, number, number];
+  readonly strokeColor: readonly [number, number, number, number];
+  /** What the shape can touch, in document space. */
+  readonly bounds: Rect;
+}
+
+function edges(polys: readonly (readonly Vec2[])[], scale: number): Float32Array {
+  let n = 0;
+  for (const p of polys) if (p.length >= 3) n += p.length;
+  const out = new Float32Array(n * 4);
+  let i = 0;
+  for (const p of polys) {
+    if (p.length < 3) continue;
+    for (let k = 0; k < p.length; k++) {
+      const a = p[k], b = p[(k + 1) % p.length];
+      out[i++] = a.x * scale;
+      out[i++] = a.y * scale;
+      out[i++] = b.x * scale;
+      out[i++] = b.y * scale;
+    }
+  }
+  return out;
+}
+
+const rgba = (c: RGB | null | undefined) => (c ? ([c.r / 255, c.g / 255, c.b / 255, 1] as const) : ([0, 0, 0, 0] as const));
+
+export function shapeSegments(g: ShapeGeometry, style: ShapeStyle, m: Mapping, scale = 1): ShapeSegments {
+  const outline = shapeOutline(g, m);
+  const s = style.stroke && style.stroke.width > 0 ? style.stroke : null;
+  const stroke = s ? strokePolygons(outline, s.align === "center" ? s.width : s.width * 2) : [];
+  return {
+    fill: edges(outline, scale),
+    stroke: edges(stroke, scale),
+    strokeMode: s ? STROKE_MODES[s.align] : STROKE_MODES.none,
+    fillColor: rgba(style.fill),
+    strokeColor: rgba(s?.color),
+    bounds: shapeBounds(g, style, m),
+  };
+}

@@ -1,14 +1,12 @@
 import type { BrushSettings } from "../core/brush";
 import type { RGB } from "../core/color";
+import type { Rasterizers } from "../core/content";
 import type { Doc, Layer } from "../core/document";
 import type { StrokeAlign } from "../core/shape";
 import type { Rect, Vec2 } from "../core/geometry";
 import type { SelectionMode } from "../core/selection";
 import type { Filter } from "../core/rasterize";
-import type { Floating } from "../core/raster";
-import type { TileMap } from "../core/tiles";
 import type { TransformMode, TransformState } from "../core/transform";
-import type { Mapping } from "../core/warp";
 import type { FloatingLayer, View } from "../gpu/renderer";
 
 export type ToolId =
@@ -109,8 +107,8 @@ export interface ToolContext {
    * preview stays up and input is blocked until it settles.
    */
   commitAsync(label: string, doc: Promise<Doc>): void;
-  /** Resamples floating pixels through a mapping at commit quality, optionally clipped. */
-  resample(f: Floating, mapping: Mapping, filter: Filter, clip?: Rect): Promise<TileMap>;
+  /** Commit-quality resampling and shape rasterization (on the GPU in the app). */
+  readonly raster: Rasterizers;
   /**
    * Pixel tools call this before editing a layer. Pixel layers pass; smart
    * objects and shapes don't — the user is asked to rasterize them first, as

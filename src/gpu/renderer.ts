@@ -1,9 +1,12 @@
 import { blendModeIndex, type BlendMode } from "../core/blend";
-import type { Layer } from "../core/document";
-import { EMPTY_RECT, intersect, isEmpty, rect, union, type Rect } from "../core/geometry";
+import { placementMapping } from "../core/content";
+import type { Layer, LayerContent } from "../core/document";
+import { shapeSegments, type ShapeGeometry, type ShapeStyle } from "../core/shape";
+import { createVectorRasterizer } from "./vector";
+import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
-import { TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileRect, type Tile, type TileKey, type TileMap } from "../core/tiles";
+import { EMPTY_TILES, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileKey, tileRect, tilesFromImage, tilesIn, type Tile, type TileKey, type TileMap } from "../core/tiles";
 import { tessellate, type Mapping } from "../core/warp";
 import { ATLAS_PAGE, CLEAR_WGSL, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, tilesWgsl } from "./shaders";
 
@@ -41,6 +44,11 @@ export interface Renderer {
    * Transform commit), returning straight RGBA8 covering `dest`.
    */
   resample(source: { tiles: TileMap; bounds: Rect }, mapping: Mapping, dest: Rect, filter: Filter): Promise<Uint8ClampedArray>;
+  /**
+   * Rasterizes a shape at full resolution on the GPU and reads it back as
+   * tiles, clipped to `clip` (a committed shape layer's pixels).
+   */
+  rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<TileMap>;
   /** Reads back the composite as straight RGBA8 (for tests and debugging). */
   readComposite(): Promise<Uint8ClampedArray>;
   /** Resolves once the most recently rendered frame is on screen. */
@@ -66,6 +74,8 @@ export interface RendererOptions {
   /** Called when GPU memory pressure changes the quality reduction. */
   readonly onLevelChange?: (level: number) => void;
 }
+
+type ShapeContent = Extract<LayerContent, { kind: "shape" }>;
 
 /** The tile atlas can't grow (device limit, or out of GPU memory). */
 class AtlasFull extends Error {}
@@ -99,8 +109,11 @@ const PREMULTIPLIED_OVER: GPUBlendState = {
 };
 
 interface LayerEntry {
-  /** What's in the atlas for each on-canvas tile. */
-  readonly slots: Map<TileKey, { slot: number; tile: Tile; version: number }>;
+  /** What's in the atlas for each on-canvas tile (tile is null for tiles the GPU rasterized). */
+  readonly slots: Map<TileKey, { slot: number; tile: Tile | null; version: number }>;
+  /** For shape layers: the content last rasterized, and what it covered (document space). */
+  shape: ShapeContent | null;
+  shapeBounds: Rect;
   instances: GPUBuffer | null;
   instanceCount: number;
   instancesDirty: boolean;
@@ -195,6 +208,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   const mipPipeline = fullscreen(MIP_WGSL, ACCUM_FORMAT);
   const presentPipeline = fullscreen(PRESENT_WGSL, output.format);
 
+  const vectors = createVectorRasterizer(device);
   const trilinear = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
   const viewUniforms = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   let drawUniforms = device.createBuffer({ size: UNIFORM_SLOT * 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -209,7 +223,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return device.createTexture({
       size: [ATLAS_PAGE, ATLAS_PAGE, n],
       format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+      // Shapes are rasterized straight into it by a compute shader.
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING,
     });
   }
 
@@ -237,6 +252,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     if (nextSlot >= pages * slotsPerPage) {
       const grown = Math.min(maxPages, pages * 2);
       if (grown === pages) throw new AtlasFull();
+      // Shapes already encoded this frame write into the current atlas: run them before it's copied.
+      flushShapes();
       const next = allocating(() => createAtlas(grown));
       const encoder = device.createCommandEncoder();
       encoder.copyTextureToTexture({ texture: atlas }, { texture: next }, [ATLAS_PAGE, ATLAS_PAGE, pages]);
@@ -314,6 +331,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     if (entry.slots.size) entry.instancesDirty = true;
     entry.slots.clear();
     entry.instanceCount = 0;
+    entry.shape = null;
+    entry.shapeBounds = EMPTY_RECT;
   }
 
   function freeLayer(entry: LayerEntry) {
@@ -405,9 +424,22 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   // --- Scene sync ----------------------------------------------------------
 
   /** Uploads changed on-canvas tiles of one layer; returns the area that changed. */
+  /** Shape rasterization encoded this frame, submitted together (and before the atlas is ever replaced). */
+  let shapeWork: { encoder: GPUCommandEncoder; releases: (() => void)[] } | null = null;
+  function flushShapes() {
+    if (!shapeWork) return;
+    const w = shapeWork;
+    shapeWork = null;
+    device.queue.submit([w.encoder.finish()]);
+    for (const release of w.releases) release();
+  }
+
   function syncLayer(entry: LayerEntry, tiles: TileMap): Rect {
     const canvasRect = rect(0, 0, size.width, size.height);
-    let dirty = EMPTY_RECT;
+    // Was a shape (since rasterized): its GPU-rendered tiles are replaced by uploads below.
+    let dirty = entry.shape ? entry.shapeBounds : EMPTY_RECT;
+    entry.shape = null;
+    entry.shapeBounds = EMPTY_RECT;
     for (const [key, tile] of tiles) {
       const r = tileRect(keyX(key), keyY(key));
       if (isEmpty(intersect(r, canvasRect))) continue;
@@ -426,6 +458,11 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       entry.instancesDirty = true;
       dirty = union(dirty, tileRect(keyX(key), keyY(key)));
     }
+    writeInstances(entry);
+    return dirty;
+  }
+
+  function writeInstances(entry: LayerEntry) {
     if (entry.instancesDirty) {
       entry.instancesDirty = false;
       entry.instanceCount = entry.slots.size;
@@ -438,6 +475,54 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       }
       device.queue.writeBuffer(entry.instances, 0, data);
     }
+  }
+
+  /**
+   * Rasterizes a shape layer on the GPU, straight into its atlas slots, at
+   * the display's resolution. Only when its content changes (or the display
+   * level does); CPU tiles of shape layers are never uploaded.
+   */
+  function syncShape(entry: LayerEntry, content: ShapeContent): Rect {
+    if (entry.shape === content) return EMPTY_RECT;
+    const canvasRect = rect(0, 0, size.width, size.height);
+    const seg = shapeSegments(content.geometry, content.style, placementMapping(content.placement), 1 / (1 << level));
+    const bounds = intersect(roundOut(seg.bounds), canvasRect);
+    const dirty = union(entry.shapeBounds, bounds);
+    const keep = new Set<TileKey>();
+    for (const [tx, ty] of tilesIn(bounds)) keep.add(tileKey(tx, ty));
+    for (const [key, { slot }] of entry.slots) {
+      if (keep.has(key)) continue;
+      entry.slots.delete(key);
+      freeSlots.push(slot);
+      entry.instancesDirty = true;
+    }
+    entry.shape = content;
+    entry.shapeBounds = bounds;
+    if (!isEmpty(bounds)) {
+      const tx0 = Math.floor(bounds.x / TILE_SIZE), ty0 = Math.floor(bounds.y / TILE_SIZE);
+      const cols = Math.floor((bounds.x + bounds.w - 1) / TILE_SIZE) - tx0 + 1;
+      const rows = Math.floor((bounds.y + bounds.h - 1) / TILE_SIZE) - ty0 + 1;
+      const slots = new Int32Array(cols * rows);
+      for (let j = 0; j < rows; j++)
+        for (let i = 0; i < cols; i++) {
+          const key = tileKey(tx0 + i, ty0 + j);
+          let s = entry.slots.get(key);
+          if (!s) {
+            s = { slot: allocSlot(), tile: null, version: 0 };
+            entry.slots.set(key, s);
+            entry.instancesDirty = true;
+          }
+          slots[j * cols + i] = s.slot;
+        }
+      // In composite pixels: tile (tx, ty) is a slotSize² block.
+      const region = rect(tx0 * slotSize, ty0 * slotSize, cols * slotSize, rows * slotSize);
+      const view = atlas.createView({ dimension: "2d-array" });
+      shapeWork ??= { encoder: device.createCommandEncoder(), releases: [] };
+      shapeWork.releases.push(
+        vectors.encode(shapeWork.encoder, seg, region, rect(0, 0, px.width, px.height), slotSize, { kind: "atlas", view, slotSize, slotsPerSide, slots }),
+      );
+    }
+    writeInstances(entry);
     return dirty;
   }
 
@@ -445,16 +530,20 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     const full = rect(0, 0, size.width, size.height);
     let dirty = EMPTY_RECT;
     const seen = new Set<string>();
+
     for (const layer of scene.layers) {
       seen.add(layer.id);
       let entry = layers.get(layer.id);
       if (!entry) {
-        entry = { slots: new Map(), instances: null, instanceCount: 0, instancesDirty: true, props: "" };
+        entry = { slots: new Map(), instances: null, instanceCount: 0, instancesDirty: true, props: "", shape: null, shapeBounds: EMPTY_RECT };
         layers.set(layer.id, entry);
       }
       // Hidden layers keep no GPU copy; showing one uploads it again.
       if (!layer.visible) releaseSlots(entry);
-      const changed = layer.visible ? syncLayer(entry, layer.tiles) : EMPTY_RECT;
+      const content = layer.content;
+      const changed = !layer.visible ? EMPTY_RECT
+        : content.kind === "shape" ? syncShape(entry, content)
+        : syncLayer(entry, layer.tiles);
       const props = `${layer.visible}|${layer.opacity}|${layer.blendMode}`;
       if (props !== entry.props) {
         entry.props = props;
@@ -469,6 +558,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       layers.delete(id);
       dirty = full;
     }
+    flushShapes();
     const order = scene.layers.map((l) => l.id).join("/");
     if (order !== lastOrder) {
       lastOrder = order;
@@ -796,6 +886,43 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return out;
   }
 
+  /** Bands read back per round trip, bounding the staging memory (≤ 64 MB at 16k px wide). */
+  const READBACK_BANDS = 16;
+
+  async function rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<TileMap> {
+    const seg = shapeSegments(geometry, style, mapping);
+    const bounds = intersect(roundOut(seg.bounds), clip);
+    if (isEmpty(bounds)) return EMPTY_TILES;
+    const tx0 = Math.floor(bounds.x / TILE_SIZE), ty0 = Math.floor(bounds.y / TILE_SIZE);
+    const x0 = tx0 * TILE_SIZE, y0 = ty0 * TILE_SIZE;
+    const w = (Math.floor((bounds.x + bounds.w - 1) / TILE_SIZE) - tx0 + 1) * TILE_SIZE;
+    const h = (Math.floor((bounds.y + bounds.h - 1) / TILE_SIZE) - ty0 + 1) * TILE_SIZE;
+    const out = new Map<TileKey, Tile>();
+    device.pushErrorScope("out-of-memory");
+    try {
+      for (let y = y0; y < y0 + h; y += READBACK_BANDS * TILE_SIZE) {
+        const rows = Math.min(READBACK_BANDS * TILE_SIZE, y0 + h - y);
+        const bytes = w * rows * 4;
+        const target = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+        const staging = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const encoder = device.createCommandEncoder();
+        const release = vectors.encode(encoder, seg, rect(x0, y, w, rows), clip, TILE_SIZE, { kind: "buffer", buffer: target });
+        encoder.copyBufferToBuffer(target, 0, staging, 0, bytes);
+        device.queue.submit([encoder.finish()]);
+        release();
+        target.destroy();
+        await staging.mapAsync(GPUMapMode.READ);
+        const pixels = new Uint8ClampedArray(staging.getMappedRange().slice(0));
+        staging.destroy();
+        for (const [k, t] of tilesFromImage(w, rows, pixels, x0, y)) out.set(k, t);
+      }
+    } finally {
+      const err = await device.popErrorScope();
+      if (err) throw new Error(`GPU out of memory: ${err.message}`);
+    }
+    return out;
+  }
+
   function draw(scene: Scene, view: View, time: number) {
     if (scene.width !== size.width || scene.height !== size.height) resetDocument(scene.width, scene.height);
     const dirty = union(syncLayers(scene), syncFloating(scene.floating));
@@ -832,6 +959,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     },
 
     resample,
+    rasterizeShape,
 
     async readComposite() {
       // At reduced quality the composite is smaller; it's scaled back up (nearest) to document size.
@@ -873,6 +1001,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       scratch?.destroy();
       selectionTexture?.destroy();
       atlas.destroy();
+      vectors.destroy();
       drawUniforms.destroy();
       viewUniforms.destroy();
       output.destroy();

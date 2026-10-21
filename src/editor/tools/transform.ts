@@ -1,10 +1,9 @@
 import { placementState, sourceFloating, toPlacement, withContent } from "../../core/content";
 import { activeLayer, docRect, updateLayer, type Doc, type Layer, type LayerContent } from "../../core/document";
-import { intersect, isEmpty, rect, roundOut, vec, type Rect, type Vec2 } from "../../core/geometry";
-import { compositeOver, extractFloating, type Floating } from "../../core/raster";
+import { intersect, isEmpty, vec, type Vec2 } from "../../core/geometry";
+import { compositeOver, extractFloating } from "../../core/raster";
 import type { Filter } from "../../core/rasterize";
 import { transformMask, translateMask } from "../../core/selection";
-import { renderShape, shapeBounds } from "../../core/shape";
 import { EMPTY_TILES, contentBounds, translateTiles } from "../../core/tiles";
 import {
   dragTransform,
@@ -22,7 +21,7 @@ import {
   type TransformMode,
   type TransformState,
 } from "../../core/transform";
-import { IDENTITY_PATCH, invert3, isIdentityPatch, mul3, project, quadOf, squareToQuad, type Quad } from "../../core/warp";
+import { IDENTITY_PATCH, isIdentityPatch } from "../../core/warp";
 import type { Tool, ToolContext, ToolEvent, ToolId } from "../types";
 
 export type TransformCommand = "rotate-180" | "rotate-90-cw" | "rotate-90-ccw" | "flip-horizontal" | "flip-vertical";
@@ -69,7 +68,7 @@ function pixelTarget(doc: Doc, layer: Layer): Target | null {
     async place(ctx, s, filter) {
       const offset = integerOffset(s);
       const sel = doc.selection;
-      const moved = offset ? translateTiles(floating.tiles, offset.x, offset.y) : await ctx.resample(floating, toMapping(s), filter);
+      const moved = offset ? translateTiles(floating.tiles, offset.x, offset.y) : await ctx.raster.resample(floating, toMapping(s), filter);
       const selection = sel && (offset ? translateMask(sel, offset.x, offset.y) : transformMask(sel, toMapping(s)));
       return { ...updateLayer(doc, layer.id, { tiles: compositeOver(rest, moved) }), selection };
     },
@@ -79,38 +78,13 @@ function pixelTarget(doc: Doc, layer: Layer): Target | null {
 /** Smart objects and shapes transform as a whole, whatever is selected (as in Photoshop). */
 function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { kind: "pixels" }>): Target {
   const clip = docRect(doc);
-  const initial = placementState(content.placement);
   const at = (s: TransformState): LayerContent => ({ ...content, placement: toPlacement(s) });
-  // Shapes preview as their pixels carried through the transform on the GPU
-  // (rendered once, lazily), as raster layers do; the commit re-renders the
-  // vector exactly. Warps aren't projective, so those preview exactly.
-  let raster: Floating | null | undefined;
-  const shapeRaster = () => {
-    if (raster !== undefined || content.kind !== "shape") return raster ?? null;
-    const region = previewRegion(doc, shapeBounds(content.geometry, content.style, toMapping(initial)));
-    const tiles = region && renderShape(content.geometry, content.style, toMapping(initial), region);
-    const bounds = tiles ? contentBounds(tiles) : null;
-    return (raster = tiles && bounds && !isEmpty(bounds) ? { tiles, bounds } : null);
-  };
   return {
     layer,
-    initial,
+    initial: placementState(content.placement),
     show(ctx, s) {
-      if (content.kind === "shape") {
-        const r = !s.patch && !initial.patch ? shapeRaster() : null;
-        if (!r) {
-          ctx.preview(updateLayer(doc, layer.id, { tiles: renderShape(content.geometry, content.style, toMapping(s), clip) }));
-          return;
-        }
-        ctx.preview(updateLayer(doc, layer.id, { tiles: EMPTY_TILES }), {
-          ...r,
-          mapping: { source: r.bounds, quad: carry(initial.quad, s.quad, r.bounds), patch: null },
-          aboveLayerId: layer.id,
-          opacity: layer.opacity,
-          blendMode: layer.blendMode,
-        });
-        return;
-      }
+      // Shapes preview as themselves: the renderer rasterizes the vector on the GPU, exactly, every frame.
+      if (content.kind === "shape") return ctx.preview(updateLayer(doc, layer.id, { content: at(s) }));
       ctx.preview(updateLayer(doc, layer.id, { tiles: EMPTY_TILES }), {
         ...sourceFloating(content.source),
         mapping: toMapping(s),
@@ -120,32 +94,10 @@ function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { 
       });
     },
     async place(ctx, s, filter) {
-      const { content: c, tiles } = await withContent(layer, at(s), clip, ctx.resample, filter);
+      const { content: c, tiles } = await withContent(layer, at(s), clip, ctx.raster, filter);
       return updateLayer(doc, layer.id, { content: c, tiles });
     },
   };
-}
-
-/** Largest preview raster side; bigger shapes preview by re-rendering the vector. */
-const PREVIEW_MAX = 8192;
-
-/**
- * What of a shape to pre-render for previews: its bounds within the canvas
- * plus up to a canvas' worth around it (what a drag can bring into view).
- * Null when that's too big to hold as one texture.
- */
-function previewRegion(doc: Doc, bounds: Rect): Rect | null {
-  const mx = Math.max(0, Math.min(doc.width, Math.floor((PREVIEW_MAX - doc.width) / 2)));
-  const my = Math.max(0, Math.min(doc.height, Math.floor((PREVIEW_MAX - doc.height) / 2)));
-  const r = intersect(roundOut(bounds), rect(-mx, -my, doc.width + 2 * mx, doc.height + 2 * my));
-  return isEmpty(r) || r.w > PREVIEW_MAX || r.h > PREVIEW_MAX ? null : r;
-}
-
-/** Where `box` goes under the projective map taking quad `from` to quad `to`. */
-export function carry(from: Quad, to: Quad, box: Rect): Quad {
-  const T = mul3(squareToQuad(to)!, invert3(squareToQuad(from)!)!);
-  const [a, b, c, d] = quadOf(box).map((p) => project(T, p.x, p.y));
-  return [a, b, c, d];
 }
 
 /** The active layer as a transform target; null when hidden or empty. */
