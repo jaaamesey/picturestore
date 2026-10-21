@@ -4,25 +4,39 @@ import { cpuPixel, drag, expectHistory, newDocument, rectOnLayer, setForeground 
 type Ed = { active(): { doc(): { width: number; height: number; resolution?: number; layers: { content: { kind: string; style?: { stroke: { width: number } | null }; placement?: { quad: { x: number; y: number }[] } } }[] } } };
 const doc = (page: Page) => page.evaluate(() => (window.__ps!.editor as Ed).active().doc());
 
-test("a tool flyout picks a tool in one gesture: press, hold, slide, release", async ({ page }) => {
+test("a tool flyout picks a tool in one gesture: press, drag off, slide, release", async ({ page }) => {
   await newDocument(page);
-  const button = (await page.getByTestId("tool-rectangle").boundingBox())!;
-  await page.mouse.move(button.x + button.width / 2, button.y + button.height / 2);
+  const centre = async (testId: string) => {
+    const b = (await page.getByTestId(testId).boundingBox())!;
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  };
+  // A click (or trackpad tap) selects the tool and never shows the flyout.
+  const rectTool = await centre("tool-rectangle");
+  await page.mouse.move(rectTool.x, rectTool.y);
   await page.mouse.down();
-  await expect(page.getByTestId("tool-flyout")).toBeVisible();
-  const item = (await page.getByTestId("flyout-polygon").boundingBox())!;
-  await page.mouse.move(item.x + item.width / 2, item.y + item.height / 2, { steps: 5 });
   await page.mouse.up();
-  await expect(page.getByTestId("tool-polygon")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("tool-rectangle")).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("tool-flyout")).toHaveCount(0);
 
-  // Released back on the button, it stays open for a click.
-  const again = (await page.getByTestId("tool-polygon").boundingBox())!;
-  await page.mouse.move(again.x + again.width / 2, again.y + again.height / 2);
+  // Press and drag off the button: it opens at once (no hold timer), fading in.
   await page.mouse.down();
-  await expect(page.getByTestId("tool-flyout")).toBeVisible();
+  await page.mouse.move(rectTool.x + 30, rectTool.y, { steps: 3 });
+  const flyout = page.getByTestId("tool-flyout");
+  await expect(flyout).toBeVisible();
+  expect(await flyout.evaluate((el) => getComputedStyle(el).animationName)).toBe("fade-in");
+  const item = await centre("flyout-polygon");
+  await page.mouse.move(item.x, item.y, { steps: 5 });
   await page.mouse.up();
-  await expect(page.getByTestId("tool-flyout")).toBeVisible();
+  await expect(page.getByTestId("tool-polygon")).toHaveAttribute("aria-pressed", "true");
+  await expect(flyout).toHaveCount(0);
+
+  // Released somewhere that isn't a tool, it stays open for a click.
+  const polygon = await centre("tool-polygon");
+  await page.mouse.move(polygon.x, polygon.y);
+  await page.mouse.down();
+  await page.mouse.move(polygon.x + 30, polygon.y + 200, { steps: 3 });
+  await page.mouse.up();
+  await expect(flyout).toBeVisible();
   await page.getByTestId("flyout-ellipse").click();
   await expect(page.getByTestId("tool-ellipse")).toHaveAttribute("aria-pressed", "true");
 });

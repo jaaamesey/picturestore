@@ -7,20 +7,18 @@ import { AppContext } from "./context";
 import { IconButton } from "./controls";
 import { Icon } from "./icons";
 
-const HOLD_MS = 400;
-
 /**
- * One toolbar slot: shows the group's current tool. Right-click, or press
- * and hold, opens a flyout of the other tools in the group (as in Photoshop).
- * Held open, it's one gesture: slide onto a tool and release to pick it.
+ * One toolbar slot: shows the group's current tool. A click (or a trackpad
+ * tap) just selects it. Pressing and dragging off it opens a flyout of the
+ * group's other tools — one gesture: slide onto a tool and release to pick
+ * it. Right-click opens the flyout too.
  */
 function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (open: boolean) => void }) {
   const { editor } = useContext(AppContext);
   const [last, setLast] = createSignal(props.tools[0]);
   const shown = () => props.tools.find((t) => t.id === editor.tool()) ?? last();
-  let hold = 0;
-  /** Opened by pressing and holding: the release picks, and its click on the button is not a click. */
-  let held = false;
+  /** Opened by a press-and-drag: its release picks, and isn't also a click on the button. */
+  let dragged = false;
   const choose = (t: ToolInfo) => {
     setLast(t);
     editor.setTool(t.id);
@@ -37,40 +35,48 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
       }}
       onPointerDown={(e) => {
         if (props.tools.length < 2 || e.button !== 0) return;
-        hold = window.setTimeout(() => {
-          held = true;
+        const button = group.getBoundingClientRect();
+        let opened = false;
+        const move = (m: PointerEvent) => {
+          if (m.pointerId !== e.pointerId || opened) return;
+          const off = m.clientX < button.left || m.clientX > button.right || m.clientY < button.top || m.clientY > button.bottom;
+          if (!off) return;
+          opened = dragged = true;
           props.onOpen(true);
-          const release = (u: PointerEvent) => {
-            if (u.pointerId !== e.pointerId) return;
-            window.removeEventListener("pointerup", release, true);
-            const item = document.elementFromPoint(u.clientX, u.clientY)?.closest<HTMLElement>("[data-flyout-tool]");
-            const tool = item && props.tools.find((t) => t.id === item.dataset.flyoutTool);
-            if (tool) {
-              u.stopPropagation();
-              choose(tool);
-            }
-            // Released elsewhere: the flyout stays open for a click.
-            setTimeout(() => (held = false), 0);
-          };
-          window.addEventListener("pointerup", release, true);
-        }, HOLD_MS);
+        };
+        const end = (u: PointerEvent) => {
+          if (u.pointerId !== e.pointerId) return;
+          window.removeEventListener("pointermove", move, true);
+          window.removeEventListener("pointerup", end, true);
+          window.removeEventListener("pointercancel", end, true);
+          if (!opened) return; // a click: the button's onClick selects its tool
+          const item = document.elementFromPoint(u.clientX, u.clientY)?.closest<HTMLElement>("[data-flyout-tool]");
+          const tool = item && props.tools.find((t) => t.id === item.dataset.flyoutTool);
+          if (tool && u.type === "pointerup") {
+            u.stopPropagation();
+            choose(tool);
+          }
+          // Released elsewhere: the flyout stays open for a click.
+          setTimeout(() => (dragged = false), 0);
+        };
+        window.addEventListener("pointermove", move, true);
+        window.addEventListener("pointerup", end, true);
+        window.addEventListener("pointercancel", end, true);
       }}
-      onPointerUp={() => clearTimeout(hold)}
-      onPointerLeave={() => clearTimeout(hold)}
     >
       <IconButton
         icon={shown().id}
         title={`${shown().label} (${shown().key.toUpperCase()})`}
         testId={`tool-${shown().id}`}
         active={editor.tool() === shown().id}
-        onClick={() => !held && choose(shown())}
+        onClick={() => !dragged && choose(shown())}
       />
       <Show when={props.tools.length > 1}>
         {/* Photoshop's flyout marker. */}
         <span class="pointer-events-none absolute right-0.5 bottom-0.5 size-0 border-t-[3px] border-l-[3px] border-t-transparent border-l-transparent border-r-[3px] border-b-[3px] border-r-fg/60 border-b-fg/60" />
       </Show>
       <Popover open={props.open} onClose={() => props.onOpen(false)} trigger={() => group} class="top-0 left-full ml-1">
-        <div class="min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl" role="menu" data-testid="tool-flyout">
+        <div class="min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl motion-safe:animate-fade-in" role="menu" data-testid="tool-flyout">
           <For each={props.tools}>
             {(t) => (
               <button
