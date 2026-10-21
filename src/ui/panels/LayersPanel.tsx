@@ -3,6 +3,7 @@ import { BLEND_MODES, type BlendMode } from "../../core/blend";
 import { activeLayer, type Layer } from "../../core/document";
 import { PREVIEW_FACTOR, TILE_SIZE, keyX, keyY, tilePreview, type TileMap } from "../../core/tiles";
 import { AppContext } from "../context";
+import { LAYER_MENU } from "../MenuBar";
 import { IconButton, NumberField } from "../controls";
 import { Icon } from "../icons";
 
@@ -77,7 +78,7 @@ function LayerRow(props: {
   onDrop: (draggedId: string, placement: Placement) => void;
   onDragEnd: () => void;
 }) {
-  const { editor } = useContext(AppContext);
+  const { editor, openMenu } = useContext(AppContext);
   const [editing, setEditing] = createSignal(false);
   return (
     <div
@@ -85,6 +86,7 @@ function LayerRow(props: {
       aria-selected={props.active ? "true" : "false"}
       data-testid="layer-row"
       data-layer-name={props.layer.name}
+      data-kind={props.layer.content.kind}
       draggable={editing() ? "false" : "true"}
       data-drop={props.drop ?? undefined}
       class={[
@@ -95,6 +97,11 @@ function LayerRow(props: {
         props.active ? "bg-accent-soft" : "hover:bg-raised",
       ]}
       onClick={() => editor.selectLayer(props.layer.id)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        editor.selectLayer(props.layer.id);
+        openMenu(e.clientX, e.clientY, LAYER_MENU);
+      }}
       onDragStart={(e) => {
         e.dataTransfer!.setData(DRAG_TYPE, props.layer.id);
         e.dataTransfer!.effectAllowed = "move";
@@ -124,7 +131,19 @@ function LayerRow(props: {
       >
         <Icon name="eye" size={15} />
       </button>
-      <Thumbnail tiles={props.layer.tiles} width={props.width} height={props.height} />
+      <div class="relative">
+        <Thumbnail tiles={props.layer.tiles} width={props.width} height={props.height} />
+        <Show when={props.layer.content.kind !== "pixels"}>
+          {/* Photoshop's badges: smart objects and shapes aren't directly editable pixels. */}
+          <span
+            class="absolute -right-1 -bottom-1 grid size-3.5 place-items-center rounded-xs bg-panel text-fg"
+            title={props.layer.content.kind === "smart" ? "Smart Object" : "Shape layer"}
+            data-testid="layer-badge"
+          >
+            <Icon name={props.layer.content.kind === "smart" ? "smart" : "polygon"} size={11} />
+          </span>
+        </Show>
+      </div>
       <Show
         when={editing()}
         fallback={

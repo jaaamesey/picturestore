@@ -39,8 +39,24 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   - Options bar: reference point toggle and locator (Alt-click also places it), X/Y, W/H with link, angle,
     H/V skew, interpolation (bicubic / bilinear / nearest), Warp toggle, cancel/commit. Ctrl+Z steps back
     inside a session; Enter, double-click or ✓ commits; Esc cancels.
-- **Layers**: add, duplicate, delete, merge down, reorder (drag), rename, visibility, opacity and 20 blend modes.
-- **History**: 50-step undo/redo, plus a clickable History panel.
+- **Smart objects**: File ▸ Place Embedded (or drop an image onto the canvas) places an image as an embedded
+  smart object — centred, fitted to the canvas, in a Free Transform session (Esc discards it). Transforms
+  re-render from the embedded source, so scaling down and back up loses nothing. Convert to Smart Object,
+  Rasterize Layer, and Edit Contents (opens the contents as a document; saving it updates every instance).
+  Pixel tools on a smart object or shape ask to rasterize it first, with Photoshop's prompts.
+- **Shapes**: Rectangle (corner radius), Ellipse, Triangle, Polygon (sides, star ratio) and Line (weight) tools
+  (U / Shift+U, toolbar flyout). Shift constrains, Alt draws from the centre. Shape mode makes live shape
+  layers with fill and stroke (width, inside/centre/outside); with a shape selected the options bar edits it.
+  Pixels mode fills into the active layer. Shapes transform exactly (vectors are re-rendered, strokes keep
+  their width).
+- **Clipboard**: Cut, Copy, Copy Merged, Paste (centred on the selection or the visible canvas) and Paste in
+  Place. Copies also go to the system clipboard as PNG; images pasted from other apps become new layers (or a
+  new document when none is open). Layer via Copy / Cut (Ctrl+J / Ctrl+Shift+J).
+- **Layers**: add, duplicate, delete, merge down, reorder (drag), rename, visibility, opacity and 20 blend
+  modes; right-click a layer (or the canvas) for a context menu.
+- **History**: 50 steps within a memory budget (1 GB), plus a clickable History panel.
+- **PSD**: smart objects round-trip as placed layers with their embedded files (and custom warps); solid-colour
+  shape layers round-trip as vector masks with fill and stroke.
 - **View**: zoom (Ctrl +/−/0/1, Ctrl/Alt+wheel about the cursor), pan (wheel, Space-drag, Hand tool).
 
 ## Architecture
@@ -58,7 +74,16 @@ e2e/        Playwright tests.
 **Immutable documents with structural sharing.** A `Doc` is a plain immutable value. Layer pixels live in a
 sparse grid of 256×256 RGBA tiles in document space (so layers can extend past the canvas), keyed by packed
 integers. Edits go through a copy-on-write `TileWriter`, so each new `Doc` shares every untouched layer and
-tile with its predecessor; undo history is a list of snapshots costing roughly what each step changed.
+tile with its predecessor; undo history is a list of snapshots costing roughly what each step changed. Each
+history entry records the bytes it newly retains (by object identity: new tiles, smart object sources), and
+the oldest states are dropped past 50 steps or the memory budget. Asynchronous commits (GPU resampling) block
+input until they land, and a result is discarded rather than applied if its base document changed.
+
+**Layer content** is pixels, a smart object (an embedded source plus a placement: quad, orientation, warp) or a
+shape (vector geometry plus fill/stroke, also placed). A layer's tiles are always its rendered pixels, so the
+compositor and GPU never care which kind it is; transforming a smart object or shape edits its placement and
+re-renders. Shapes rasterize with the same exact-area coverage as selections, with adaptive Bézier
+flattening after mapping and strokes built from edge quads with miter/bevel joins.
 Selection masks store only their bounds.
 
 **The CPU owns pixels; the GPU is a cache.** Tools edit tiles on the CPU (deterministic and testable). The
@@ -99,7 +124,7 @@ readback presentation path, enabled with `?present=readback`.
 ## Roadmap
 
 Roughly in Photopea's order: layer groups and masks (also needed for lossless PSD round-trips of documents
-that use them), adjustment layers and filters (GPU), text and shapes, crop/canvas size/image size, warp grids
+that use them), adjustment layers and filters (GPU), text, custom shapes and path editing, crop/canvas size/image size, warp grids
 beyond the single patch (splits, 3×3–5×5) and warp presets, snapping while transforming, more selection tools
-(polygonal lasso, quick select, feather/modify), brush presets and smoothing, clipboard, and GPU painting for
-very large brushes.
+(polygonal lasso, quick select, feather/modify), brush presets and smoothing, and GPU painting for very large
+brushes.

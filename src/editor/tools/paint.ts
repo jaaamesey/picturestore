@@ -16,7 +16,7 @@ export function createPaintTool(id: "brush" | "eraser"): Tool {
     cursor: () => "none", // the viewport draws a brush outline instead
     down(ctx, e) {
       const layer = activeLayer(ctx.doc);
-      if (!layer || !layer.visible) return;
+      if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
       const erase = id === "eraser";
       layerId = layer.id;
       stroke = beginStroke(layer.tiles, {
@@ -57,7 +57,7 @@ export const bucketTool: Tool = {
   down(ctx, e) {
     const { doc, settings } = ctx;
     const layer = activeLayer(doc);
-    if (!layer || !layer.visible) return;
+    if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
     const region = combine(
       doc.selection,
       magicWand(layer.tiles, doc.width, doc.height, e, settings.tolerance, settings.contiguous),

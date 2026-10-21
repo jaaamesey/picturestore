@@ -1,6 +1,7 @@
 import type { BrushSettings } from "../core/brush";
 import type { RGB } from "../core/color";
-import type { Doc } from "../core/document";
+import type { Doc, Layer } from "../core/document";
+import type { StrokeAlign } from "../core/shape";
 import type { Rect, Vec2 } from "../core/geometry";
 import type { SelectionMode } from "../core/selection";
 import type { Filter } from "../core/rasterize";
@@ -22,7 +23,29 @@ export type ToolId =
   | "eyedropper"
   | "hand"
   | "zoom"
+  | "rectangle"
+  | "ellipse"
+  | "triangle"
+  | "polygon"
+  | "line"
   | "transform";
+
+export type ShapeToolId = "rectangle" | "ellipse" | "triangle" | "polygon" | "line";
+
+export interface ShapeSettings {
+  /** "shape" creates a live shape layer; "pixels" fills the shape into the active layer. */
+  readonly mode: "shape" | "pixels";
+  /** "foreground" follows the foreground colour until a fill is picked; null = no fill. */
+  readonly fill: RGB | null | "foreground";
+  readonly stroke: { readonly color: RGB; readonly width: number; readonly align: StrokeAlign } | null;
+  /** Rectangle corner radius. */
+  readonly radius: number;
+  /** Polygon sides and star ratio (1 = regular polygon). */
+  readonly sides: number;
+  readonly starRatio: number;
+  /** Line weight. */
+  readonly weight: number;
+}
 
 export interface TransformSettings {
   /** Move tool: show the bounding box and handles of the active layer/selection (Photoshop's default: on). */
@@ -36,6 +59,7 @@ export interface TransformSettings {
 
 export interface ToolSettings {
   readonly transform: TransformSettings;
+  readonly shape: ShapeSettings;
   readonly brush: BrushSettings;
   readonly eraser: BrushSettings;
   readonly selectionMode: SelectionMode;
@@ -85,8 +109,14 @@ export interface ToolContext {
    * preview stays up and input is blocked until it settles.
    */
   commitAsync(label: string, doc: Promise<Doc>): void;
-  /** Resamples floating pixels through a mapping at commit quality. */
-  resample(f: Floating, mapping: Mapping, filter: Filter): Promise<TileMap>;
+  /** Resamples floating pixels through a mapping at commit quality, optionally clipped. */
+  resample(f: Floating, mapping: Mapping, filter: Filter, clip?: Rect): Promise<TileMap>;
+  /**
+   * Pixel tools call this before editing a layer. Pixel layers pass; smart
+   * objects and shapes don't — the user is asked to rasterize them first, as
+   * in Photoshop, and the tool action is abandoned.
+   */
+  requireEditable(layer: Layer): boolean;
   overlay(o: Overlay | null): void;
   /** Redraws after in-place changes to previewed tiles. */
   requestRender(): void;

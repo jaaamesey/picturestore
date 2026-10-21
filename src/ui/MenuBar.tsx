@@ -4,7 +4,7 @@ import { AppContext, isMac } from "./context";
 
 type MenuItem = CommandId | "-" | { readonly submenu: string; readonly items: readonly MenuItem[] };
 
-const TRANSFORM_MENU: readonly MenuItem[] = [
+export const TRANSFORM_MENU: readonly MenuItem[] = [
   "edit.transform.scale",
   "edit.transform.rotate",
   "edit.transform.skew",
@@ -20,16 +20,45 @@ const TRANSFORM_MENU: readonly MenuItem[] = [
   "edit.transform.flipVertical",
 ];
 
+/** Right-click on a layer (and on the canvas, outside selection tools). */
+export const LAYER_MENU: readonly MenuItem[] = [
+  "layer.duplicate",
+  "layer.delete",
+  "-",
+  "layer.convertToSmart",
+  "layer.editContents",
+  "layer.rasterize",
+  "-",
+  "layer.mergeDown",
+];
+
+/** Right-click on the canvas with a selection tool. */
+export const SELECTION_MENU: readonly MenuItem[] = [
+  "select.deselect",
+  "select.inverse",
+  "-",
+  "layer.viaCopy",
+  "layer.viaCut",
+  "-",
+  "edit.freeTransform",
+];
+
 const MENUS: readonly { readonly title: string; readonly items: readonly MenuItem[] }[] = [
   {
     title: "File",
-    items: ["file.new", "file.open", "-", "file.save", "file.saveAs", "-", "file.export.png", "file.export.jpeg", "file.export.webp", "-", "file.close"],
+    items: ["file.new", "file.open", "-", "file.placeEmbedded", "-", "file.save", "file.saveAs", "-", "file.export.png", "file.export.jpeg", "file.export.webp", "-", "file.close"],
   },
   {
     title: "Edit",
     items: [
       "edit.undo",
       "edit.redo",
+      "-",
+      "edit.cut",
+      "edit.copy",
+      "edit.copyMerged",
+      "edit.paste",
+      "edit.pasteInPlace",
       "-",
       "edit.fillForeground",
       "edit.fillBackground",
@@ -39,12 +68,27 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       { submenu: "Transform", items: TRANSFORM_MENU },
     ],
   },
-  { title: "Layer", items: ["layer.new", "layer.duplicate", "layer.delete", "-", "layer.mergeDown"] },
+  {
+    title: "Layer",
+    items: [
+      "layer.new",
+      "layer.duplicate",
+      "layer.delete",
+      "-",
+      "layer.viaCopy",
+      "layer.viaCut",
+      "-",
+      { submenu: "Smart Objects", items: ["layer.convertToSmart", "layer.editContents"] },
+      "layer.rasterize",
+      "-",
+      "layer.mergeDown",
+    ],
+  },
   { title: "Select", items: ["select.all", "select.deselect", "select.inverse"] },
   { title: "View", items: ["view.zoomIn", "view.zoomOut", "-", "view.fit", "view.actual"] },
 ];
 
-/** A dropdown list of commands; used by the menu bar and the transform context menu. */
+/** A dropdown list of commands; used by the menu bar and context menus. */
 export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void }) {
   const { editor, shell } = useContext(AppContext);
   const [openSub, setOpenSub] = createSignal<string | null>(null);
@@ -128,4 +172,3 @@ export function MenuBar() {
 }
 
 export type { MenuItem };
-export { TRANSFORM_MENU };

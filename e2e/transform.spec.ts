@@ -76,7 +76,7 @@ test.describe("Free Transform", () => {
   test("Skew mode from the context menu slides an edge along its axis", async ({ page }) => {
     const p = await docPoint(page, 150, 150);
     await page.mouse.click(p.x, p.y, { button: "right" });
-    await page.getByTestId("transform-menu").getByText("Skew").click();
+    await page.getByTestId("context-menu").getByText("Skew").click();
     await expect(page.getByTestId("transform-box")).toHaveAttribute("data-mode", "skew");
     await drag(page, [150, 100], [190, 130]); // top handle: only the x component counts
     await page.keyboard.press("Enter");

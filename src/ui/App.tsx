@@ -10,19 +10,25 @@ import {
   EXTENSIONS,
   download,
   encodeDocument,
+  encodePng,
   isPsdName,
   pickFiles,
   pickSaveTarget,
   readDocument,
+  readImageTiles,
+  readSmartSource,
+  smartSourceDocument,
   stripExtension,
   writeFile,
   type ExportFormat,
   type OpenedFile,
 } from "../io/files";
+import { activeLayer } from "../core/document";
+import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
 import { Icon } from "./icons";
-import { MenuBar } from "./MenuBar";
+import { MenuBar, MenuList, type MenuItem } from "./MenuBar";
 import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
 import { HistoryPanel } from "./panels/HistoryPanel";
@@ -66,6 +72,7 @@ export function App() {
   async function saveAs() {
     const s = editor.active();
     if (!s) return;
+    if (editor.updateSmartObject(s.id)) return;
     try {
       const target = await pickSaveTarget(`${s.name()}.psd`);
       if (target === null) return; // cancelled
@@ -88,6 +95,8 @@ export function App() {
   async function save() {
     const s = editor.active();
     if (!s) return;
+    // Saving a smart object's contents updates the smart object, as in Photoshop.
+    if (editor.updateSmartObject(s.id)) return;
     const handle = fileHandles.get(s);
     if (!handle) return saveAs();
     try {
@@ -111,14 +120,98 @@ export function App() {
     }
   }
 
+  async function placeFiles(files: readonly File[]) {
+    for (const file of files) {
+      try {
+        editor.placeEmbedded(await readSmartSource(file));
+      } catch (err) {
+        console.error(err);
+        notify(`Couldn't place ${file.name}: ${errorText(err)}`);
+      }
+    }
+  }
+
+  async function editContents() {
+    const s = editor.active();
+    const layer = s && activeLayer(s.doc());
+    if (!s || layer?.content.kind !== "smart") return;
+    const source = layer.content.source;
+    try {
+      editor.openDocument(await smartSourceDocument(source), source.name, "Open", { parentId: s.id, sourceId: source.id });
+    } catch (err) {
+      console.error(err);
+      notify(`Couldn't open the Smart Object: ${errorText(err)}`);
+    }
+  }
+
+  // --- Clipboard ---------------------------------------------------------------
+  // Copies go to the system clipboard as a PNG plus a token naming our own
+  // copy, so pasting it back here is lossless (and pastes from other apps
+  // still work). Ctrl+V is left to the browser, which delivers a paste event.
+  let copyToken = "";
+  let tokenCounter = 0;
+
+  function toSystemClipboard(f: Floating | null) {
+    if (!f) return;
+    copyToken = `picturestore-copy:${Date.now().toString(36)}:${tokenCounter++}`;
+    const item = new ClipboardItem({ "image/png": encodePng(f), "text/plain": new Blob([copyToken], { type: "text/plain" }) });
+    navigator.clipboard?.write([item]).catch(() => {
+      // Denied or unsupported: our own copy still pastes within the app.
+    });
+  }
+
+  async function pasteFrom(data: { text: string; image: Blob | null }, inPlace: boolean) {
+    if (data.image && data.text !== copyToken) {
+      try {
+        const tiles = await readImageTiles(data.image);
+        if (editor.active()) editor.pasteImage(tiles);
+        else editor.openDocument(await readDocument(data.image), "Untitled", "Paste");
+      } catch (err) {
+        notify(`Couldn't paste: ${errorText(err)}`);
+      }
+      return;
+    }
+    if (!editor.paste(inPlace) && editor.active()) notify("Nothing to paste.");
+  }
+
+  /** Paste from a menu, where there is no paste event: read the clipboard if allowed. */
+  async function pasteFromMenu(inPlace: boolean) {
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find((t) => t.startsWith("image/"));
+        const text = item.types.includes("text/plain") ? await (await item.getType("text/plain")).text() : "";
+        if (type || text) return pasteFrom({ text, image: type ? await item.getType(type) : null }, inPlace);
+      }
+    } catch {
+      // No permission: fall back to our own copy.
+    }
+    await pasteFrom({ text: copyToken, image: null }, inPlace);
+  }
+
+  /** Set by Ctrl+Shift+V so the paste event that follows pastes in place. */
+  let pasteInPlace = false;
+
+  const [menu, setMenu] = createSignal<{ x: number; y: number; items: readonly MenuItem[] } | null>(null);
+  const [confirmation, setConfirmation] = createSignal<{ message: string; resolve: (ok: boolean) => void } | null>(null);
+  editor.onConfirm((message) => new Promise((resolve) => setConfirmation({ message, resolve })));
+  const answer = (ok: boolean) => {
+    confirmation()?.resolve(ok);
+    setConfirmation(null);
+  };
+
   const shell: Shell = {
     newDocument: () => setShowNew(true),
     open: () => void pickFiles().then(openFiles, (err) => notify(`Couldn't open: ${errorText(err)}`)),
     save: () => void save(),
     saveAs: () => void saveAs(),
     exportAs: (format) => void exportAs(format),
+    placeEmbedded: () => void pickFiles().then((files) => placeFiles(files.map((f) => f.file))),
+    editContents: () => void editContents(),
+    copy: (merged) => toSystemClipboard(editor.copy(merged)),
+    cut: () => toSystemClipboard(editor.cut()),
+    paste: (inPlace) => void pasteFromMenu(inPlace),
   };
-  const app: AppValue = { editor, shell, notify };
+  const app: AppValue = { editor, shell, notify, openMenu: (x, y, items) => setMenu({ x, y, items }) };
 
   onSettled(() => {
     window.__ps = {
@@ -129,8 +222,13 @@ export function App() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew()) return;
+      if (isTyping(e.target) || showNew() || confirmation()) return;
       const id = findCommand(e);
+      if (id === "edit.paste" || id === "edit.pasteInPlace") {
+        // Let the browser deliver a paste event with the clipboard's contents.
+        pasteInPlace = id === "edit.pasteInPlace";
+        return;
+      }
       if (id) {
         e.preventDefault();
         runCommand(id, editor, shell);
@@ -150,21 +248,50 @@ export function App() {
       if (tool) editor.setTool(tool);
     };
 
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTyping(e.target) || showNew() || confirmation() || !e.clipboardData) return;
+      e.preventDefault();
+      const image = [...e.clipboardData.files].find((f) => f.type.startsWith("image/")) ?? null;
+      void pasteFrom({ text: e.clipboardData.getData("text/plain"), image }, pasteInPlace);
+      pasteInPlace = false;
+    };
     const onDragOver = (e: DragEvent) => e.preventDefault();
+    // Files dropped onto an open document are placed into it (as smart
+    // objects); dropped anywhere else they open as documents.
     const onDrop = (e: DragEvent) => {
       e.preventDefault();
-      if (e.dataTransfer?.files.length) void openFiles([...e.dataTransfer.files].map((file) => ({ file, handle: null })));
+      const files = [...(e.dataTransfer?.files ?? [])];
+      if (files.length === 0) return;
+      const onCanvas = (e.target as Element | null)?.closest?.("[data-testid=viewport]");
+      if (onCanvas && editor.active()) void placeFiles(files);
+      else void openFiles(files.map((file) => ({ file, handle: null })));
+    };
+    // With a context menu open, Escape only closes the menu (it would otherwise cancel a transform).
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || !menu()) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setMenu(null);
+    };
+    const closeMenu = (e: PointerEvent) => {
+      if (!(e.target as Element | null)?.closest?.("[data-testid=context-menu]")) setMenu(null);
     };
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (editor.sessions().some((s) => s.dirty())) e.preventDefault();
     };
 
+    window.addEventListener("keydown", onEscape, { capture: true });
+    window.addEventListener("pointerdown", closeMenu, { capture: true });
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("paste", onPaste);
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("drop", onDrop);
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => {
+      window.removeEventListener("keydown", onEscape, { capture: true });
+      window.removeEventListener("pointerdown", closeMenu, { capture: true });
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("paste", onPaste);
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("drop", onDrop);
       window.removeEventListener("beforeunload", onBeforeUnload);
@@ -223,6 +350,19 @@ export function App() {
           }}
         />
       </Show>
+      <Show when={menu()}>
+        {(m) => (
+          <div
+            class="fixed z-50"
+            style={{ left: `${m().x}px`, top: `${m().y}px` }}
+            data-testid="context-menu"
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <MenuList items={m().items} onDone={() => setMenu(null)} />
+          </div>
+        )}
+      </Show>
+      <Show when={confirmation()}>{(c) => <ConfirmDialog message={c().message} onAnswer={answer} />}</Show>
       <Show when={message()}>
         {(m) => (
           <div class="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-sm bg-raised px-4 py-2 shadow-xl" role="status">
@@ -231,6 +371,35 @@ export function App() {
         )}
       </Show>
     </AppContext>
+  );
+}
+
+/** Photoshop-style OK/Cancel prompt. Enter confirms, Escape cancels. */
+function ConfirmDialog(props: { message: string; onAnswer: (ok: boolean) => void }) {
+  onSettled(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" && e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      props.onAnswer(e.key === "Enter");
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  });
+  return (
+    <div class="fixed inset-0 z-50 grid place-items-center bg-black/40" data-testid="confirm-dialog">
+      <div class="w-96 rounded-sm border border-line bg-panel p-4 shadow-2xl" role="alertdialog" aria-modal="true">
+        <p class="mb-4 leading-relaxed">{props.message}</p>
+        <div class="flex justify-end gap-2">
+          <Button onClick={() => props.onAnswer(false)} testId="confirm-cancel">
+            Cancel
+          </Button>
+          <Button primary onClick={() => props.onAnswer(true)} testId="confirm-ok">
+            OK
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

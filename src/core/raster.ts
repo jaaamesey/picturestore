@@ -52,9 +52,10 @@ export function extractFloating(tiles: TileMap, mask: Mask | null): { floating: 
  * renders this on the GPU (see `gpu/renderer.ts`); unit tests and the GPU
  * parity test use this.
  */
-export function transformFloatingCpu(f: Floating, m: Mapping, filter: Filter = "bicubic"): TileMap {
+export function transformFloatingCpu(f: Floating, m: Mapping, filter: Filter = "bicubic", clip?: Rect): TileMap {
   if (isEmpty(f.bounds)) return EMPTY_TILES;
-  const dest = roundOut(mappingBounds(m));
+  const bounds = roundOut(mappingBounds(m));
+  const dest = clip ? intersect(bounds, clip) : bounds;
   if (isEmpty(dest)) return EMPTY_TILES;
   const src = { width: f.bounds.w, height: f.bounds.h, channels: 4 as const, data: readRect(f.tiles, f.bounds) };
   const out = rasterizeMapping(src, f.bounds, m, dest, filter);

@@ -1,25 +1,97 @@
-import { For, Show, createSignal, useContext } from "solid-js";
+import { For, Show, createSignal, onSettled, useContext } from "solid-js";
 import { toHex } from "../core/color";
-import { TOOLBAR } from "../editor/tools";
+import { TOOL_GROUPS, type ToolInfo } from "../editor/tools";
 import { ColorPicker } from "./ColorPicker";
 import { AppContext } from "./context";
 import { IconButton } from "./controls";
 import { Icon } from "./icons";
 
+const HOLD_MS = 400;
+
+/**
+ * One toolbar slot: shows the group's current tool. Right-click, or press
+ * and hold, opens a flyout of the other tools in the group (as in Photoshop).
+ */
+function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (open: boolean) => void }) {
+  const { editor } = useContext(AppContext);
+  const [last, setLast] = createSignal(props.tools[0]);
+  const shown = () => props.tools.find((t) => t.id === editor.tool()) ?? last();
+  let hold = 0;
+  const choose = (t: ToolInfo) => {
+    setLast(t);
+    editor.setTool(t.id);
+    props.onOpen(false);
+  };
+  return (
+    <div
+      class="relative"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        if (props.tools.length > 1) props.onOpen(true);
+      }}
+      onPointerDown={() => {
+        if (props.tools.length > 1) hold = window.setTimeout(() => props.onOpen(true), HOLD_MS);
+      }}
+      onPointerUp={() => clearTimeout(hold)}
+      onPointerLeave={() => clearTimeout(hold)}
+    >
+      <IconButton
+        icon={shown().id}
+        title={`${shown().label} (${shown().key.toUpperCase()})`}
+        testId={`tool-${shown().id}`}
+        active={editor.tool() === shown().id}
+        onClick={() => choose(shown())}
+      />
+      <Show when={props.tools.length > 1}>
+        {/* Photoshop's flyout marker. */}
+        <span class="pointer-events-none absolute right-0.5 bottom-0.5 size-0 border-t-[3px] border-l-[3px] border-t-transparent border-l-transparent border-r-[3px] border-b-[3px] border-r-fg/60 border-b-fg/60" />
+      </Show>
+      <Show when={props.open}>
+        <div class="absolute top-0 left-full z-50 ml-1 min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl" role="menu" data-testid="tool-flyout">
+          <For each={props.tools}>
+            {(t) => (
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={shown().id === t.id ? "true" : "false"}
+                data-testid={`flyout-${t.id}`}
+                class="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent hover:text-white"
+                onClick={() => choose(t)}
+              >
+                <Icon name={t.id} size={16} />
+                <span class="flex-1">{t.label}</span>
+                <span class="text-dim">{t.key.toUpperCase()}</span>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
 export function Toolbar() {
   const { editor } = useContext(AppContext);
   const [picking, setPicking] = createSignal<"foreground" | "background" | null>(null);
+  const [flyout, setFlyout] = createSignal<string | null>(null);
+  let bar!: HTMLDivElement;
+
+  onSettled(() => {
+    const close = (e: Event) => {
+      if (!bar.querySelector("[data-testid=tool-flyout]")?.contains(e.target as Node)) setFlyout(null);
+    };
+    window.addEventListener("pointerdown", close, { capture: true });
+    return () => window.removeEventListener("pointerdown", close, { capture: true });
+  });
 
   return (
-    <div class="relative flex w-10 flex-col items-center gap-0.5 border-r border-line bg-panel py-1.5" data-testid="toolbar">
-      <For each={TOOLBAR}>
-        {(t) => (
-          <IconButton
-            icon={t.id}
-            title={`${t.label} (${t.key.toUpperCase()})`}
-            testId={`tool-${t.id}`}
-            active={editor.tool() === t.id}
-            onClick={() => editor.setTool(t.id)}
+    <div ref={bar} class="relative flex w-10 flex-col items-center gap-0.5 border-r border-line bg-panel py-1.5" data-testid="toolbar">
+      <For each={TOOL_GROUPS}>
+        {(group) => (
+          <ToolGroup
+            tools={group}
+            open={flyout() === group[0].key}
+            onOpen={(open) => setFlyout(open ? group[0].key : null)}
           />
         )}
       </For>

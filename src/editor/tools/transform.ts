@@ -1,9 +1,11 @@
-import { activeLayer, updateLayer, type Doc, type Layer } from "../../core/document";
-import { intersect, isEmpty, vec, type Rect, type Vec2 } from "../../core/geometry";
-import { compositeOver, extractFloating, type Floating } from "../../core/raster";
+import { placementState, sourceFloating, toPlacement, withContent } from "../../core/content";
+import { activeLayer, docRect, updateLayer, type Doc, type Layer, type LayerContent } from "../../core/document";
+import { intersect, isEmpty, vec, type Vec2 } from "../../core/geometry";
+import { compositeOver, extractFloating } from "../../core/raster";
 import type { Filter } from "../../core/rasterize";
 import { transformMask, translateMask } from "../../core/selection";
-import { contentBounds, translateTiles, type TileMap } from "../../core/tiles";
+import { renderShape } from "../../core/shape";
+import { EMPTY_TILES, contentBounds, translateTiles } from "../../core/tiles";
 import {
   dragTransform,
   flip,
@@ -11,7 +13,6 @@ import {
   hitTest,
   initialTransform,
   integerOffset,
-  isIdentityTransform,
   rotateAbout,
   toMapping,
   translate,
@@ -21,7 +22,7 @@ import {
   type TransformMode,
   type TransformState,
 } from "../../core/transform";
-import { IDENTITY_PATCH } from "../../core/warp";
+import { IDENTITY_PATCH, isIdentityPatch } from "../../core/warp";
 import type { Tool, ToolContext, ToolEvent, ToolId } from "../types";
 
 export type TransformCommand = "rotate-180" | "rotate-90-cw" | "rotate-90-ccw" | "flip-horizontal" | "flip-vertical";
@@ -30,56 +31,98 @@ export type TransformCommand = "rotate-180" | "rotate-90-cw" | "rotate-90-ccw" |
 const HANDLE_PX = 7;
 const ROTATE_BAND_PX = 24;
 
-/** Pixels lifted off a layer, plus everything needed to put them back. */
-interface Lift {
-  readonly doc: Doc;
+/**
+ * What a transform session moves: pixels lifted off a pixel layer, or a smart
+ * object's or shape's placement (re-rendered from its source, so repeated
+ * transforms never degrade it). Each knows how to preview and apply a state.
+ */
+export interface Target {
   readonly layer: Layer;
-  readonly floating: Floating;
-  readonly rest: TileMap;
-}
-
-function lift(doc: Doc): Lift | null {
-  const layer = activeLayer(doc);
-  if (!layer || !layer.visible) return null;
-  const { floating, rest } = extractFloating(layer.tiles, doc.selection);
-  return isEmpty(floating.bounds) ? null : { doc, layer, floating, rest };
+  /** The untransformed state. */
+  readonly initial: TransformState;
+  show(ctx: ToolContext, s: TransformState): void;
+  /** The document with `s` applied, at commit quality. */
+  place(ctx: ToolContext, s: TransformState, filter: Filter): Promise<Doc>;
 }
 
 /**
- * What the Move tool frames with its transform controls: the active layer's
- * content, clipped to the selection. Cheap (per-tile bounds are cached).
+ * Lifts the selection (or the whole active layer) off a pixel layer. The
+ * selection is hidden while its pixels float and reappears, transformed, on
+ * commit. Whole-pixel moves are exact copies; anything else is resampled.
  */
-export function moveBox(doc: Doc): Rect | null {
+function pixelTarget(doc: Doc, layer: Layer): Target | null {
+  const { floating, rest } = extractFloating(layer.tiles, doc.selection);
+  if (isEmpty(floating.bounds)) return null;
+  return {
+    layer,
+    initial: initialTransform(floating.bounds),
+    show(ctx, s) {
+      ctx.preview({ ...updateLayer(doc, layer.id, { tiles: rest }), selection: null }, {
+        tiles: floating.tiles,
+        bounds: floating.bounds,
+        mapping: toMapping(s),
+        aboveLayerId: layer.id,
+        opacity: layer.opacity,
+        blendMode: layer.blendMode,
+      });
+    },
+    async place(ctx, s, filter) {
+      const offset = integerOffset(s);
+      const sel = doc.selection;
+      const moved = offset ? translateTiles(floating.tiles, offset.x, offset.y) : await ctx.resample(floating, toMapping(s), filter);
+      const selection = sel && (offset ? translateMask(sel, offset.x, offset.y) : transformMask(sel, toMapping(s)));
+      return { ...updateLayer(doc, layer.id, { tiles: compositeOver(rest, moved) }), selection };
+    },
+  };
+}
+
+/** Smart objects and shapes transform as a whole, whatever is selected (as in Photoshop). */
+function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { kind: "pixels" }>): Target {
+  const clip = docRect(doc);
+  const at = (s: TransformState): LayerContent => ({ ...content, placement: toPlacement(s) });
+  return {
+    layer,
+    initial: placementState(content.placement),
+    show(ctx, s) {
+      if (content.kind === "shape") {
+        // Vector re-rendering is cheap enough to preview exactly.
+        ctx.preview(updateLayer(doc, layer.id, { tiles: renderShape(content.geometry, content.style, toMapping(s), clip) }));
+        return;
+      }
+      ctx.preview(updateLayer(doc, layer.id, { tiles: EMPTY_TILES }), {
+        ...sourceFloating(content.source),
+        mapping: toMapping(s),
+        aboveLayerId: layer.id,
+        opacity: layer.opacity,
+        blendMode: layer.blendMode,
+      });
+    },
+    async place(ctx, s, filter) {
+      const { content: c, tiles } = await withContent(layer, at(s), clip, ctx.resample, filter);
+      return updateLayer(doc, layer.id, { content: c, tiles });
+    },
+  };
+}
+
+/** The active layer as a transform target; null when hidden or empty. */
+export function transformTarget(doc: Doc): Target | null {
   const layer = activeLayer(doc);
   if (!layer || !layer.visible) return null;
+  return layer.content.kind === "pixels" ? pixelTarget(doc, layer) : contentTarget(doc, layer, layer.content);
+}
+
+/**
+ * What the Move tool frames with its transform controls: a smart object's or
+ * shape's placement, else the layer's content clipped to the selection.
+ * Cheap (per-tile bounds are cached; nothing is lifted).
+ */
+export function moveFrame(doc: Doc): TransformState | null {
+  const layer = activeLayer(doc);
+  if (!layer || !layer.visible) return null;
+  if (layer.content.kind !== "pixels") return placementState(layer.content.placement);
   const b = contentBounds(layer.tiles);
   const box = doc.selection ? intersect(b, doc.selection.bounds) : b;
-  return isEmpty(box) ? null : box;
-}
-
-function showLift(ctx: ToolContext, l: Lift, s: TransformState) {
-  // The selection is hidden while its pixels float; it reappears, transformed, on commit.
-  ctx.preview({ ...updateLayer(l.doc, l.layer.id, { tiles: l.rest }), selection: null }, {
-    tiles: l.floating.tiles,
-    bounds: l.floating.bounds,
-    mapping: toMapping(s),
-    aboveLayerId: l.layer.id,
-    opacity: l.layer.opacity,
-    blendMode: l.layer.blendMode,
-  });
-}
-
-/**
- * Drops the lifted pixels back through the transform, moving the selection
- * with them. Whole-pixel moves are exact copies; everything else is
- * resampled at commit quality (on the GPU in the app).
- */
-export async function placeLift(ctx: ToolContext, l: Lift, s: TransformState, filter: Filter): Promise<Doc> {
-  const offset = integerOffset(s);
-  const sel = l.doc.selection;
-  const moved = offset ? translateTiles(l.floating.tiles, offset.x, offset.y) : await ctx.resample(l.floating, toMapping(s), filter);
-  const selection = sel && (offset ? translateMask(sel, offset.x, offset.y) : transformMask(sel, toMapping(s)));
-  return { ...updateLayer(l.doc, l.layer.id, { tiles: compositeOver(l.rest, moved) }), selection };
+  return isEmpty(box) ? null : initialTransform(box);
 }
 
 const LABELS: Record<TransformMode, string> = {
@@ -148,11 +191,21 @@ export function applyCommand(s: TransformState, c: TransformCommand): TransformS
 export interface TransformController extends Tool {
   readonly id: "transform";
   /**
-   * Lifts the selection (or active layer) and starts a session. With `grab`,
-   * the session starts mid-drag on `hit` — how the Move tool's handles hand
-   * over. Returns false when there is nothing to transform.
+   * Starts a session on the active layer of `place.doc` (Place Embedded: the
+   * new layer is committed only if the session is), else of the current
+   * document. With `grab`, the session starts mid-drag on `hit` — how the
+   * Move tool's handles hand over. Returns false when there is nothing to
+   * transform.
    */
-  begin(ctx: ToolContext, opts: { returnTo: ToolId; mode?: TransformMode; grab?: { event: ToolEvent; hit: TransformHit } }): boolean;
+  begin(
+    ctx: ToolContext,
+    opts: {
+      returnTo: ToolId;
+      mode?: TransformMode;
+      grab?: { event: ToolEvent; hit: TransformHit };
+      place?: { doc: Doc; label: string };
+    },
+  ): boolean;
   readonly state: () => TransformState | null;
   readonly mode: () => TransformMode;
   /** Numeric entry. */
@@ -164,16 +217,18 @@ export interface TransformController extends Tool {
 }
 
 export function createTransformController(): TransformController {
-  let lifted: Lift | null = null;
+  let target: Target | null = null;
   let state: TransformState | null = null;
   let mode: TransformMode = "free";
   let returnTo: ToolId = "move";
+  /** Set when committing must record a step even without a transform (Place Embedded). */
+  let placeLabel: string | null = null;
   let steps: TransformState[] = [];
   let drag: Drag | null = null;
 
   const show = (ctx: ToolContext) => {
-    if (!lifted || !state) return;
-    showLift(ctx, lifted, state);
+    if (!target || !state) return;
+    target.show(ctx, state);
     ctx.overlay({ kind: "transform", state, mode });
   };
 
@@ -192,10 +247,11 @@ export function createTransformController(): TransformController {
   });
 
   const end = (ctx: ToolContext) => {
-    lifted = null;
+    target = null;
     state = null;
     drag = null;
     steps = [];
+    placeLabel = null;
     ctx.overlay(null);
     ctx.setTool(returnTo);
   };
@@ -212,26 +268,28 @@ export function createTransformController(): TransformController {
   };
 
   const commit = (ctx: ToolContext) => {
-    if (!lifted || !state) return;
-    const l = lifted;
+    if (!target || !state) return;
+    const t = target;
     const s = state;
-    const label = LABELS[mode];
+    const label = placeLabel ?? LABELS[mode];
+    const changed = placeLabel !== null || !sameState(s, t.initial);
     const filter = ctx.settings.transform.interpolation;
     end(ctx);
-    if (isIdentityTransform(s)) ctx.preview(null);
-    else ctx.commitAsync(label, placeLift(ctx, l, s, filter));
+    if (changed) ctx.commitAsync(label, t.place(ctx, s, filter));
+    else ctx.preview(null);
   };
 
   return {
     id: "transform",
-    begin(ctx, { returnTo: back, mode: m = "free", grab }) {
-      lifted = lift(ctx.doc);
-      if (!lifted) return false;
+    begin(ctx, { returnTo: back, mode: m = "free", grab, place }) {
+      target = transformTarget(place?.doc ?? ctx.doc);
+      if (!target) return false;
       returnTo = back;
       mode = m;
       steps = [];
-      state = initialTransform(lifted.floating.bounds);
-      if (m === "warp") state = { ...state, patch: IDENTITY_PATCH };
+      placeLabel = place?.label ?? null;
+      state = target.initial;
+      if (m === "warp") state = { ...state, patch: state.patch ?? IDENTITY_PATCH };
       show(ctx);
       if (grab) down(ctx, grab.event, grab.hit);
       return true;
@@ -268,29 +326,39 @@ export function createTransformController(): TransformController {
     },
     commit,
     cancel(ctx) {
-      if (!lifted) return;
+      if (!target) return;
       end(ctx);
       ctx.preview(null);
     },
   };
 }
 
+const near = (p: Vec2, q: Vec2) => Math.abs(p.x - q.x) < 1e-9 && Math.abs(p.y - q.y) < 1e-9;
+const effectivePatch = (s: TransformState) => (s.patch && !isIdentityPatch(s.patch) ? s.patch : null);
+
+/** True when a session ended where it started (an untouched warp grid counts as no warp). */
+function sameState(a: TransformState, b: TransformState): boolean {
+  const pa = effectivePatch(a), pb = effectivePatch(b);
+  const samePatch = pa === pb || (!!pa && !!pb && pa.every((p, i) => near(p, pb[i])));
+  return samePatch && a.quad.every((p, i) => near(p, b.quad[i]));
+}
+
 /**
  * Move tool. With "Show Transform Controls" (on by default) the active
  * layer's bounds get handles: dragging a handle, or just outside a corner,
  * hands over to a Free Transform session; dragging anywhere else moves the
- * pixels by whole pixels.
+ * layer (or selected pixels) by whole pixels.
  */
 export function createMoveTool(transform: TransformController): Tool {
-  let lifted: Lift | null = null;
+  let target: Target | null = null;
   let start: Vec2 = vec(0, 0);
   let offset: Vec2 = vec(0, 0);
 
   const controlHit = (ctx: ToolContext, e: ToolEvent): TransformHit => {
     if (!ctx.settings.transform.showControls) return { kind: "none" };
-    const box = moveBox(ctx.doc);
-    if (!box) return { kind: "none" };
-    const hit = hitTest(initialTransform(box), e, {
+    const frame = moveFrame(ctx.doc);
+    if (!frame) return { kind: "none" };
+    const hit = hitTest(frame, e, {
       tolerance: HANDLE_PX / ctx.view.zoom,
       mode: "free",
       showReference: false,
@@ -302,10 +370,10 @@ export function createMoveTool(transform: TransformController): Tool {
   return {
     id: "move",
     cursor(ctx, e) {
-      if (!e || lifted) return "move";
+      if (!e || target) return "move";
       const hit = controlHit(ctx, e);
-      const box = hit.kind === "none" ? null : moveBox(ctx.doc);
-      return box ? cursorFor(initialTransform(box), hit, "free") : "move";
+      const frame = hit.kind === "none" ? null : moveFrame(ctx.doc);
+      return frame ? cursorFor(frame, hit, "free") : "move";
     },
     down(ctx, e) {
       const hit = controlHit(ctx, e);
@@ -313,27 +381,27 @@ export function createMoveTool(transform: TransformController): Tool {
         ctx.setTool("transform");
         return;
       }
-      lifted = lift(ctx.doc);
+      target = transformTarget(ctx.doc);
       start = vec(e.x, e.y);
       offset = vec(0, 0);
     },
     move(ctx, e) {
-      if (!lifted) return;
+      if (!target) return;
       let dx = e.x - start.x, dy = e.y - start.y;
       if (e.shift) [dx, dy] = Math.abs(dx) >= Math.abs(dy) ? [dx, 0] : [0, dy];
       offset = vec(Math.round(dx), Math.round(dy));
-      showLift(ctx, lifted, translate(initialTransform(lifted.floating.bounds), offset.x, offset.y));
+      target.show(ctx, translate(target.initial, offset.x, offset.y));
     },
     up(ctx) {
-      if (!lifted) return;
-      const l = lifted;
-      lifted = null;
+      if (!target) return;
+      const t = target;
+      target = null;
       if (offset.x === 0 && offset.y === 0) return ctx.preview(null);
-      ctx.commitAsync("Move", placeLift(ctx, l, translate(initialTransform(l.floating.bounds), offset.x, offset.y), "nearest"));
+      ctx.commitAsync("Move", t.place(ctx, translate(t.initial, offset.x, offset.y), ctx.settings.transform.interpolation));
     },
     cancel(ctx) {
-      if (!lifted) return;
-      lifted = null;
+      if (!target) return;
+      target = null;
       ctx.preview(null);
     },
   };

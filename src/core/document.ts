@@ -1,8 +1,50 @@
 import { KERNELS, type BlendMode } from "./blend";
 import type { RGB } from "./color";
-import { intersect, rect, union, type Rect } from "./geometry";
+import { intersect, isEmpty, rect, union, type Rect } from "./geometry";
 import type { Mask } from "./selection";
-import { EMPTY_TILES, TILE_SIZE, tileGridBounds, tileKey, tileRect, tileWriter, tilesIn, words, type TileMap } from "./tiles";
+import type { ShapeGeometry, ShapeStyle } from "./shape";
+import type { TransformState } from "./transform";
+import {
+  EMPTY_TILES,
+  TILE_SIZE,
+  contentBounds,
+  tileGridBounds,
+  tileKey,
+  tileRect,
+  tileWriter,
+  tilesIn,
+  translateTiles,
+  words,
+  type TileMap,
+} from "./tiles";
+import { quadOf } from "./warp";
+
+/** Where a smart object's or shape's source box lands in the document. */
+export type Placement = Pick<TransformState, "source" | "quad" | "angle" | "patch">;
+
+/** Embedded smart object contents. Immutable; shared between duplicates of the layer. */
+export interface SmartSource {
+  readonly id: string;
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  /** Source pixels, with the top-left at (0, 0). */
+  readonly tiles: TileMap;
+  /** The original encoded file (PNG, JPEG, PSD…), embedded verbatim when saving to PSD. */
+  readonly file: { readonly bytes: Uint8Array; readonly type: string } | null;
+}
+
+/**
+ * What a layer is. Pixel layers are edited directly; smart objects and
+ * shapes are rendered from a source through a placement, so transforming
+ * them never loses quality. `Layer.tiles` always holds the rendered pixels.
+ */
+export type LayerContent =
+  | { readonly kind: "pixels" }
+  | { readonly kind: "smart"; readonly source: SmartSource; readonly placement: Placement }
+  | { readonly kind: "shape"; readonly geometry: ShapeGeometry; readonly style: ShapeStyle; readonly placement: Placement };
+
+export const PIXELS: LayerContent = { kind: "pixels" };
 
 export interface Layer {
   readonly id: string;
@@ -11,7 +53,9 @@ export interface Layer {
   /** [0, 1] */
   readonly opacity: number;
   readonly blendMode: BlendMode;
+  /** Rendered pixels (for smart objects and shapes, a cache of their content clipped to the canvas). */
   readonly tiles: TileMap;
+  readonly content: LayerContent;
 }
 
 /**
@@ -32,10 +76,13 @@ export interface Doc {
 let idCounter = 0;
 export const newId = () => `l${Date.now().toString(36)}${(idCounter++).toString(36)}`;
 
+/** Smart object sources are identified by GUIDs, as PSD requires. */
+export const newSourceId = (): string => crypto.randomUUID();
+
 export const docRect = (d: Pick<Doc, "width" | "height">): Rect => rect(0, 0, d.width, d.height);
 
 export function createLayer(props: Partial<Layer> & Pick<Layer, "name">): Layer {
-  return { id: newId(), visible: true, opacity: 1, blendMode: "normal", tiles: EMPTY_TILES, ...props };
+  return { id: newId(), visible: true, opacity: 1, blendMode: "normal", tiles: EMPTY_TILES, content: PIXELS, ...props };
 }
 
 /** Packs an opaque colour as a little-endian RGBA u32. */
@@ -138,6 +185,14 @@ export function nextLayerName(d: Doc): string {
 }
 
 /** Inserts `layer` above the active layer and makes it active. */
+/** "Rectangle 1", "Rectangle 2"…: the next free number for layers named after a tool. */
+export function numberedName(d: Doc, base: string): string {
+  const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\d+)$`);
+  let n = 0;
+  for (const l of d.layers) n = Math.max(n, Number(re.exec(l.name)?.[1] ?? 0));
+  return `${base} ${n + 1}`;
+}
+
 export function addLayer(d: Doc, layer: Layer = createLayer({ name: nextLayerName(d) })): Doc {
   const at = layerIndex(d, d.activeLayerId) + 1;
   const layers = [...d.layers.slice(0, at), layer, ...d.layers.slice(at)];
@@ -171,6 +226,33 @@ export function moveLayerRelative(d: Doc, id: string, targetId: string, placemen
   // Index of the target once the moved layer has been taken out; layers are stored bottom to top.
   const t = target - (from < target ? 1 : 0);
   return moveLayer(d, id, placement === "above" ? t + 1 : t);
+}
+
+/** Rasterize Layer: keeps the rendered pixels, drops the editable content. */
+export function rasterizeLayer(d: Doc, id: string): Doc {
+  const l = d.layers.find((x) => x.id === id);
+  return l && l.content.kind !== "pixels" ? updateLayer(d, id, { content: PIXELS }) : d;
+}
+
+/**
+ * Convert to Smart Object: the layer's current pixels become the embedded
+ * source, placed exactly where they were.
+ */
+export function convertToSmartObject(d: Doc, id: string, sourceId = newSourceId()): Doc {
+  const l = d.layers.find((x) => x.id === id);
+  if (!l || l.content.kind === "smart") return d;
+  const b = contentBounds(l.tiles);
+  if (isEmpty(b)) return d;
+  const source: SmartSource = {
+    id: sourceId,
+    name: l.name,
+    width: b.w,
+    height: b.h,
+    tiles: translateTiles(l.tiles, -b.x, -b.y),
+    file: null,
+  };
+  const placement: Placement = { source: rect(0, 0, b.w, b.h), quad: quadOf(b), angle: 0, patch: null };
+  return updateLayer(d, id, { content: { kind: "smart", source, placement } });
 }
 
 export function duplicateLayer(d: Doc, id: string): Doc {
@@ -232,6 +314,6 @@ export function mergeDown(d: Doc, id: string): Doc {
     }
   }
   const layers = [...d.layers];
-  layers.splice(i - 1, 2, { ...below, tiles: w.finish() });
+  layers.splice(i - 1, 2, { ...below, tiles: w.finish(), content: PIXELS });
   return { ...d, layers, activeLayerId: below.id };
 }

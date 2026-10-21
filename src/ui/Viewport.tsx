@@ -1,15 +1,15 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onSettled, useContext } from "solid-js";
-import type { Rect, Vec2 } from "../core/geometry";
+import type { Vec2 } from "../core/geometry";
 import type { transformFloatingCpu } from "../core/raster";
 import type { readRect } from "../core/tiles";
-import { handles, initialTransform, warpPoints, type TransformMode, type TransformState } from "../core/transform";
+import { handles, warpPoints, type TransformMode, type TransformState } from "../core/transform";
 import { IDENTITY_PATCH, PATCH_ANCHORS, evalPatch, project, squareToQuad } from "../core/warp";
-import { moveBox } from "../editor/tools/transform";
+import { moveFrame } from "../editor/tools/transform";
 import type { Overlay, ToolEvent } from "../editor/types";
 import { docToScreen, screenToDoc, zoomAt } from "../editor/view";
 import { createRenderer, type Renderer, type View } from "../gpu/renderer";
 import { AppContext } from "./context";
-import { MenuList, TRANSFORM_MENU } from "./MenuBar";
+import { LAYER_MENU, SELECTION_MENU, TRANSFORM_MENU, type MenuItem } from "./MenuBar";
 
 declare global {
   interface Window {
@@ -26,10 +26,12 @@ declare global {
   }
 }
 
+const SELECTION_TOOLS: readonly string[] = ["marquee-rect", "marquee-ellipse", "lasso", "wand"];
+
 const isTyping = (t: EventTarget | null) => t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
 
 export function Viewport(props: { device: GPUDevice; readback: boolean }) {
-  const { editor } = useContext(AppContext);
+  const { editor, openMenu } = useContext(AppContext);
   let host!: HTMLDivElement;
   const [hover, setHover] = createSignal<ToolEvent | null>(null);
   const [spaceHeld, setSpaceHeld] = createSignal(false);
@@ -38,7 +40,6 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
   let needsRender = true;
   // Double-click detection (pointerdown's `detail` isn't reliable across browsers).
   let lastDown = { time: 0, x: 0, y: 0, clicks: 0 };
-  const [menu, setMenu] = createSignal<{ x: number; y: number } | null>(null);
 
   createEffect(
     () => {
@@ -77,7 +78,6 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       return;
     }
     if (e.button !== 0 || toolPointer !== null) return;
-    setMenu(null);
     const repeat = e.timeStamp - lastDown.time < 400 && Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) < 5;
     lastDown = { time: e.timeStamp, x: e.clientX, y: e.clientY, clicks: repeat ? lastDown.clicks + 1 : 1 };
     toolPointer = e.pointerId;
@@ -180,21 +180,12 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
     };
     const onKeyDown = key(true);
     const onKeyUp = key(false);
-    // With the context menu open, Escape only closes the menu (it would otherwise cancel the transform).
-    const onEscape = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || !menu()) return;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      setMenu(null);
-    };
-    window.addEventListener("keydown", onEscape, { capture: true });
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     host.addEventListener("wheel", onWheel, { passive: false });
 
     return () => {
       resize.disconnect();
-      window.removeEventListener("keydown", onEscape, { capture: true });
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       host.removeEventListener("wheel", onWheel);
@@ -207,7 +198,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
   const moveControls = createMemo(() => {
     const s = editor.active();
     if (!s || editor.tool() !== "move" || !editor.settings.transform.showControls || s.overlay() || s.floating()) return null;
-    return moveBox(s.doc());
+    return moveFrame(s.doc());
   });
   const brushRadius = () => {
     const t = editor.tool();
@@ -228,10 +219,14 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       onPointerLeave={() => setHover(null)}
       onContextMenu={(e) => {
         e.preventDefault();
-        // Right-clicking during a transform offers the transform modes, as in Photoshop.
-        if (editor.tool() !== "transform") return;
-        const r = host.getBoundingClientRect();
-        setMenu({ x: e.clientX - r.left, y: e.clientY - r.top });
+        if (!editor.active()) return;
+        // As in Photoshop: transform modes during a transform, selection commands with selection tools.
+        const t = editor.tool();
+        const items: readonly MenuItem[] =
+          t === "transform" ? ["edit.freeTransform", "-", ...TRANSFORM_MENU]
+          : SELECTION_TOOLS.includes(t) ? SELECTION_MENU
+          : ["edit.freeTransform", "-", ...LAYER_MENU];
+        openMenu(e.clientX, e.clientY, items);
       }}
     >
       <Show when={editor.active()}>
@@ -240,7 +235,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
             <Show when={s().overlay()}>
               {(o) => <OverlayShape overlay={o()} view={s().view()} showReference={editor.settings.transform.showReference} />}
             </Show>
-            <Show when={moveControls()}>{(b) => <MoveControls box={b()} view={s().view()} />}</Show>
+            <Show when={moveControls()}>{(f) => <MoveControls frame={f()} view={s().view()} />}</Show>
             <Show when={hover() && brushRadius() > 0}>
               <circle
                 cx={hover()!.screenX}
@@ -256,13 +251,6 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
         )}
       </Show>
       <StatusBar hover={hover()} />
-      <Show when={menu()}>
-        {(m) => (
-          <div class="absolute z-40" style={{ left: `${m().x}px`, top: `${m().y}px` }} onPointerDown={(e) => e.stopPropagation()} data-testid="transform-menu">
-            <MenuList items={["edit.freeTransform", "-", ...TRANSFORM_MENU]} onDone={() => setMenu(null)} />
-          </div>
-        )}
-      </Show>
     </div>
   );
 }
@@ -384,8 +372,8 @@ function WarpMesh(props: { state: TransformState; view: View }) {
 }
 
 /** The Move tool's bounding box and handles. */
-function MoveControls(props: { box: Rect; view: View }) {
-  const h = () => handles(initialTransform(props.box));
+function MoveControls(props: { frame: TransformState; view: View }) {
+  const h = () => handles(props.frame);
   const pt = (p: Vec2) => docToScreen(props.view, p);
   return (
     <g data-testid="move-controls">

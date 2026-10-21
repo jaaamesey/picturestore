@@ -1,5 +1,11 @@
-import { For, Match, Show, Switch, useContext } from "solid-js";
+import { For, Match, Show, Switch, createSignal, useContext } from "solid-js";
 import type { BrushSettings } from "../core/brush";
+import { BLACK, toHex, type RGB } from "../core/color";
+import { activeLayer } from "../core/document";
+import type { StrokeAlign } from "../core/shape";
+import { SHAPE_TOOLS } from "../editor/tools";
+import type { ShapeSettings } from "../editor/types";
+import { ColorPicker } from "./ColorPicker";
 import type { SelectionMode } from "../core/selection";
 import type { Filter } from "../core/rasterize";
 import { locatorPoint, numeric, withNumeric, type NumericTransform, type TransformMode, type TransformState } from "../core/transform";
@@ -200,6 +206,116 @@ function TransformOptions(props: { state: TransformState; mode: TransformMode })
   );
 }
 
+/** A fill/stroke swatch: a colour, or Photoshop's red slash for "none". Opens a picker with a None option. */
+function Swatch(props: { title: string; testId: string; color: RGB | null; onChange: (c: RGB | null) => void }) {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <div class="relative flex items-center gap-1">
+      <span class="text-dim">{props.title}:</span>
+      <button
+        type="button"
+        title={props.title}
+        data-testid={props.testId}
+        data-color={props.color ? toHex(props.color) : "none"}
+        class="relative size-5 overflow-hidden rounded-xs border border-white/50"
+        style={{ "background-color": props.color ? toHex(props.color) : "white" }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Show when={!props.color}>
+          <span class="absolute top-1/2 left-1/2 h-px w-7 -translate-x-1/2 -translate-y-1/2 -rotate-45 bg-red-600" />
+        </Show>
+      </button>
+      <Show when={open()}>
+        <div class="absolute top-full left-0 z-50 mt-1">
+          <ColorPicker title={props.title} initial={props.color ?? BLACK} onChange={(c) => props.onChange(c)} onClose={() => setOpen(false)} />
+          <button
+            type="button"
+            data-testid={`${props.testId}-none`}
+            class="absolute -top-0.5 right-12 z-50 rounded-sm bg-raised px-2 py-0.5 hover:brightness-125"
+            onClick={() => {
+              props.onChange(null);
+              setOpen(false);
+            }}
+          >
+            None
+          </button>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+/**
+ * Shape tool options. With a shape layer selected they show (and edit) that
+ * layer's properties, as Photoshop's options bar does.
+ */
+function ShapeOptions() {
+  const { editor } = useContext(AppContext);
+  const o = () => editor.settings.shape;
+  const layer = () => {
+    const d = editor.active()?.doc();
+    const l = d && activeLayer(d);
+    return l?.content.kind === "shape" ? l.content : null;
+  };
+  const fill = (): RGB | null => {
+    if (layer()) return layer()!.style.fill;
+    const f = o().fill;
+    return f === "foreground" ? editor.foreground() : f;
+  };
+  const radius = () => {
+    const g = layer()?.geometry;
+    return g?.kind === "rectangle" ? g.radius : o().radius;
+  };
+  const stroke = () => (layer() ? layer()!.style.stroke : o().stroke);
+  const set = (patch: Partial<ShapeSettings>) => editor.setShapeOptions(patch);
+  const strokeWith = (patch: Partial<NonNullable<ShapeSettings["stroke"]>>) =>
+    set({ stroke: { ...(stroke() ?? { color: BLACK, width: 3, align: "inside" }), ...patch } });
+  const tool = () => editor.tool();
+  return (
+    <>
+      <select
+        data-testid="shape-mode"
+        value={o().mode}
+        onChange={(e) => {
+          const mode = e.currentTarget.value as ShapeSettings["mode"];
+          editor.setSettings((s) => void (s.shape.mode = mode));
+        }}
+      >
+        <option value="shape">Shape</option>
+        <option value="pixels">Pixels</option>
+      </select>
+      <Show when={o().mode === "shape"}>
+        <Swatch title="Fill" testId="shape-fill" color={fill()} onChange={(fill) => set({ fill })} />
+        <Swatch title="Stroke" testId="shape-stroke" color={stroke()?.color ?? null} onChange={(c) => (c ? strokeWith({ color: c }) : set({ stroke: null }))} />
+        <NumberField label="Width" testId="shape-stroke-width" value={stroke()?.width ?? 3} min={0} max={1000} step={0.5} suffix="px" onChange={(width) => strokeWith({ width })} />
+        <select
+          title="Stroke alignment"
+          data-testid="shape-stroke-align"
+          value={stroke()?.align ?? "inside"}
+          onChange={(e) => strokeWith({ align: e.currentTarget.value as StrokeAlign })}
+        >
+          <option value="inside">Inside</option>
+          <option value="center">Center</option>
+          <option value="outside">Outside</option>
+        </select>
+        <Separator />
+      </Show>
+      <Switch>
+        <Match when={tool() === "rectangle"}>
+          <NumberField label="Radius" testId="shape-radius" value={radius()} min={0} max={10000} suffix="px" onChange={(radius) => set({ radius })} />
+        </Match>
+        <Match when={tool() === "polygon"}>
+          <NumberField label="Sides" testId="shape-sides" value={o().sides} min={3} max={100} onChange={(sides) => set({ sides })} />
+          <NumberField label="Star Ratio" testId="shape-star" value={Math.round(o().starRatio * 100)} min={1} max={100} suffix="%" onChange={(v) => set({ starRatio: v / 100 })} />
+        </Match>
+        <Match when={tool() === "line"}>
+          <NumberField label="Weight" testId="shape-weight" value={o().weight} min={1} max={1000} suffix="px" onChange={(weight) => set({ weight })} />
+        </Match>
+      </Switch>
+    </>
+  );
+}
+
 function MoveOptions() {
   const { editor } = useContext(AppContext);
   return (
@@ -242,6 +358,9 @@ export function OptionsBar() {
         </Match>
         <Match when={editor.tool() === "wand"}>
           <SelectionOptions tolerance={true} />
+        </Match>
+        <Match when={SHAPE_TOOLS.includes(editor.tool())}>
+          <ShapeOptions />
         </Match>
         <Match when={editor.tool() === "bucket"}>
           <ToleranceOptions />

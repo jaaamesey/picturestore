@@ -10,6 +10,14 @@ export interface Shell {
   save(): void;
   saveAs(): void;
   exportAs(format: "png" | "jpeg" | "webp"): void;
+  /** File ▸ Place Embedded: picks an image and places it as a smart object. */
+  placeEmbedded(): void;
+  /** Opens the active smart object's contents as a document. */
+  editContents(): void;
+  /** Copy/Cut also put a PNG on the system clipboard; Paste reads it (or our own copy). */
+  copy(merged: boolean): void;
+  cut(): void;
+  paste(inPlace: boolean): void;
 }
 
 export interface CommandSpec {
@@ -23,6 +31,10 @@ export interface CommandSpec {
 const hasDoc = (ed: Editor) => ed.active() !== null;
 const hasSelection = (ed: Editor) => !!ed.active()?.doc().selection;
 const layerCount = (ed: Editor) => ed.active()?.doc().layers.length ?? 0;
+const layerKind = (ed: Editor) => {
+  const d = ed.active()?.doc();
+  return d?.layers.find((l) => l.id === d.activeLayerId)?.content.kind;
+};
 
 /**
  * Every command, keyed by a stable id. Ids are typed (see {@link CommandId}),
@@ -35,6 +47,7 @@ export const COMMANDS = {
   "file.open": { label: "Open…", shortcuts: ["Mod+O"], run: (_, s) => s.open() },
   "file.save": { label: "Save", shortcuts: ["Mod+S"], run: (_, s) => s.save(), enabled: hasDoc },
   "file.saveAs": { label: "Save as PSD…", shortcuts: ["Mod+Shift+S"], run: (_, s) => s.saveAs(), enabled: hasDoc },
+  "file.placeEmbedded": { label: "Place Embedded…", run: (_, s) => s.placeEmbedded(), enabled: hasDoc },
   "file.export.png": { label: "Export as PNG", shortcuts: ["Alt+Shift+Mod+W"], run: (_, s) => s.exportAs("png"), enabled: hasDoc },
   "file.export.jpeg": { label: "Export as JPG", run: (_, s) => s.exportAs("jpeg"), enabled: hasDoc },
   "file.export.webp": { label: "Export as WebP", run: (_, s) => s.exportAs("webp"), enabled: hasDoc },
@@ -48,6 +61,11 @@ export const COMMANDS = {
   // Edit
   "edit.undo": { label: "Undo", shortcuts: ["Mod+Z"], run: (ed) => ed.undo(), enabled: (ed) => ed.canUndo() || ed.tool() === "transform" },
   "edit.redo": { label: "Redo", shortcuts: ["Mod+Shift+Z", "Mod+Y"], run: (ed) => ed.redo(), enabled: (ed) => ed.canRedo() },
+  "edit.cut": { label: "Cut", shortcuts: ["Mod+X"], run: (_, s) => s.cut(), enabled: hasDoc },
+  "edit.copy": { label: "Copy", shortcuts: ["Mod+C"], run: (_, s) => s.copy(false), enabled: hasDoc },
+  "edit.copyMerged": { label: "Copy Merged", shortcuts: ["Mod+Shift+C"], run: (_, s) => s.copy(true), enabled: hasDoc },
+  "edit.paste": { label: "Paste", shortcuts: ["Mod+V"], run: (_, s) => s.paste(false), enabled: hasDoc },
+  "edit.pasteInPlace": { label: "Paste in Place", shortcuts: ["Mod+Shift+V"], run: (_, s) => s.paste(true), enabled: hasDoc },
   "edit.fillForeground": {
     label: "Fill with Foreground",
     shortcuts: ["Alt+Backspace", "Alt+Delete"],
@@ -86,7 +104,7 @@ export const COMMANDS = {
 
   // Layer
   "layer.new": { label: "New Layer", shortcuts: ["Mod+Shift+N"], run: (ed) => ed.newLayer(), enabled: hasDoc },
-  "layer.duplicate": { label: "Duplicate Layer", shortcuts: ["Mod+J"], run: (ed) => ed.duplicateLayer(), enabled: hasDoc },
+  "layer.duplicate": { label: "Duplicate Layer", run: (ed) => ed.duplicateLayer(), enabled: hasDoc },
   "layer.delete": { label: "Delete Layer", run: (ed) => ed.deleteLayer(), enabled: (ed) => layerCount(ed) > 1 },
   "layer.mergeDown": {
     label: "Merge Down",
@@ -96,6 +114,20 @@ export const COMMANDS = {
       const d = ed.active()?.doc();
       return !!d && d.layers.findIndex((l) => l.id === d.activeLayerId) > 0;
     },
+  },
+
+  "layer.viaCopy": { label: "Layer via Copy", shortcuts: ["Mod+J"], run: (ed) => ed.layerViaCopy(), enabled: hasDoc },
+  "layer.viaCut": { label: "Layer via Cut", shortcuts: ["Mod+Shift+J"], run: (ed) => ed.layerViaCut(), enabled: hasSelection },
+  "layer.convertToSmart": {
+    label: "Convert to Smart Object",
+    run: (ed) => ed.convertToSmartObject(),
+    enabled: (ed) => !!layerKind(ed) && layerKind(ed) !== "smart",
+  },
+  "layer.editContents": { label: "Edit Contents", run: (_, s) => s.editContents(), enabled: (ed) => layerKind(ed) === "smart" },
+  "layer.rasterize": {
+    label: "Rasterize Layer",
+    run: (ed) => ed.rasterizeLayer(),
+    enabled: (ed) => !!layerKind(ed) && layerKind(ed) !== "pixels",
   },
 
   // Select
