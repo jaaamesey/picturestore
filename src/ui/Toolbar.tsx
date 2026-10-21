@@ -1,7 +1,8 @@
-import { For, Show, createSignal, onSettled, useContext } from "solid-js";
+import { For, Show, createSignal, useContext } from "solid-js";
 import { toHex } from "../core/color";
 import { TOOL_GROUPS, type ToolInfo } from "../editor/tools";
 import { ColorPicker } from "./ColorPicker";
+import { Popover } from "./Popover";
 import { AppContext } from "./context";
 import { IconButton } from "./controls";
 import { Icon } from "./icons";
@@ -25,8 +26,10 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
     editor.setTool(t.id);
     props.onOpen(false);
   };
+  let group!: HTMLDivElement;
   return (
     <div
+      ref={group}
       class="relative"
       onContextMenu={(e) => {
         e.preventDefault();
@@ -66,8 +69,8 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
         {/* Photoshop's flyout marker. */}
         <span class="pointer-events-none absolute right-0.5 bottom-0.5 size-0 border-t-[3px] border-l-[3px] border-t-transparent border-l-transparent border-r-[3px] border-b-[3px] border-r-fg/60 border-b-fg/60" />
       </Show>
-      <Show when={props.open}>
-        <div class="absolute top-0 left-full z-50 ml-1 min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl" role="menu" data-testid="tool-flyout">
+      <Popover open={props.open} onClose={() => props.onOpen(false)} trigger={() => group} class="top-0 left-full ml-1">
+        <div class="min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl" role="menu" data-testid="tool-flyout">
           <For each={props.tools}>
             {(t) => (
               <button
@@ -86,7 +89,7 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
             )}
           </For>
         </div>
-      </Show>
+      </Popover>
     </div>
   );
 }
@@ -95,18 +98,10 @@ export function Toolbar() {
   const { editor } = useContext(AppContext);
   const [picking, setPicking] = createSignal<"foreground" | "background" | null>(null);
   const [flyout, setFlyout] = createSignal<string | null>(null);
-  let bar!: HTMLDivElement;
-
-  onSettled(() => {
-    const close = (e: Event) => {
-      if (!bar.querySelector("[data-testid=tool-flyout]")?.contains(e.target as Node)) setFlyout(null);
-    };
-    window.addEventListener("pointerdown", close, { capture: true });
-    return () => window.removeEventListener("pointerdown", close, { capture: true });
-  });
+  let swatches!: HTMLDivElement;
 
   return (
-    <div ref={bar} class="relative flex w-10 flex-col items-center gap-0.5 border-r border-line bg-panel py-1.5" data-testid="toolbar">
+    <div class="relative flex w-10 flex-col items-center gap-0.5 border-r border-line bg-panel py-1.5" data-testid="toolbar">
       <For each={TOOL_GROUPS}>
         {(group) => (
           <ToolGroup
@@ -117,7 +112,7 @@ export function Toolbar() {
         )}
       </For>
 
-      <div class="relative mt-3 size-9">
+      <div ref={swatches} class="relative mt-3 size-9">
         <button
           type="button"
           title="Background colour"
@@ -150,18 +145,19 @@ export function Toolbar() {
         </button>
       </div>
 
-      <Show when={picking()} keyed>
-        {(which) => (
-          <div class="absolute top-40 left-full ml-1">
+      {/* The swatches are its trigger: clicking the other one switches what's being picked. */}
+      <Popover open={picking() !== null} onClose={() => setPicking(null)} trigger={() => swatches} class="top-40 left-full ml-1" testId="color-popover">
+        <Show when={picking()} keyed>
+          {(which) => (
             <ColorPicker
               title={which === "foreground" ? "Foreground colour" : "Background colour"}
               initial={which === "foreground" ? editor.foreground() : editor.background()}
               onChange={(c) => (which === "foreground" ? editor.setForeground(c) : editor.setBackground(c))}
               onClose={() => setPicking(null)}
             />
-          </div>
-        )}
-      </Show>
+          )}
+        </Show>
+      </Popover>
     </div>
   );
 }

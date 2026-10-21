@@ -1,5 +1,6 @@
 import { Show, createSignal, useContext } from "solid-js";
 import { AppContext } from "./context";
+import { Popover } from "./Popover";
 
 /**
  * Status-bar warning when memory is constrained: what's been given up, and
@@ -8,6 +9,7 @@ import { AppContext } from "./context";
 export function MemoryIndicator() {
   const { editor, shell } = useContext(AppContext);
   const [open, setOpen] = createSignal(false);
+  let button!: HTMLButtonElement;
   const m = () => editor.memory();
   const constrained = () => m().ram !== "ok" || m().gpuLevel > 0;
   return (
@@ -15,6 +17,7 @@ export function MemoryIndicator() {
       {/* Keep clicks from reaching the canvas's tools. */}
       <span class="pointer-events-auto relative" onPointerDown={(e) => e.stopPropagation()}>
         <button
+          ref={button}
           type="button"
           data-testid="memory-indicator"
           data-ram={m().ram}
@@ -24,8 +27,8 @@ export function MemoryIndicator() {
         >
           ⚠ Memory constrained
         </button>
-        <Show when={open()}>
-          <div class="absolute bottom-full left-0 mb-1 w-80 space-y-2 rounded-sm border border-line bg-panel-2 p-3 text-fg shadow-xl" data-testid="memory-details">
+        <Popover open={open()} onClose={() => setOpen(false)} trigger={() => button} class="bottom-full left-0 mb-1">
+          <div class="w-80 space-y-2 rounded-sm border border-line bg-panel-2 p-3 text-fg shadow-xl" data-testid="memory-details">
             <Show when={m().gpuLevel > 0}>
               <p>
                 GPU memory is low, so the canvas is drawn at 1/{1 << m().gpuLevel} resolution. Your document is unaffected, and
@@ -57,7 +60,7 @@ export function MemoryIndicator() {
               </button>
             </div>
           </div>
-        </Show>
+        </Popover>
       </span>
     </Show>
   );

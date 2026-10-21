@@ -38,7 +38,7 @@ test("shape tools draw live shape layers; options edit the selected shape", asyn
 
   // Fill: none, with an outside stroke.
   await page.getByTestId("shape-fill").click();
-  await page.getByTestId("shape-fill-none").click();
+  await page.getByTestId("shape-fill-popover").getByTestId("color-none").click();
   await expect.poll(() => cpuPixel(page, 100, 80)).toEqual([255, 255, 255, 255]);
   await page.getByTestId("shape-stroke").click();
   await page.getByTestId("hex-input").fill("0000ff");

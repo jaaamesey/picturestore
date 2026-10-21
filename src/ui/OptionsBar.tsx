@@ -6,6 +6,7 @@ import type { StrokeAlign } from "../core/shape";
 import { SHAPE_TOOLS } from "../editor/tools";
 import type { ShapeSettings } from "../editor/types";
 import { ColorPicker } from "./ColorPicker";
+import { Popover } from "./Popover";
 import type { SelectionMode } from "../core/selection";
 import type { Filter } from "../core/rasterize";
 import { locatorPoint, numeric, withNumeric, type NumericTransform, type TransformMode, type TransformState } from "../core/transform";
@@ -206,17 +207,20 @@ function TransformOptions(props: { state: TransformState; mode: TransformMode })
   );
 }
 
-/** A fill/stroke swatch: a colour, or Photoshop's red slash for "none". Opens a picker with a None option. */
+/** A fill/stroke swatch: a colour, or Photoshop's red slash for "none". Opens a picker with a No Color option. */
 function Swatch(props: { title: string; testId: string; color: RGB | null; onChange: (c: RGB | null) => void }) {
   const [open, setOpen] = createSignal(false);
+  let button!: HTMLButtonElement;
   return (
     <div class="relative flex items-center gap-1">
       <span class="text-dim">{props.title}:</span>
       <button
+        ref={button}
         type="button"
         title={props.title}
         data-testid={props.testId}
         data-color={props.color ? toHex(props.color) : "none"}
+        aria-expanded={open() ? "true" : "false"}
         class="relative size-5 overflow-hidden rounded-xs border border-white/50"
         style={{ "background-color": props.color ? toHex(props.color) : "white" }}
         onClick={() => setOpen((o) => !o)}
@@ -225,22 +229,18 @@ function Swatch(props: { title: string; testId: string; color: RGB | null; onCha
           <span class="absolute top-1/2 left-1/2 h-px w-7 -translate-x-1/2 -translate-y-1/2 -rotate-45 bg-red-600" />
         </Show>
       </button>
-      <Show when={open()}>
-        <div class="absolute top-full left-0 z-50 mt-1">
-          <ColorPicker title={props.title} initial={props.color ?? BLACK} onChange={(c) => props.onChange(c)} onClose={() => setOpen(false)} />
-          <button
-            type="button"
-            data-testid={`${props.testId}-none`}
-            class="absolute -top-0.5 right-12 z-50 rounded-sm bg-raised px-2 py-0.5 hover:brightness-125"
-            onClick={() => {
-              props.onChange(null);
-              setOpen(false);
-            }}
-          >
-            None
-          </button>
-        </div>
-      </Show>
+      <Popover open={open()} onClose={() => setOpen(false)} trigger={() => button} class="top-full left-0 mt-1" testId={`${props.testId}-popover`}>
+        <ColorPicker
+          title={props.title}
+          initial={props.color ?? BLACK}
+          onChange={(c) => props.onChange(c)}
+          onClose={() => setOpen(false)}
+          onNone={() => {
+            props.onChange(null);
+            setOpen(false);
+          }}
+        />
+      </Popover>
     </div>
   );
 }

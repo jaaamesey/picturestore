@@ -36,6 +36,7 @@ import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
 import { Icon } from "./icons";
 import { MenuBar, MenuList, type MenuItem } from "./MenuBar";
+import { Popover, dismissable } from "./Popover";
 import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
 import { HistoryPanel } from "./panels/HistoryPanel";
@@ -343,22 +344,10 @@ export function App() {
       if (onCanvas && editor.active()) void placeFiles(files);
       else void openFiles(files.map((file) => ({ file, handle: null })));
     };
-    // With a context menu open, Escape only closes the menu (it would otherwise cancel a transform).
-    const onEscape = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || !menu()) return;
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      setMenu(null);
-    };
-    const closeMenu = (e: PointerEvent) => {
-      if (!(e.target as Element | null)?.closest?.("[data-testid=context-menu]")) setMenu(null);
-    };
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       if (editor.sessions().some((s) => s.dirty())) e.preventDefault();
     };
 
-    window.addEventListener("keydown", onEscape, { capture: true });
-    window.addEventListener("pointerdown", closeMenu, { capture: true });
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("paste", onPaste);
     window.addEventListener("dragover", onDragOver);
@@ -366,8 +355,6 @@ export function App() {
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => {
       clearInterval(recoveryTimer);
-      window.removeEventListener("keydown", onEscape, { capture: true });
-      window.removeEventListener("pointerdown", closeMenu, { capture: true });
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("paste", onPaste);
       window.removeEventListener("dragover", onDragOver);
@@ -433,18 +420,17 @@ export function App() {
           }}
         />
       </Show>
-      <Show when={menu()}>
-        {(m) => (
-          <div
-            class="fixed z-50"
-            style={{ left: `${m().x}px`, top: `${m().y}px` }}
-            data-testid="context-menu"
-            onContextMenu={(e) => e.preventDefault()}
-          >
-            <MenuList items={m().items} onDone={() => setMenu(null)} />
-          </div>
-        )}
-      </Show>
+      <Popover
+        open={menu() !== null}
+        onClose={() => setMenu(null)}
+        fixed
+        style={{ left: `${menu()?.x ?? 0}px`, top: `${menu()?.y ?? 0}px` }}
+        testId="context-menu"
+      >
+        <div onContextMenu={(e) => e.preventDefault()}>
+          <MenuList items={menu()?.items ?? []} onDone={() => setMenu(null)} />
+        </div>
+      </Popover>
       <Show when={prefsPane()} keyed>
         {(pane) => <PreferencesDialog pane={pane} onClose={() => setPrefsPane(null)} />}
       </Show>
@@ -484,13 +470,17 @@ export function App() {
 function ConfirmDialog(props: { message: string; onAnswer: (ok: boolean) => void }) {
   onSettled(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Enter" && e.key !== "Escape") return;
+      if (e.key !== "Enter") return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      props.onAnswer(e.key === "Enter");
+      props.onAnswer(true);
     };
     window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
+    const remove = dismissable(() => props.onAnswer(false));
+    return () => {
+      remove();
+      window.removeEventListener("keydown", onKey, { capture: true });
+    };
   });
   return (
     <div class="fixed inset-0 z-50 grid place-items-center bg-black/40" data-testid="confirm-dialog">

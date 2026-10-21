@@ -86,8 +86,7 @@ test("the Image Size preview shows the result at 100%, follows the settings, and
   const at = (x: number, y: number) =>
     preview.evaluate((c: HTMLCanvasElement, [x, y]) => [...c.getContext("2d")!.getImageData(x, y, 1, 1).data], [x, y]);
   // A 220 px window on the middle of the image: the square spans 90–130 of it.
-  await expect.poll(() => at(100, 100)).toEqual([255, 0, 0, 255]);
-  expect(await at(140, 110)).toEqual([255, 255, 255, 255]);
+  await expect.poll(async () => [await at(100, 100), await at(140, 110)]).toEqual([[255, 0, 0, 255], [255, 255, 255, 255]]);
 
   // At 200% the square is 80 px, 70–150 of the window: the preview catches up.
   await page.getByTestId("image-size-width-unit").selectOption("percent");
@@ -101,6 +100,6 @@ test("the Image Size preview shows the result at 100%, follows the settings, and
   await page.mouse.down();
   await page.mouse.move(box.x + 170, box.y + 110, { steps: 4 });
   await page.mouse.up();
-  await expect.poll(() => at(190, 110)).toEqual([255, 0, 0, 255]);
-  expect(await at(120, 110)).toEqual([255, 255, 255, 255]);
+  // (Intermediate previews may land while dragging: wait for the final one as a whole.)
+  await expect.poll(async () => [await at(190, 110), await at(120, 110)]).toEqual([[255, 0, 0, 255], [255, 255, 255, 255]]);
 });

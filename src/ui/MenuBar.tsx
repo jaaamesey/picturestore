@@ -1,6 +1,7 @@
-import { For, Show, createSignal, onSettled, useContext } from "solid-js";
+import { For, createSignal, useContext } from "solid-js";
 import { command, formatShortcut, isEnabled, runCommand, type CommandId } from "../editor/commands";
 import { AppContext, isMac } from "./context";
+import { Popover } from "./Popover";
 
 type MenuItem = CommandId | "-" | { readonly submenu: string; readonly items: readonly MenuItem[] };
 
@@ -108,11 +109,9 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
                 <span>{item.submenu}</span>
                 <span>▸</span>
               </div>
-              <Show when={openSub() === item.submenu}>
-                <div class="absolute top-0 left-full z-50 -mt-1">
-                  <MenuList items={item.items} onDone={props.onDone} />
-                </div>
-              </Show>
+              <Popover open={openSub() === item.submenu} onClose={() => setOpenSub(null)} class="top-0 left-full -mt-1">
+                <MenuList items={item.items} onDone={props.onDone} />
+              </Popover>
             </div>
           ) : (
             <button
@@ -138,15 +137,8 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
 
 export function MenuBar() {
   const [open, setOpen] = createSignal<string | null>(null);
+  // The whole bar is each menu's trigger: its titles switch between menus.
   let bar!: HTMLDivElement;
-
-  onSettled(() => {
-    const close = (e: Event) => {
-      if (!bar.contains(e.target as Node)) setOpen(null);
-    };
-    window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
-  });
 
   return (
     <div ref={bar} class="flex h-7 items-center border-b border-line bg-panel px-1" role="menubar">
@@ -163,11 +155,9 @@ export function MenuBar() {
             >
               {menu.title}
             </button>
-            <Show when={open() === menu.title}>
-              <div class="absolute top-full left-0 z-50">
-                <MenuList items={menu.items} onDone={() => setOpen(null)} />
-              </div>
-            </Show>
+            <Popover open={open() === menu.title} onClose={() => setOpen(null)} trigger={() => bar} class="top-full left-0">
+              <MenuList items={menu.items} onDone={() => setOpen(null)} />
+            </Popover>
           </div>
         )}
       </For>

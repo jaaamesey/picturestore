@@ -1,6 +1,7 @@
-import { For, createSignal } from "solid-js";
+import { For, createSignal, onSettled } from "solid-js";
 import type { NewDocumentOptions } from "../core/document";
 import { Button, NumberField } from "./controls";
+import { dismissable } from "./Popover";
 
 const PRESETS = [
   { name: "Full HD", w: 1920, h: 1080 },
@@ -29,13 +30,14 @@ export function NewDocumentDialog(props: { onCreate: (opts: NewDocumentOptions, 
       name().trim() || "Untitled",
     );
 
+  onSettled(() => dismissable(() => props.onClose()));
+
   return (
     <div
       class="fixed inset-0 z-50 grid place-items-center bg-black/50"
       onPointerDown={(e) => e.target === e.currentTarget && props.onClose()}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Escape") props.onClose();
         if (e.key === "Enter") create();
       }}
     >

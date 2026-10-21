@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onSettled, untrack } from "solid-js";
 import { rect, type Rect } from "../core/geometry";
 import { createLatest } from "./latest";
+import { Popover, dismissable } from "./Popover";
 import type { Filter } from "../core/rasterize";
 import {
   FIT_PRESETS,
@@ -66,6 +67,7 @@ export function ImageSizeDialog(props: {
   const [method, setMethod] = createSignal<MethodId>("automatic");
   const [scaleStyles, setScaleStyles] = createSignal(true);
   const [gear, setGear] = createSignal(false);
+  let gearButton!: HTMLButtonElement;
   const [preset, setPreset] = createSignal<string>("original");
   let canvas!: HTMLCanvasElement;
 
@@ -137,14 +139,15 @@ export function ImageSizeDialog(props: {
 
   onSettled(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-      else if (e.key === "Enter" && !(e.target instanceof HTMLSelectElement)) ok();
-      else return;
+      if (e.key !== "Enter" || e.target instanceof HTMLSelectElement) return;
       e.preventDefault();
       e.stopImmediatePropagation();
+      ok();
     };
     window.addEventListener("keydown", onKey, { capture: true });
+    const remove = dismissable(() => props.onClose());
     return () => {
+      remove();
       window.removeEventListener("keydown", onKey, { capture: true });
       previews.dispose();
     };
@@ -197,11 +200,18 @@ export function ImageSizeDialog(props: {
                 <Show when={state().width !== o.width || state().height !== o.height}> (was {formatSize(o.width, o.height)})</Show>
               </span>
             </span>
-            <button type="button" title="Settings" data-testid="image-size-gear" class="rounded-sm px-1.5 hover:bg-raised" onClick={() => setGear((g) => !g)}>
+            <button
+              ref={gearButton}
+              type="button"
+              title="Settings"
+              data-testid="image-size-gear"
+              class="rounded-sm px-1.5 hover:bg-raised"
+              onClick={() => setGear((g) => !g)}
+            >
               ⚙
             </button>
-            <Show when={gear()}>
-              <div class="absolute top-full right-0 z-10 mt-1 rounded-sm border border-line bg-panel-2 px-3 py-2 shadow-xl">
+            <Popover open={gear()} onClose={() => setGear(false)} trigger={() => gearButton} class="top-full right-0 mt-1">
+              <div class="rounded-sm border border-line bg-panel-2 px-3 py-2 shadow-xl">
                 <label class={["flex items-center gap-2", { "opacity-50": !state().constrain }]} title={state().constrain ? undefined : "Styles scale only when proportions are constrained"}>
                   <input
                     type="checkbox"
@@ -213,7 +223,7 @@ export function ImageSizeDialog(props: {
                   Scale Styles
                 </label>
               </div>
-            </Show>
+            </Popover>
           </div>
           <div class="flex items-center gap-2">
             <span class="text-dim">Dimensions:</span>

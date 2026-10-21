@@ -13,6 +13,7 @@ import {
 } from "../editor/preferences";
 import { AppContext } from "./context";
 import { Button, NumberField } from "./controls";
+import { dismissable } from "./Popover";
 
 const AVAILABLE = PREFERENCES_PANES.filter((p) => p.available);
 
@@ -57,14 +58,17 @@ export function PreferencesDialog(props: { pane: PreferencesPane; onClose: () =>
 
   onSettled(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-      else if (e.key === "Enter" && !(e.target instanceof HTMLButtonElement)) ok();
-      else return;
+      if (e.key !== "Enter" || e.target instanceof HTMLButtonElement) return;
       e.preventDefault();
       e.stopImmediatePropagation();
+      ok();
     };
     window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
+    const remove = dismissable(() => props.onClose());
+    return () => {
+      remove();
+      window.removeEventListener("keydown", onKey, { capture: true });
+    };
   });
 
   return (

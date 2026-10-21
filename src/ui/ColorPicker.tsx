@@ -1,9 +1,13 @@
-import { createSignal, untrack } from "solid-js";
+import { Show, createSignal, untrack } from "solid-js";
 import { hsvToRgb, parseHex, rgbToHsv, toHex, type HSV, type RGB } from "../core/color";
 import { Button } from "./controls";
 
-/** HSV picker: saturation/value square, hue strip and hex entry. Edits apply live. */
-export function ColorPicker(props: { title: string; initial: RGB; onChange: (c: RGB) => void; onClose: () => void }) {
+/**
+ * HSV picker: saturation/value square, hue strip and hex entry. Edits apply
+ * live. With `onNone`, it also offers "No Color" (a shape's fill or stroke).
+ * It's panel content: place it in a {@link Popover}.
+ */
+export function ColorPicker(props: { title: string; initial: RGB; onChange: (c: RGB) => void; onClose: () => void; onNone?: () => void }) {
   // Keep HSV as the source of truth so hue survives passing through greys.
   const [hsv, setHsv] = createSignal<HSV>(untrack(() => rgbToHsv(props.initial)));
   const rgb = () => hsvToRgb(hsv());
@@ -26,11 +30,7 @@ export function ColorPicker(props: { title: string; initial: RGB; onChange: (c: 
   };
 
   return (
-    <div
-      class="absolute z-50 w-64 rounded-sm border border-line bg-panel-2 p-3 shadow-2xl"
-      data-testid="color-picker"
-      onPointerDown={(e) => e.stopPropagation()}
-    >
+    <div class="w-64 rounded-sm border border-line bg-panel-2 p-3 shadow-2xl" data-testid="color-picker">
       <div class="mb-2 font-semibold">{props.title}</div>
       <div class="flex gap-2">
         <div
@@ -75,6 +75,21 @@ export function ColorPicker(props: { title: string; initial: RGB; onChange: (c: 
           </Button>
         </div>
       </div>
+      <Show when={props.onNone}>
+        {(none) => (
+          <button
+            type="button"
+            data-testid="color-none"
+            class="mt-2 flex w-full items-center gap-2 rounded-sm px-1 py-1 text-left hover:bg-raised"
+            onClick={() => none()()}
+          >
+            <span class="relative size-5 overflow-hidden rounded-xs border border-white/50 bg-white">
+              <span class="absolute top-1/2 left-1/2 h-px w-7 -translate-x-1/2 -translate-y-1/2 -rotate-45 bg-red-600" />
+            </span>
+            No Color
+          </button>
+        )}
+      </Show>
     </div>
   );
 }

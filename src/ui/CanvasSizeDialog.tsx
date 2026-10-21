@@ -1,6 +1,7 @@
 import { For, createSignal, onSettled, untrack } from "solid-js";
 import type { Anchor } from "../core/documentTransform";
 import { Button, NumberField } from "./controls";
+import { dismissable } from "./Popover";
 
 const ANCHORS: readonly Anchor[] = [0, 0.5, 1].flatMap((y) => [0, 0.5, 1].map((x) => ({ x, y }) as Anchor));
 const MAX = 300_000; // Photoshop's limit for PSB; the GPU shows larger documents at reduced quality
@@ -39,14 +40,17 @@ export function CanvasSizeDialog(props: {
 
   onSettled(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-      else if (e.key === "Enter") ok();
-      else return;
+      if (e.key !== "Enter") return;
       e.preventDefault();
       e.stopImmediatePropagation();
+      ok();
     };
     window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
+    const remove = dismissable(() => props.onClose());
+    return () => {
+      remove();
+      window.removeEventListener("keydown", onKey, { capture: true });
+    };
   });
 
   const arrow = (a: Anchor) => {
