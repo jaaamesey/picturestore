@@ -50,6 +50,11 @@ export interface ShapeSettings {
   readonly weight: number;
 }
 
+export type ShapeStroke = NonNullable<ShapeSettings["stroke"]>;
+
+/** A change to shape options; a stroke patch names only the stroke properties it changes (null removes the stroke). */
+export type ShapeOptionsPatch = Partial<Omit<ShapeSettings, "stroke">> & { readonly stroke?: Partial<ShapeStroke> | null };
+
 export interface TransformSettings {
   /** Move tool: show the bounding box and handles of the active layer/selection (Photoshop's default: on). */
   readonly showControls: boolean;

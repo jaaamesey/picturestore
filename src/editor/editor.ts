@@ -63,6 +63,7 @@ import type { TransformCommand } from "./tools/transform";
 import { createSnapper, guidePosition } from "./snapping";
 import { activeSnapTo, loadViewOptions, saveViewOptions, shown, type ViewOptions } from "./viewOptions";
 import type { SmartGuide } from "../core/snap";
+import type { ShapeOptionsPatch, ShapeStroke } from "./types";
 import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolKey, ToolSettings, Writable } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
 import { fitView, followRemap, nextZoomStep, placeAt, prevZoomStep, screenToDoc, zoomAt } from "./view";
@@ -145,6 +146,9 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
     markSaved: (doc) => setSaved(doc),
   };
 }
+
+/** A stroke's properties before any are chosen. */
+export const DEFAULT_STROKE: ShapeStroke = { color: BLACK, width: 3, align: "inside" };
 
 export const DEFAULT_SETTINGS: ToolSettings = {
   transform: { showControls: true, link: true, showReference: false, interpolation: "bicubic" },
@@ -699,27 +703,51 @@ export function createEditor() {
      * (dragging a colour) collapse into the latest, which always lands, and
      * consecutive changes coalesce into one history step.
      */
-    function setShapeOptions(patch: Partial<ShapeSettings>) {
-      const next = { ...snapshot(settings).shape, ...patch };
-      setSettings((st) => void Object.assign(st.shape, patch));
+    /**
+     * Shape options (the options bar). With a shape layer selected and a
+     * shape tool active they edit the layer, as in Photoshop. Edits arrive
+     * faster than they're rasterized, so each builds on the latest one asked
+     * for, not on what's been committed (or rendered in the options bar) so
+     * far; a stroke patch changes only the stroke properties it names.
+     */
+    function setShapeOptions(patch: ShapeOptionsPatch) {
       const s = active();
       const l = s && activeLayer(s.doc());
-      if (!s || !l || l.content.kind !== "shape" || !SHAPE_TOOLS.includes(currentTool)) return;
-      const c = l.content;
-      const style = "fill" in patch || "stroke" in patch ? shapeStyle(next, foreground()) : c.style;
+      const editing = !!s && !!l && l.content.kind === "shape" && SHAPE_TOOLS.includes(currentTool);
+      const c = editing ? latestShape(s!, l!) : null;
+      const { stroke: strokePatch, ...rest } = patch;
+      const baseStroke = c ? c.style.stroke : snapshot(settings).shape.stroke;
+      const resolved: Partial<ShapeSettings> =
+        strokePatch === undefined ? rest : { ...rest, stroke: strokePatch && { ...(baseStroke ?? DEFAULT_STROKE), ...strokePatch } };
+      const next = { ...snapshot(settings).shape, ...resolved };
+      setSettings((st) => void Object.assign(st.shape, resolved));
+      if (!c) return;
+      const style =
+        "fill" in patch || "stroke" in resolved
+          ? { fill: "fill" in patch ? shapeStyle(next, foreground()).fill : c.style.fill, stroke: "stroke" in resolved ? next.stroke : c.style.stroke }
+          : c.style;
       const g = c.geometry;
       const geometry =
         (g.kind === "rectangle" && "radius" in patch) || (g.kind === "polygon" && ("sides" in patch || "starRatio" in patch))
           ? shapeGeometry(g.kind as ShapeToolId, next)
           : g;
       if (style === c.style && geometry === g) return;
-      shapeEdit = { s, id: l.id, content: { ...c, style, geometry } };
-      s.setPreview(updateLayer(s.doc(), l.id, { content: shapeEdit.content }));
+      shapeEdit = { s: s!, id: l!.id, content: { ...c, style, geometry } };
+      requestedShape = shapeEdit;
+      s!.setPreview(updateLayer(s!.doc(), l!.id, { content: shapeEdit.content }));
       renderRequested();
       if (pending === 0) runShapeEdit();
     }
 
-    let shapeEdit: { s: SessionInternals; id: string; content: Extract<LayerContent, { kind: "shape" }> } | null = null;
+    type ShapeEdit = { s: SessionInternals; id: string; content: Extract<LayerContent, { kind: "shape" }> };
+    let shapeEdit: ShapeEdit | null = null;
+    /** The last shape edit asked for: while edits are queued or rasterizing, the next builds on it. */
+    let requestedShape: ShapeEdit | null = null;
+    const latestShape = (s: SessionInternals, l: Layer) => {
+      const inFlight = shapeEdit !== null || pending > 0;
+      const r = requestedShape;
+      return inFlight && r && r.s === s && r.id === l.id ? r.content : (l.content as ShapeEdit["content"]);
+    };
 
     function runShapeEdit() {
       const e = shapeEdit;

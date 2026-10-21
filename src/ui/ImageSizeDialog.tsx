@@ -27,7 +27,7 @@ import {
   type ResolutionUnit,
   type SizeState,
 } from "../editor/imageSize";
-import { Button } from "./controls";
+import { Button, Field } from "./controls";
 
 export interface ImageSizeResult {
   readonly width: number;
@@ -181,7 +181,7 @@ export function ImageSizeDialog(props: {
   );
 
   const field = (axis: "width" | "height", unit: () => LengthUnit, testId: string) => (
-    <input
+    <Field
       type="number"
       class="w-24 text-right"
       data-testid={testId}
@@ -320,7 +320,7 @@ export function ImageSizeDialog(props: {
           </div>
           <div class="flex items-center gap-2">
             <span class="w-20 text-dim">Resolution:</span>
-            <input
+            <Field
               type="number"
               class="w-24 text-right"
               data-testid="image-size-resolution"

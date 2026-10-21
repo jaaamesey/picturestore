@@ -4,7 +4,7 @@ import { BLACK, toHex, type RGB } from "../core/color";
 import { activeLayer } from "../core/document";
 import type { StrokeAlign } from "../core/shape";
 import { SHAPE_TOOLS } from "../editor/tools";
-import type { ShapeSettings } from "../editor/types";
+import type { ShapeOptionsPatch, ShapeSettings, ShapeStroke } from "../editor/types";
 import { ColorPicker } from "./ColorPicker";
 import { Popover } from "./Popover";
 import type { SelectionMode } from "../core/selection";
@@ -268,9 +268,9 @@ function ShapeOptions() {
     return g?.kind === "rectangle" ? g.radius : o().radius;
   };
   const stroke = () => (layer() ? layer()!.style.stroke : o().stroke);
-  const set = (patch: Partial<ShapeSettings>) => editor.setShapeOptions(patch);
-  const strokeWith = (patch: Partial<NonNullable<ShapeSettings["stroke"]>>) =>
-    set({ stroke: { ...(stroke() ?? { color: BLACK, width: 3, align: "inside" }), ...patch } });
+  const set = (patch: ShapeOptionsPatch) => editor.setShapeOptions(patch);
+  // Only the changed property: the editor applies it to the latest stroke (edits may still be in flight).
+  const strokeWith = (patch: Partial<ShapeStroke>) => set({ stroke: patch });
   const tool = () => editor.tool();
   return (
     <>

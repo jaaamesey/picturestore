@@ -1,6 +1,6 @@
 import { Show, createSignal, untrack } from "solid-js";
 import { hsvToRgb, parseHex, rgbToHsv, toHex, type HSV, type RGB } from "../core/color";
-import { Button } from "./controls";
+import { Button, Field } from "./controls";
 
 /**
  * HSV picker: saturation/value square, hue strip and hex entry. Edits apply
@@ -58,7 +58,7 @@ export function ColorPicker(props: { title: string; initial: RGB; onChange: (c: 
         <div class="size-7 rounded-sm border border-line" style={{ "background-color": toHex(rgb()) }} />
         <label class="flex items-center gap-1">
           <span class="text-dim">#</span>
-          <input
+          <Field
             class="w-20 font-mono"
             data-testid="hex-input"
             value={toHex(rgb()).slice(1)}

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { cpuPixel, drag, expectHistory, newDocument, rectOnLayer, setForeground } from "./helpers";
+import { cpuPixel, drag, expectHistory, historyLabels, newDocument, rectOnLayer, setForeground } from "./helpers";
 
 type Ed = { active(): { doc(): { width: number; height: number; resolution?: number; layers: { content: { kind: string; style?: { stroke: { width: number } | null }; placement?: { quad: { x: number; y: number }[] } } }[] } } };
 const doc = (page: Page) => page.evaluate(() => (window.__ps!.editor as Ed).active().doc());
@@ -87,7 +87,8 @@ test("Image Size scales pixels, shapes and their strokes together; without Resam
   await page.getByTestId("image-size-resolution").press("Tab");
   await expect(page.getByTestId("image-size-width")).toHaveValue("800");
   await page.getByTestId("image-size-ok").click();
-  await expectHistory(page, "Image Size");
+  // History already ends with the first Image Size: wait for the second.
+  await expect.poll(async () => (await historyLabels(page)).filter((l) => l === "Image Size").length).toBe(2);
   const after = await doc(page);
   expect([after.width, after.height, after.resolution]).toEqual([800, 600, 300]);
 });

@@ -1,5 +1,25 @@
 import type { JSX } from "@solidjs/web";
+import { createEffect, omit } from "solid-js";
 import { Icon, type IconName } from "./icons";
+
+/**
+ * An input showing `value` that never overwrites what's being typed: while
+ * it has focus the text is the user's until they commit it (change) and
+ * leave. Solid can apply an update late — one held back while an async
+ * value (a preview) settles — and a plain `value` binding would then wipe
+ * a half-typed entry.
+ */
+export function Field(props: Omit<JSX.InputHTMLAttributes<HTMLInputElement>, "value" | "onBlur"> & { value: string | number }) {
+  let el!: HTMLInputElement;
+  const rest = omit(props, "value");
+  createEffect(
+    () => String(props.value),
+    (v) => {
+      if (document.activeElement !== el) el.value = v;
+    },
+  );
+  return <input ref={el} {...rest} onBlur={() => (el.value = String(props.value))} />;
+}
 
 const clampTo = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
@@ -41,7 +61,7 @@ export function NumberField(props: {
       <span class="cursor-ew-resize text-dim" onPointerDown={scrub}>
         {props.label}:
       </span>
-      <input
+      <Field
         type="number"
         class="text-right"
         style={{ width: props.width ?? "3.5rem" }}

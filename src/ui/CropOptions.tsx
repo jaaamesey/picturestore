@@ -6,14 +6,14 @@ import { resolutionOf } from "../core/document";
 import type { CropSettings, PerspectiveCropSettings } from "../editor/types";
 import { ColorPicker } from "./ColorPicker";
 import { AppContext } from "./context";
-import { IconButton, NumberField, Separator } from "./controls";
+import { Field, IconButton, NumberField, Separator } from "./controls";
 import { Popover } from "./Popover";
 
 /** A text field for a crop length ("4 in", "1200 px", or a plain ratio term); blank means unset. */
 function LengthField(props: { label: string; testId: string; value: Length | null; ratio: boolean; onChange: (v: Length | null) => void }) {
   const text = () => (!props.value ? "" : props.ratio ? String(props.value.value) : formatLength(props.value.value, props.value.unit));
   return (
-    <input
+    <Field
       type="text"
       aria-label={props.label}
       placeholder={props.label}
@@ -67,7 +67,7 @@ function ResolutionField(props: { value: number | null; testId: string; onChange
   const shown = () => (props.value === null ? "" : String(Math.round((perCm() ? props.value / 2.54 : props.value) * 100) / 100));
   return (
     <div class="flex items-center gap-1">
-      <input
+      <Field
         type="text"
         aria-label="Resolution"
         placeholder="Resolution"
