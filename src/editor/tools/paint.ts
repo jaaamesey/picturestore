@@ -1,6 +1,7 @@
 import { beginStroke, type Stroke, type StrokePoint } from "../../core/brush";
 import { docRect, fillPixels, maskTone, withTargetPixels, type EditTarget } from "../../core/document";
 import { combine, magicWand } from "../../core/selection";
+import { maskValues } from "../../core/composite";
 import type { Tool, ToolEvent } from "../types";
 
 const point = (e: ToolEvent): StrokePoint => ({ x: e.x, y: e.y, pressure: e.pressure });
@@ -65,7 +66,8 @@ export const bucketTool: Tool = {
     if (!t || !t.layer.visible) return;
     const region = combine(
       doc.selection,
-      magicWand(t.pixels, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
+      // On a mask, similar values of the whole mask (not just what's been painted on it).
+      magicWand(t.mask ? maskValues(t.layer.mask!, docRect(doc)) : t.pixels, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
       doc.selection ? "intersect" : "replace",
     );
     if (!region) return;

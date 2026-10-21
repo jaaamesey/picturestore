@@ -52,6 +52,8 @@ export interface LayerMask {
   readonly enabled: boolean;
   /** Linked masks move and transform with their layer. */
   readonly linked: boolean;
+  /** Density [0, 1] (default 1, Properties ▸ Masks): how much the mask hides; at 0.5 its black hides half. */
+  readonly density?: number;
 }
 
 export const PIXELS: LayerContent = { kind: "pixels" };

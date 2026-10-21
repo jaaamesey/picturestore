@@ -4,7 +4,7 @@ import { PIXELS, type Doc, type Layer, type LayerMask } from "./document";
 import { EMPTY_RECT, isEmpty, rect, union, type Rect } from "./geometry";
 import { findLayer, hasPixels, isClipped, isGroup, locate, updateIn } from "./layers";
 import { pixelReader, pixelsFromImage, readSpans, storedBounds, tileWriter, writeSpans, type Pixels } from "./pixels";
-import type { Mask } from "./selection";
+import { toMask, type Mask } from "./selection";
 
 /**
  * The reference compositor: renders a layer tree the way Photoshop does,
@@ -63,6 +63,9 @@ export function maskCoverage(mask: LayerMask | null, band: Rect): Float32Array |
       cov[k] = (data[i] * a + bg * (255 - a)) / (255 * 255);
     }
   });
+  // Density scales how much it hides.
+  const d = mask.density ?? 1;
+  if (d < 1) for (let k = 0; k < cov.length; k++) cov[k] = 1 - d * (1 - cov[k]);
   return cov;
 }
 
@@ -352,4 +355,52 @@ export function layersBelow(layers: readonly Layer[], id: string): readonly Laye
     g = gp.parent;
   }
   return out;
+}
+
+/**
+ * A mask as stored values over `area`: its grey over its background,
+ * opaque — what pixel operations that read the mask's values (adjustments,
+ * the paint bucket, loading it as a selection) need, where painting can
+ * work on the sparse form.
+ */
+export function maskValues(mask: LayerMask, area: Rect): Pixels {
+  const bg = mask.background;
+  const out = new Uint8ClampedArray(area.w * area.h * 4);
+  for (let i = 0; i < out.length; i += 4) out.set([bg, bg, bg, 255], i);
+  readSpans(mask.pixels, area, (d, i, x, y, n) => {
+    for (let o = ((y - area.y) * area.w + (x - area.x)) * 4, end = i + n * 4; i < end; i += 4, o += 4) {
+      const a = d[i + 3];
+      const v = (d[i] * a + bg * (255 - a)) / 255;
+      out[o] = out[o + 1] = out[o + 2] = v;
+    }
+  });
+  return pixelsFromImage(area.w, area.h, out, area.x, area.y);
+}
+
+/**
+ * A mask's background once an adjustment has been applied to its values
+ * (with no selection): what the adjustment maps it to, when that's black
+ * or white (Invert swaps them); otherwise it's kept.
+ */
+export function adjustedBackground(mask: LayerMask, p: Program, selection: Mask | null): 0 | 255 {
+  if (selection) return mask.background;
+  const o = [0, 0, 0];
+  applyProgram(p, mask.background / 255, mask.background / 255, mask.background / 255, o);
+  const v = Math.round(o[0] * 255);
+  return v === 0 || v === 255 ? v : mask.background;
+}
+
+/**
+ * A selection from a layer's transparency, or from a mask's values
+ * (Ctrl-clicking a thumbnail in the Layers panel), within the canvas.
+ */
+export function selectionFrom(source: Pixels | LayerMask, width: number, height: number): Mask | null {
+  const area = rect(0, 0, width, height);
+  const isMask = "background" in source;
+  const pixels = isMask ? maskValues(source, area) : source;
+  const data = new Uint8Array(width * height);
+  readSpans(pixels, area, (d, i, x, y, n) => {
+    for (let o = y * width + x, end = i + n * 4; i < end; i += 4, o++) data[o] = isMask ? d[i] : d[i + 3];
+  });
+  return toMask(data, area, width, height);
 }

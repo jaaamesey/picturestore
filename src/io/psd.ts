@@ -45,7 +45,8 @@ function maskIn(c: PsdLayer): LayerMask | null {
   const background = (m.defaultColor ?? 0) >= 128 ? 255 : 0;
   const img = m.imageData;
   const pixels = img && img.width > 0 && img.height > 0 ? pixelsFromImage(img.width, img.height, opaqueGrey(to8bit(img)), m.left ?? 0, m.top ?? 0) : NO_PIXELS;
-  return { pixels, background, enabled: !m.disabled, linked: true };
+  const density = m.userMaskDensity;
+  return { pixels, background, enabled: !m.disabled, linked: true, ...(density !== undefined && density < 1 && { density }) };
 }
 
 const opaqueGrey = (d: Uint8ClampedArray) => {
@@ -56,7 +57,7 @@ const opaqueGrey = (d: Uint8ClampedArray) => {
 
 /** Our mask as a PSD layer mask: its stored part as opaque grey, the rest its default colour. */
 function maskOut(m: LayerMask): LayerMaskData {
-  const base: LayerMaskData = { defaultColor: m.background, disabled: !m.enabled };
+  const base: LayerMaskData = { defaultColor: m.background, disabled: !m.enabled, ...(m.density !== undefined && m.density < 1 && { userMaskDensity: m.density }) };
   const b = contentBounds(m.pixels);
   if (isEmpty(b)) return base;
   const data = readRect(m.pixels, b);

@@ -3,6 +3,7 @@ import { BLEND_MODES, type LayerBlendMode } from "../../core/blend";
 import { activeLayer, type Layer } from "../../core/document";
 import { hasPixels, isClipped, isGroup } from "../../core/layers";
 import { previewImage, type Pixels } from "../../core/pixels";
+import type { SelectionMode } from "../../core/selection";
 import { isEnabled } from "../../editor/commands";
 import { AppContext } from "../context";
 import { ADJUSTMENT_LAYER_MENU, LAYER_MENU } from "../MenuBar";
@@ -67,6 +68,9 @@ function rowsOf(layers: readonly Layer[], depth = 0): Row[] {
   }
   return out;
 }
+
+/** Ctrl-click: replace the selection; with Shift add to it, with Alt subtract, with both intersect. */
+const loadMode = (e: MouseEvent): SelectionMode => (e.shiftKey && e.altKey ? "intersect" : e.shiftKey ? "add" : e.altKey ? "subtract" : "replace");
 
 /** A frame around whichever of a layer's thumbnails edits go to. */
 const targetRing = (on: boolean) => (on ? "rounded-xs outline-2 outline-offset-1 outline-white" : "");
@@ -133,7 +137,19 @@ function LayerRow(props: {
           <div class={["relative", targetRing(props.active && !props.maskTargeted && !!layer().mask && hasPixels(layer()))]}>
             <Show
               when={layer().content.kind === "adjustment"}
-              fallback={<Thumbnail pixels={layer().pixels} width={props.width} height={props.height} />}
+              fallback={
+                <div
+                  data-testid="layer-thumbnail"
+                  title="Ctrl-click to load as a selection"
+                  onClick={(e) => {
+                    if (!(e.ctrlKey || e.metaKey)) return;
+                    e.stopPropagation();
+                    editor.loadSelection(layer().id, "layer", loadMode(e));
+                  }}
+                >
+                  <Thumbnail pixels={layer().pixels} width={props.width} height={props.height} />
+                </div>
+              }
             >
               <div class="grid shrink-0 place-items-center rounded-xs bg-raised text-fg" style={{ width: `${THUMB}px`, height: `${THUMB}px` }} title="Adjustment layer">
                 <Icon name="adjust" size={20} />
@@ -189,12 +205,15 @@ function LayerRow(props: {
             </button>
             <div
               class={["relative cursor-pointer", targetRing(props.active && (props.maskTargeted || !hasPixels(layer())))]}
-              title="Layer mask (Shift-click to disable)"
+              title="Layer mask (Alt-click to view, Shift-click to disable, Ctrl-click to load as a selection)"
               data-testid="mask-thumbnail"
               data-enabled={m().enabled ? "" : undefined}
               onClick={(e) => {
                 e.stopPropagation();
-                if (e.shiftKey) editor.setMaskProps(layer().id, { enabled: !m().enabled });
+                // As in Photoshop: Ctrl loads it as a selection, Alt shows it alone, Shift disables it.
+                if (e.ctrlKey || e.metaKey) editor.loadSelection(layer().id, "mask", loadMode(e));
+                else if (e.altKey) editor.toggleMaskView(layer().id);
+                else if (e.shiftKey) editor.setMaskProps(layer().id, { enabled: !m().enabled });
                 else editor.selectLayer(layer().id, true);
               }}
             >
@@ -333,7 +352,7 @@ export function LayersPanel() {
         <IconButton icon="plus" title="New layer" testId="new-layer" disabled={!doc()} onClick={() => editor.newLayer()} />
         <IconButton icon="copy" title="Duplicate layer" disabled={!doc()} onClick={() => editor.duplicateLayer()} />
         <IconButton icon="merge" title="Merge down" disabled={!doc()} onClick={() => editor.mergeDown()} />
-        <IconButton icon="trash" title="Delete layer" testId="delete-layer" disabled={!canDelete()} onClick={() => shell.deleteLayer()} />
+        <IconButton icon="trash" title="Delete layer" testId="delete-layer" disabled={!canDelete()} onClick={() => shell.deleteLayer(true)} />
       </footer>
     </section>
   );

@@ -1,5 +1,6 @@
 import { For, Show, createSignal, useContext } from "solid-js";
-import { toHex } from "../core/color";
+import { toHex, type RGB } from "../core/color";
+import { editTarget, maskTone } from "../core/document";
 import { TOOL_GROUPS, type ToolInfo } from "../editor/tools";
 import { ColorPicker } from "./ColorPicker";
 import { Popover } from "./Popover";
@@ -105,6 +106,12 @@ export function Toolbar() {
   const [picking, setPicking] = createSignal<"foreground" | "background" | null>(null);
   const [flyout, setFlyout] = createSignal<string | null>(null);
   let swatches!: HTMLDivElement;
+  // While a mask is the target, the swatches show the greys that will be painted (as in Photoshop).
+  const maskTargeted = () => {
+    const d = editor.active()?.doc();
+    return !!d && !!editTarget(d)?.mask;
+  };
+  const shown = (c: RGB) => (maskTargeted() ? maskTone(c) : c);
 
   return (
     <div class="relative flex w-10 flex-col items-center gap-0.5 border-r border-line bg-panel py-1.5" data-testid="toolbar">
@@ -118,13 +125,13 @@ export function Toolbar() {
         )}
       </For>
 
-      <div ref={swatches} class="relative mt-3 size-9">
+      <div ref={swatches} class="relative mt-3 size-9" data-mask-target={maskTargeted() ? "" : undefined}>
         <button
           type="button"
           title="Background colour"
           data-testid="bg-swatch"
           class="absolute right-0 bottom-0 size-6 rounded-xs border border-white/60 shadow"
-          style={{ "background-color": toHex(editor.background()) }}
+          style={{ "background-color": toHex(shown(editor.background())) }}
           onClick={() => setPicking("background")}
         />
         <button
@@ -132,7 +139,7 @@ export function Toolbar() {
           title="Foreground colour"
           data-testid="fg-swatch"
           class="absolute top-0 left-0 size-6 rounded-xs border border-white/60 shadow"
-          style={{ "background-color": toHex(editor.foreground()) }}
+          style={{ "background-color": toHex(shown(editor.foreground())) }}
           onClick={() => setPicking("foreground")}
         />
       </div>

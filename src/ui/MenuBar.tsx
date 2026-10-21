@@ -1,4 +1,4 @@
-import { For, createSignal, useContext } from "solid-js";
+import { For, Show, createSignal, useContext } from "solid-js";
 import { ADJUSTMENTS } from "../core/adjustments";
 import { command, formatShortcut, isEnabled, runCommand, type CommandId } from "../editor/commands";
 import { AppContext, isMac } from "./context";
@@ -165,6 +165,8 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
 export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void }) {
   const { editor, shell } = useContext(AppContext);
   const [openSub, setOpenSub] = createSignal<string | null>(null);
+  // A column for check marks only in menus that have checkable items, so every row lines up either way.
+  const checkable = () => props.items.some((i) => typeof i === "string" && i !== "-" && !!command(i).checked);
   return (
     <div class="min-w-56 rounded-sm border border-line bg-panel-2 py-1 shadow-xl" role="menu">
       <For each={props.items}>
@@ -174,10 +176,15 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
           ) : typeof item === "object" ? (
             <div class="relative" onPointerEnter={() => setOpenSub(item.submenu)} onPointerLeave={() => setOpenSub(null)}>
               <div role="menuitem" aria-haspopup="menu" class="flex justify-between px-4 py-1 hover:bg-accent hover:text-white">
-                <span>{item.submenu}</span>
+                <span class="flex items-center gap-1.5">
+                  <Show when={checkable()}>
+                    <span class="w-3" />
+                  </Show>
+                  {item.submenu}
+                </span>
                 <span>▸</span>
               </div>
-              <Popover open={openSub() === item.submenu} onClose={() => setOpenSub(null)} class="top-0 left-full -mt-1">
+              <Popover open={openSub() === item.submenu} onClose={() => setOpenSub(null)} class="top-0 left-full -mt-1" flip>
                 <MenuList items={item.items} onDone={props.onDone} />
               </Popover>
             </div>
@@ -195,7 +202,9 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
               }}
             >
               <span class="flex items-center gap-1.5">
-                <span class="w-3 text-center">{command(item).checked?.(editor) ? "✓" : ""}</span>
+                <Show when={checkable()}>
+                  <span class="w-3 text-center">{command(item).checked?.(editor) ? "✓" : ""}</span>
+                </Show>
                 {command(item).title?.(editor) ?? command(item).label}
               </span>
               <span class="text-dim">{command(item).shortcuts ? formatShortcut(command(item).shortcuts![0], isMac) : ""}</span>

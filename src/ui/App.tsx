@@ -1,5 +1,5 @@
 import { Errored, For, Loading, Show, createMemo, createSignal, onSettled, useContext } from "solid-js";
-import { flatten, sampleHistograms, type Histograms } from "../core/composite";
+import { flatten, maskValues, sampleHistograms, type Histograms } from "../core/composite";
 import { intersect, isEmpty, rect } from "../core/geometry";
 import { transformFloatingCpu } from "../core/raster";
 import { contentBounds, readRect, storedBounds } from "../core/pixels";
@@ -300,15 +300,23 @@ export function App() {
       const d = s?.doc();
       const t = d && editTarget(d);
       if (!s || !d || !t) return;
-      // The histogram of what's adjusted: the target's pixels (within the selection).
-      const area = d.selection ? intersect(d.selection.bounds, storedBounds(t.pixels)) : contentBounds(t.pixels);
-      const histogram = isEmpty(area) ? null : sampleHistograms((r) => readRect(t.pixels, r), area);
+      // The histogram of what's adjusted: the target's pixels (a mask's values), within the selection.
+      const values = t.mask ? maskValues(t.layer.mask!, rect(0, 0, d.width, d.height)) : t.pixels;
+      const area = d.selection ? intersect(d.selection.bounds, storedBounds(values)) : contentBounds(values);
+      const histogram = isEmpty(area) ? null : sampleHistograms((r) => readRect(values, r), area);
       setAdjusting({ session: s as DocumentSession, kind, histogram });
     },
-    async deleteLayer() {
+    async deleteLayer(fromPanel = false) {
       const d = editor.active()?.doc();
       const l = d && activeLayer(d);
       if (!l) return;
+      // The panel's trash with the mask targeted removes the mask, asking first whether to apply it (as Photoshop).
+      if (fromPanel && d.maskTargeted && l.mask) {
+        const options = l.content.kind === "pixels" ? ["Apply", "Delete"] : ["Delete"];
+        const i = await choose("Apply mask to layer before removing?", options);
+        if (i === null) return;
+        return options[i] === "Apply" ? editor.applyMask() : editor.deleteMask();
+      }
       if (l.content.kind !== "group" || l.content.layers.length === 0) return editor.deleteLayer();
       // Photoshop asks what to delete.
       const i = await choose("Delete the group and its contents, or the group only?", ["Group and Contents", "Group Only"]);

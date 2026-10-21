@@ -29,8 +29,12 @@ export interface Shell {
   newGuide(): void;
   /** Image ▸ Adjustments: the adjustment's dialog (with Preview), applied to the layer. */
   adjust(kind: AdjustmentKind): void;
-  /** Delete Layer; for a group, asks whether to delete its contents too, as Photoshop does. */
-  deleteLayer(): void;
+  /**
+   * Delete Layer; for a group, asks whether to delete its contents too, as
+   * Photoshop does. From the Layers panel's trash with the mask targeted, it
+   * removes the mask instead (asking whether to apply it).
+   */
+  deleteLayer(fromPanel?: boolean): void;
   /** Copy/Cut also put a PNG on the system clipboard; Paste reads it (or our own copy). */
   copy(merged: boolean): void;
   cut(): void;

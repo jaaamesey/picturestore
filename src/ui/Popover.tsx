@@ -26,6 +26,8 @@ export interface PopoverProps {
   readonly style?: JSX.CSSProperties;
   /** "fixed" for panels placed at viewport coordinates (context menus). */
   readonly fixed?: boolean;
+  /** A submenu beside its parent: one that would run off the right edge opens on the parent's left instead. */
+  readonly flip?: boolean;
   readonly testId?: string;
   readonly children: JSX.Element;
 }
@@ -63,9 +65,33 @@ export function dismissable(close: () => void, panel: HTMLElement | null = null)
   };
 }
 
+/** Space kept between a panel and the window's edge. */
+const MARGIN = 4;
+
+/**
+ * Moves a panel fully into the window: shifted back from the right and
+ * bottom edges (a submenu flips to its parent's other side instead), and
+ * scrolling if it's taller than the window.
+ */
+function keepOnScreen(panel: HTMLElement, flip: boolean) {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  if (panel.offsetHeight > vh - 2 * MARGIN) {
+    panel.style.maxHeight = `${vh - 2 * MARGIN}px`;
+    panel.style.overflowY = "auto";
+  }
+  const r = panel.getBoundingClientRect();
+  let dx = 0, dy = 0;
+  if (r.right > vw - MARGIN) dx = flip && panel.offsetParent ? -(r.width + panel.offsetParent.getBoundingClientRect().width) : vw - MARGIN - r.right;
+  if (r.left + dx < MARGIN) dx = MARGIN - r.left;
+  if (r.bottom > vh - MARGIN) dy = vh - MARGIN - r.bottom;
+  if (r.top + dy < MARGIN) dy = MARGIN - r.top;
+  if (dx || dy) panel.style.translate = `${dx}px ${dy}px`;
+}
+
 function Panel(props: PopoverProps) {
   let panel!: HTMLDivElement;
   onSettled(() => {
+    keepOnScreen(panel, !!props.flip);
     const remove = dismissable(() => props.onClose(), panel);
     const outside = (e: PointerEvent) => {
       const t = e.target as Node | null;

@@ -40,7 +40,7 @@ import {
   resolutionOf,
   type SmartSource,
 } from "../core/document";
-import { adjustPixels, applyMask, flatten, histogram, mergeDown } from "../core/composite";
+import { adjustPixels, adjustedBackground, applyMask, flatten, histogram, maskValues, mergeDown, selectionFrom } from "../core/composite";
 import { adjustmentLabel, compile, defaultAdjustment, equalizeCurve, type Adjustment, type AdjustmentKind, type Program } from "../core/adjustments";
 import type { LayerBlendMode } from "../core/blend";
 import { hasPixels, isClipped, isGroup, locate, walk, type Placement as LayerPlacement } from "../core/layers";
@@ -60,7 +60,7 @@ import {
   undo,
   type History,
 } from "../core/history";
-import { invertSelection, selectAll } from "../core/selection";
+import { combine, invertSelection, selectAll, type SelectionMode } from "../core/selection";
 import { intersect, isEmpty, rect, roundOut, translation, type Rect, type Vec2 } from "../core/geometry";
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
@@ -89,9 +89,12 @@ export interface DocumentSession {
   readonly history: Accessor<History>;
   /** Current history state. */
   readonly doc: Accessor<Doc>;
-  /** What's on screen: the preview while a tool is mid-operation, else `doc`. */
+  /** What's on screen: the preview while a tool is mid-operation, else `doc` (or, viewing a mask, the mask). */
   readonly displayed: Accessor<Doc>;
+  /** Floating pixels being transformed, as shown (a moving mask is shown as itself while it's viewed). */
   readonly floating: Accessor<FloatingLayer | null>;
+  /** Alt-clicking a mask thumbnail shows the active layer's mask alone, in grey, until it's clicked again. */
+  readonly maskView: Accessor<boolean>;
   readonly overlay: Accessor<Overlay | null>;
   /** Smart guides of the current drag's snap. */
   readonly smartGuides: Accessor<readonly SmartGuide[]>;
@@ -111,6 +114,7 @@ interface SessionInternals extends DocumentSession {
   setHistory(h: History | ((h: History) => History)): void;
   setPreview(d: Doc | null): void;
   setFloating(f: FloatingLayer | null): void;
+  setMaskView(on: boolean): void;
   setOverlay(o: Overlay | null): void;
   setSmartGuides(g: readonly SmartGuide[]): void;
   setView(v: View): void;
@@ -132,14 +136,26 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
   const [smartGuides, setSmartGuides] = createSignal<readonly SmartGuide[]>([]);
   const [view, setView] = createSignal<View>({ zoom: 1, panX: 0, panY: 0 });
   const [saved, setSaved] = createSignal<Doc | null>(doc);
+  const [maskView, setMaskView] = createSignal(false);
   const current = () => currentDoc(history());
+  const shown = createMemo(() => preview() ?? current());
+  const viewedMask = () => (maskView() ? activeLayer(shown())?.mask ?? null : null);
   return {
     id: `doc${++sessionCounter}`,
     name: nameSig,
     history,
     doc: current,
-    displayed: createMemo(() => preview() ?? current()),
-    floating,
+    displayed: createMemo(() => {
+      const d = shown();
+      const l = activeLayer(d);
+      return maskView() && l?.mask ? maskViewDoc(d, l.id, l.mask) : d;
+    }),
+    floating: createMemo(() => {
+      const f = floating();
+      return f && viewedMask() ? { layerId: f.layerId, pixels: f.mask, mask: null } : f;
+    }),
+    maskView: () => !!viewedMask(),
+    setMaskView,
     overlay,
     smartGuides,
     view,
@@ -159,6 +175,26 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
     setView,
     markSaved: (doc) => setSaved(doc),
   };
+}
+
+/** Fills of a mask's background grey, cached per size (they're the whole canvas). */
+const backdrops = new Map<string, Pixels>();
+
+/**
+ * A document showing just a layer's mask, as Photoshop does when its
+ * thumbnail is Alt-clicked: its grey over its background. The mask is
+ * drawn as a layer with the active layer's id, so a mask being painted or
+ * moved shows live.
+ */
+function maskViewDoc(d: Doc, id: string, mask: LayerMask): Doc {
+  const key = `${d.width}x${d.height}:${mask.background}`;
+  let fill = backdrops.get(key);
+  if (!fill) {
+    const v = mask.background;
+    backdrops.set(key, (fill = fillPixels(NO_PIXELS, docRect(d), { r: v, g: v, b: v })));
+  }
+  const back = createLayer({ id: "mask-view-background", name: "mask background", pixels: fill });
+  return { ...d, layers: [back, createLayer({ name: "mask", pixels: mask.pixels, id })], activeLayerId: id };
 }
 
 /** A stroke's properties before any are chosen. */
@@ -795,13 +831,20 @@ export function createEditor() {
     }
 
     /** Applies an adjustment program to the edit target, within the selection, as one step (computed on the GPU). */
-    function applyProgram(label: string, program: (t: EditTarget, d: Doc) => Program) {
+    function applyProgram(label: string, program: (pixels: Pixels, d: Doc) => Program) {
       const s = active();
       const t = s && editableTarget(s, () => applyProgram(label, program));
       if (!s || !t) return;
       cancelTool();
       const d = s.doc();
-      commitAsync(s, label, adjust(t.pixels, program(t, d), d.selection).then((pixels) => withTargetPixels(d, t, pixels)));
+      // A mask is adjusted as all its values over the canvas, not just what's been painted on it.
+      const mask = t.mask ? t.layer.mask! : null;
+      const pixels = mask ? maskValues(mask, docRect(d)) : t.pixels;
+      const p = program(pixels, d);
+      const result = adjust(pixels, p, d.selection).then((out) =>
+        mask ? updateLayer(d, t.layer.id, { mask: { ...mask, pixels: out, background: adjustedBackground(mask, p, d.selection) } }) : withTargetPixels(d, t, out),
+      );
+      commitAsync(s, label, result);
     }
 
     /** Adjusts pixels on the GPU (the CPU reference without one). */
@@ -1135,7 +1178,11 @@ export function createEditor() {
         cancelTool();
         const s = active();
         const d = s?.doc();
-        if (!s || !d || (d.activeLayerId === id && !!d.maskTargeted === mask)) return;
+        if (!s || !d) return;
+        // Clicking a thumbnail ends viewing the mask, as in Photoshop.
+        s.setMaskView(false);
+        renderRequested();
+        if (d.activeLayerId === id && !!d.maskTargeted === mask) return;
         s.setHistory((h) => replaceCurrent(h, { ...currentDoc(h), activeLayerId: id, maskTargeted: mask }));
       }),
       setLayerProps: whenIdle((id: string, patch: Partial<Pick<Layer, "name" | "visible" | "opacity" | "blendMode">> & { blendMode?: LayerBlendMode }) => {
@@ -1212,12 +1259,38 @@ export function createEditor() {
           return { ...updateLayer(d, l.id, { pixels: l.mask.enabled ? applyMask(l.pixels, l.mask) : l.pixels, mask: null }), maskTargeted: false };
         }),
       ),
-      /** Disable/Enable Layer Mask (Shift-click its thumbnail), and linking it to the layer. */
-      setMaskProps: whenIdle((id: string, patch: Partial<Pick<LayerMask, "enabled" | "linked">>) =>
-        edit("enabled" in patch ? (patch.enabled ? "Enable Layer Mask" : "Disable Layer Mask") : patch.linked ? "Link" : "Unlink", (d) => {
+      /** Alt-click a mask thumbnail: shows the mask alone (and targets it), or stops showing it. */
+      toggleMaskView: whenIdle((id: string) => {
+        const s = active();
+        const d = s?.doc();
+        if (!s || !d || !layerById(d, id)?.mask) return;
+        const on = !(s.maskView() && d.activeLayerId === id);
+        if (d.activeLayerId !== id || !d.maskTargeted) s.setHistory((h) => replaceCurrent(h, { ...currentDoc(h), activeLayerId: id, maskTargeted: true }));
+        s.setMaskView(on);
+        renderRequested();
+      }),
+      /**
+       * Ctrl-click a thumbnail: the layer's transparency, or its mask, as the
+       * selection; with Shift added to it, with Alt subtracted, with both intersected.
+       */
+      loadSelection: whenIdle((id: string, from: "layer" | "mask", mode: SelectionMode = "replace") =>
+        edit("Load Selection", (d) => {
           const l = layerById(d, id);
-          return l?.mask ? updateLayer(d, id, { mask: { ...l.mask, ...patch } }) : d;
+          if (!l || (from === "mask" ? !l.mask : !hasPixels(l))) return d;
+          const shape = selectionFrom(from === "mask" ? l.mask! : l.pixels, d.width, d.height);
+          return { ...d, selection: combine(d.selection, shape, mode) };
         }),
+      ),
+      /** Disable/Enable Layer Mask (Shift-click its thumbnail), and linking it to the layer. */
+      setMaskProps: whenIdle((id: string, patch: Partial<Pick<LayerMask, "enabled" | "linked" | "density">>) =>
+        edit(
+          "density" in patch ? "Mask Density" : "enabled" in patch ? (patch.enabled ? "Enable Layer Mask" : "Disable Layer Mask") : patch.linked ? "Link" : "Unlink",
+          (d) => {
+            const l = layerById(d, id);
+            return l?.mask ? updateLayer(d, id, { mask: { ...l.mask, ...patch } }) : d;
+          },
+          "density" in patch ? `density:${id}` : null,
+        ),
       ),
 
       // Adjustments
@@ -1264,8 +1337,8 @@ export function createEditor() {
         applyProgram("Desaturate", () => compile({ ...hs, master: { ...hs.master, saturation: -100 } }));
       }),
       /** Image ▸ Adjustments ▸ Equalize: spreads the target's values (within the selection) evenly over the range. */
-      equalize: whenIdle(() => applyProgram("Equalize", (t, d) => {
-        const c = equalizeCurve(histogram(t.pixels, d.selection));
+      equalize: whenIdle(() => applyProgram("Equalize", (pixels, d) => {
+        const c = equalizeCurve(histogram(pixels, d.selection));
         return { kind: "curves", r: c, g: c, b: c, luma: false, preserveLuminosity: false };
       })),
           mergeLabel: () => (active() ? mergeLabel(active()!.doc()) : null),

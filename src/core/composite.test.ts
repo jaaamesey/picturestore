@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultAdjustment, type Adjustment } from "./adjustments";
-import { adjustPixels, flatten, mergeDown, mergeGroup } from "./composite";
+import { adjustPixels, adjustedBackground, flatten, maskValues, mergeDown, mergeGroup, selectionFrom } from "./composite";
 import { compile } from "./adjustments";
 import { HIDE_ALL, REVEAL_ALL, createDocument, createGroup, createLayer, fillPixels, type Doc, type Layer } from "./document";
 import { rect } from "./geometry";
@@ -201,4 +201,32 @@ describe("adjustPixels", () => {
 
 it("composites a default document", () => {
   expect(px(createDocument({ width: W, height: 1 }), 0)).toEqual([255, 255, 255, 255]);
+});
+
+describe("layer masks' values", () => {
+  const painted = () => ({ ...REVEAL_ALL, pixels: fill(0, 0, 0, rect(0, 0, 1, 1)) });
+
+  it("inverting a mask inverts all of it, not just what's been painted", () => {
+    const mask = painted();
+    const p = compile({ kind: "invert" });
+    const inverted = { ...mask, pixels: adjustPixels(maskValues(mask, rect(0, 0, W, 1)), p, null), background: adjustedBackground(mask, p, null) };
+    const d = doc(blue(), green({ mask: inverted }));
+    expect(px(d, 0)).toEqual([0, 255, 0, 255]); // was hidden, now shown
+    expect(px(d, 1)).toEqual([0, 0, 255, 255]); // was shown, now hidden
+    expect(inverted.background).toBe(0);
+  });
+
+  it("Density lessens what a mask hides", () => {
+    const d = doc(blue(), green({ mask: { ...painted(), density: 0.5 } }));
+    expect(px(d, 0)).toEqual([0, 128, 128, 255]);
+    expect(px(d, 1)).toEqual([0, 255, 0, 255]);
+  });
+
+  it("loads a layer's transparency or a mask's values as a selection", () => {
+    const fromMask = selectionFrom(painted(), W, 1)!;
+    expect([...fromMask.data]).toEqual([255]);
+    expect(fromMask.bounds).toEqual(rect(1, 0, 1, 1));
+    const fromLayer = selectionFrom(fill(9, 9, 9, rect(0, 0, 1, 1)), W, 1)!;
+    expect(fromLayer.bounds).toEqual(rect(0, 0, 1, 1));
+  });
 });

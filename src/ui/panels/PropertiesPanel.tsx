@@ -4,7 +4,7 @@ import { flatten, layersBelow, sampleHistograms, type Histograms } from "../../c
 import { activeLayer, type Doc, type Layer } from "../../core/document";
 import { walk } from "../../core/layers";
 import { rect } from "../../core/geometry";
-import { AdjustmentEditor } from "../AdjustmentControls";
+import { AdjustmentEditor, Slider } from "../AdjustmentControls";
 import { Button } from "../controls";
 import { AppContext } from "../context";
 
@@ -44,7 +44,18 @@ export function PropertiesPanel() {
             <Show when={layer()?.mask && (doc()?.maskTargeted || layer()?.content.kind === "group")} fallback={<p class="text-dim">No properties</p>}>
               <div class="space-y-2" data-testid="mask-properties">
                 <div class="font-semibold">Layer Mask</div>
+                <Slider
+                  label="Density"
+                  value={Math.round((layer()!.mask!.density ?? 1) * 100)}
+                  min={0}
+                  max={100}
+                  suffix="%"
+                  onChange={(v) => editor.setMaskProps(layer()!.id, { density: v / 100 })}
+                />
                 <div class="flex flex-wrap gap-2">
+                  <Button testId="mask-invert" onClick={() => editor.applyAdjustment({ kind: "invert" })}>
+                    Invert
+                  </Button>
                   <Button onClick={() => editor.setMaskProps(layer()!.id, { enabled: !layer()!.mask!.enabled })}>{layer()!.mask!.enabled ? "Disable" : "Enable"}</Button>
                   <Show when={layer()!.content.kind === "pixels"}>
                     <Button onClick={() => editor.applyMask()}>Apply</Button>
