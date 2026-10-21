@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { For, Show, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createSignal } from "solid-js";
 import {
   HUE_RANGES,
   PHOTO_FILTERS,
@@ -27,113 +27,147 @@ import { Popover } from "./Popover";
  */
 export function AdjustmentEditor(props: { value: Adjustment; onChange: (a: Adjustment) => void; histogram?: Histograms | null }) {
   const set = <A extends Adjustment>(a: A, patch: Partial<A>) => props.onChange({ ...a, ...patch });
+  // Narrows to one kind of adjustment. Each kind's controls are built once and follow the settings
+  // through the accessor, so a control being dragged is never replaced under the pointer.
+  const is = <K extends Adjustment["kind"]>(k: K) => (props.value.kind === k ? (props.value as Extract<Adjustment, { kind: K }>) : false);
   return (
     <div class="space-y-2" data-testid="adjustment-editor" data-kind={props.value.kind}>
-      {(() => {
-        const a = props.value;
-        switch (a.kind) {
-          case "brightness-contrast":
-            return (
-              <>
-                <Slider label="Brightness" value={a.brightness} min={a.legacy ? -100 : -150} max={a.legacy ? 100 : 150} onChange={(v) => set(a, { brightness: v })} />
-                <Slider label="Contrast" value={a.contrast} min={a.legacy ? -100 : -50} max={100} onChange={(v) => set(a, { contrast: v })} />
-                <Check label="Use Legacy" checked={a.legacy} onChange={(v) => set(a, { legacy: v })} />
-              </>
-            );
-          case "levels":
-            return <LevelsEditor value={a} onChange={props.onChange} histogram={props.histogram} />;
-          case "curves":
-            return <CurvesEditor value={a} onChange={props.onChange} histogram={props.histogram} />;
-          case "exposure":
-            return (
-              <>
-                <Slider label="Exposure" value={a.exposure} min={-20} max={20} step={0.01} onChange={(v) => set(a, { exposure: v })} />
-                <Slider label="Offset" value={a.offset} min={-0.5} max={0.5} step={0.0001} onChange={(v) => set(a, { offset: v })} />
-                <Slider label="Gamma Correction" value={a.gamma} min={0.01} max={9.99} step={0.01} onChange={(v) => set(a, { gamma: v })} />
-              </>
-            );
-          case "vibrance":
-            return (
-              <>
-                <Slider label="Vibrance" value={a.vibrance} min={-100} max={100} onChange={(v) => set(a, { vibrance: v })} />
-                <Slider label="Saturation" value={a.saturation} min={-100} max={100} onChange={(v) => set(a, { saturation: v })} />
-              </>
-            );
-          case "hue-saturation":
-            return <HueSatEditor value={a} onChange={props.onChange} />;
-          case "color-balance":
-            return <ColorBalanceEditor value={a} onChange={props.onChange} />;
-          case "black-white":
-            return (
-              <>
-                <For keyed={false} each={["reds", "yellows", "greens", "cyans", "blues", "magentas"] as const}>
-                  {(k) => <Slider label={title(k())} value={a[k()]} min={-200} max={300} suffix="%" onChange={(v) => set(a, { [k()]: v })} />}
-                </For>
-                <div class="flex items-center gap-3">
-                  <Check label="Tint" checked={a.tint} onChange={(v) => set(a, { tint: v })} />
-                  <Swatch title="Tint Color" color={a.tintColor} onChange={(c) => set(a, { tintColor: c })} />
-                </div>
-              </>
-            );
-          case "photo-filter":
-            return (
-              <>
-                <label class="flex items-center gap-2">
-                  <span class="w-20 text-dim">Filter:</span>
-                  <select
-                    class="min-w-0 flex-1"
-                    data-testid="photo-filter-preset"
-                    value={PHOTO_FILTERS.find((f) => sameColor(f.color, a.color))?.name ?? ""}
-                    onChange={(e) => {
-                      const f = PHOTO_FILTERS.find((x) => x.name === e.currentTarget.value);
-                      if (f) set(a, { color: f.color });
-                    }}
-                  >
-                    <option value="" disabled>
-                      Custom
-                    </option>
-                    <For each={PHOTO_FILTERS}>{(f) => <option value={f.name}>{f.name}</option>}</For>
-                  </select>
-                  <Swatch title="Filter Color" color={a.color} onChange={(c) => set(a, { color: c })} />
-                </label>
-                <Slider label="Density" value={a.density} min={0} max={100} suffix="%" onChange={(v) => set(a, { density: v })} />
-                <Check label="Preserve Luminosity" checked={a.preserveLuminosity} onChange={(v) => set(a, { preserveLuminosity: v })} />
-              </>
-            );
-          case "channel-mixer":
-            return <ChannelMixerEditor value={a} onChange={props.onChange} />;
-          case "color-lookup":
-            return <ColorLookupEditor value={a} onChange={props.onChange} />;
-          case "invert":
-            return <p class="text-dim">Invert has no settings.</p>;
-          case "posterize":
-            return <Slider label="Levels" value={a.levels} min={2} max={255} onChange={(v) => set(a, { levels: v })} />;
-          case "threshold":
-            return (
-              <>
-                <HistogramView histogram={props.histogram?.luminosity} marks={[a.level]} />
-                <Slider label="Threshold Level" value={a.level} min={1} max={255} onChange={(v) => set(a, { level: v })} />
-              </>
-            );
-          case "gradient-map":
-            return <GradientMapEditor value={a} onChange={props.onChange} />;
-          case "selective-color":
-            return <SelectiveColorEditor value={a} onChange={props.onChange} />;
-        }
-      })()}
+      <Switch>
+        <Match when={is("brightness-contrast")}>
+          {(a) => (
+            <>
+              <Slider label="Brightness" value={a().brightness} min={a().legacy ? -100 : -150} max={a().legacy ? 100 : 150} onChange={(v) => set(a(), { brightness: v })} />
+              <Slider label="Contrast" value={a().contrast} min={a().legacy ? -100 : -50} max={100} onChange={(v) => set(a(), { contrast: v })} />
+              <Check label="Use Legacy" checked={a().legacy} onChange={(v) => set(a(), { legacy: v })} />
+            </>
+          )}
+        </Match>
+        <Match when={is("levels")}>
+          {(a) => <LevelsEditor value={a()} onChange={props.onChange} histogram={props.histogram} />}
+        </Match>
+        <Match when={is("curves")}>
+          {(a) => <CurvesEditor value={a()} onChange={props.onChange} histogram={props.histogram} />}
+        </Match>
+        <Match when={is("exposure")}>
+          {(a) => (
+            <>
+              <Slider label="Exposure" value={a().exposure} min={-20} max={20} step={0.01} onChange={(v) => set(a(), { exposure: v })} />
+              <Slider label="Offset" value={a().offset} min={-0.5} max={0.5} step={0.0001} onChange={(v) => set(a(), { offset: v })} />
+              <Slider label="Gamma Correction" value={a().gamma} min={0.01} max={9.99} step={0.01} onChange={(v) => set(a(), { gamma: v })} />
+            </>
+          )}
+        </Match>
+        <Match when={is("vibrance")}>
+          {(a) => (
+            <>
+              <Slider label="Vibrance" value={a().vibrance} min={-100} max={100} onChange={(v) => set(a(), { vibrance: v })} />
+              <Slider label="Saturation" value={a().saturation} min={-100} max={100} onChange={(v) => set(a(), { saturation: v })} />
+            </>
+          )}
+        </Match>
+        <Match when={is("hue-saturation")}>
+          {(a) => <HueSatEditor value={a()} onChange={props.onChange} />}
+        </Match>
+        <Match when={is("color-balance")}>
+          {(a) => <ColorBalanceEditor value={a()} onChange={props.onChange} />}
+        </Match>
+        <Match when={is("black-white")}>
+          {(a) => (
+            <>
+              <For keyed={false} each={["reds", "yellows", "greens", "cyans", "blues", "magentas"] as const}>
+                {(k) => <Slider label={title(k())} value={a()[k()]} min={-200} max={300} suffix="%" onChange={(v) => set(a(), { [k()]: v })} />}
+              </For>
+              <div class="flex items-center gap-3">
+                <Check label="Tint" checked={a().tint} onChange={(v) => set(a(), { tint: v })} />
+                <Swatch title="Tint Color" color={a().tintColor} onChange={(c) => set(a(), { tintColor: c })} />
+              </div>
+            </>
+          )}
+        </Match>
+        <Match when={is("photo-filter")}>
+          {(a) => (
+            <>
+              <label class="flex items-center gap-2">
+                <span class="w-20 text-dim">Filter:</span>
+                <select
+                  class="min-w-0 flex-1"
+                  data-testid="photo-filter-preset"
+                  value={PHOTO_FILTERS.find((f) => sameColor(f.color, a().color))?.name ?? ""}
+                  onChange={(e) => {
+                    const f = PHOTO_FILTERS.find((x) => x.name === e.currentTarget.value);
+                    if (f) set(a(), { color: f.color });
+                  }}
+                >
+                  <option value="" disabled>
+                    Custom
+                  </option>
+                  <For each={PHOTO_FILTERS}>{(f) => <option value={f.name}>{f.name}</option>}</For>
+                </select>
+                <Swatch title="Filter Color" color={a().color} onChange={(c) => set(a(), { color: c })} />
+              </label>
+              <Slider label="Density" value={a().density} min={0} max={100} suffix="%" onChange={(v) => set(a(), { density: v })} />
+              <Check label="Preserve Luminosity" checked={a().preserveLuminosity} onChange={(v) => set(a(), { preserveLuminosity: v })} />
+            </>
+          )}
+        </Match>
+        <Match when={is("channel-mixer")}>
+          {(a) => <ChannelMixerEditor value={a()} onChange={props.onChange} />}
+        </Match>
+        <Match when={is("color-lookup")}>
+          {(a) => <ColorLookupEditor value={a()} onChange={props.onChange} />}
+        </Match>
+        <Match when={is("invert")}>
+          <p class="text-dim">Invert has no settings.</p>
+        </Match>
+        <Match when={is("posterize")}>
+          {(a) => <Slider label="Levels" value={a().levels} min={2} max={255} onChange={(v) => set(a(), { levels: v })} />}
+        </Match>
+        <Match when={is("threshold")}>
+          {(a) => (
+            <>
+              <HistogramView histogram={props.histogram?.luminosity} marks={[a().level]} />
+              <Slider label="Threshold Level" value={a().level} min={1} max={255} onChange={(v) => set(a(), { level: v })} />
+            </>
+          )}
+        </Match>
+        <Match when={is("gradient-map")}>
+          {(a) => <GradientMapEditor value={a()} onChange={props.onChange} />}
+        </Match>
+        <Match when={is("selective-color")}>
+          {(a) => <SelectiveColorEditor value={a()} onChange={props.onChange} />}
+        </Match>
+      </Switch>
     </div>
   );
 }
 
-
 const title = (s: string) => s[0].toUpperCase() + s.slice(1);
+
+/** Slider tracks as Photoshop draws them. */
+const SPECTRUM = "linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)";
+const SPECTRUM_CENTRED = "linear-gradient(to right, #0ff, #00f, #f0f, #f00, #ff0, #0f0, #0ff)";
+const BALANCE = [
+  { label: "Cyan / Red", from: "#0ff", to: "#f00" },
+  { label: "Magenta / Green", from: "#f0f", to: "#0f0" },
+  { label: "Yellow / Blue", from: "#ff0", to: "#00f" },
+];
 const sameColor = (a: RGB, b: RGB) => a.r === b.r && a.g === b.g && a.b === b.b;
 const CHANNELS = ["rgb", "red", "green", "blue"] as const;
 type Channel = (typeof CHANNELS)[number];
 const CHANNEL_LABELS: Record<Channel, string> = { rgb: "RGB", red: "Red", green: "Green", blue: "Blue" };
 
 /** A labelled slider with a number field, as in Photoshop's adjustment panels. */
-export function Slider(props: { label: string; value: number; min: number; max: number; step?: number; suffix?: string; onChange: (v: number) => void }) {
+export function Slider(props: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  suffix?: string;
+  /** A CSS gradient along the track (Photoshop's hue spectrum, colour pairs…). */
+  track?: string;
+  onChange: (v: number) => void;
+}) {
   const commit = (v: number) => Number.isFinite(v) && props.onChange(Math.min(props.max, Math.max(props.min, v)));
   const id = `slider-${props.label.toLowerCase().replace(/[^a-z]+/g, "-")}`;
   return (
@@ -157,6 +191,7 @@ export function Slider(props: { label: string; value: number; min: number; max: 
       <input
         type="range"
         class="w-full"
+        style={props.track ? { "--track": props.track } : undefined}
         min={props.min}
         max={props.max}
         step={props.step ?? 1}
@@ -238,18 +273,76 @@ function LevelsEditor(props: { value: Extract<Adjustment, { kind: "levels" }>; o
   return (
     <>
       <Select label="Channel" value={channel()} options={CHANNELS} names={CHANNEL_LABELS} onChange={setChannel} testId="levels-channel" />
-      <HistogramView histogram={props.histogram?.[channel()]} marks={[c().inBlack, midtone(), c().inWhite]} />
+      <HistogramView histogram={props.histogram?.[channel()]} />
+      <Handles
+        testId="levels-input"
+        values={[c().inBlack, midtone(), c().inWhite]}
+        colors={["#000", "#888", "#fff"]}
+        onDrag={(i, v) => {
+          const { inBlack: b, inWhite: w } = c();
+          if (i === 0) set({ inBlack: Math.min(v, w - 2) });
+          else if (i === 2) set({ inWhite: Math.max(v, b + 2) });
+          else {
+            // Where the grey handle sits between black and white sets the gamma: left brightens, right darkens.
+            const f = Math.min(0.99, Math.max(0.01, (v - b) / (w - b)));
+            set({ gamma: Math.round(Math.min(9.99, Math.max(0.01, Math.log(f) / Math.log(0.5))) * 100) / 100 });
+          }
+        }}
+      />
       <div class="flex justify-between gap-1">
         <NumberBox label="Input black" value={c().inBlack} min={0} max={c().inWhite - 2} onChange={(v) => set({ inBlack: v })} />
         <NumberBox label="Gamma" value={c().gamma} min={0.01} max={9.99} step={0.01} onChange={(v) => set({ gamma: v })} />
         <NumberBox label="Input white" value={c().inWhite} min={c().inBlack + 2} max={255} onChange={(v) => set({ inWhite: v })} />
       </div>
       <div class="text-dim">Output Levels:</div>
+      <div class="h-3 rounded-xs border border-line" style={{ background: "linear-gradient(to right, #000, #fff)" }} />
+      <Handles testId="levels-output" values={[c().outBlack, c().outWhite]} colors={["#000", "#fff"]} onDrag={(i, v) => set(i === 0 ? { outBlack: v } : { outWhite: v })} />
       <div class="flex justify-between gap-1">
         <NumberBox label="Output black" value={c().outBlack} min={0} max={255} onChange={(v) => set({ outBlack: v })} />
         <NumberBox label="Output white" value={c().outWhite} min={0} max={255} onChange={(v) => set({ outWhite: v })} />
       </div>
     </>
+  );
+}
+
+/**
+ * Photoshop's triangle handles under a bar (Levels' input and output
+ * levels): each dragged along it, 0–255 left to right.
+ */
+function Handles(props: { values: readonly number[]; colors: readonly string[]; onDrag: (index: number, value: number) => void; testId: string }) {
+  let bar!: HTMLDivElement;
+  const drag = (i: number, e: PointerEvent) => {
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const move = (m: PointerEvent) => {
+      const r = bar.getBoundingClientRect();
+      props.onDrag(i, Math.round(Math.min(1, Math.max(0, (m.clientX - r.left) / r.width)) * 255));
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+  return (
+    <div ref={bar} class="relative h-3" data-testid={props.testId}>
+      {/* By position, not by value: a handle stays the same element while it's dragged. */}
+      <For keyed={false} each={props.values}>
+        {(v, i) => (
+          <svg
+            viewBox="0 0 10 9"
+            class="absolute top-0 h-3 w-3 -translate-x-1/2 cursor-ew-resize touch-none"
+            style={{ left: `${(v() / 255) * 100}%` }}
+            data-testid="handle"
+            onPointerDown={(e) => drag(i, e)}
+          >
+            <path d="M5 0 L10 9 L0 9 Z" fill={props.colors[i]} stroke="#999" stroke-width="1" />
+          </svg>
+        )}
+      </For>
+    </div>
   );
 }
 
@@ -386,9 +479,9 @@ function HueSatEditor(props: { value: Extract<Adjustment, { kind: "hue-saturatio
       <Show when={!a().colorize}>
         <Select label="Range" value={range()} options={["master", ...HUE_RANGES] as const} onChange={setRange} testId="hue-range" />
       </Show>
-      <Slider label="Hue" value={v().hue} min={a().colorize ? 0 : -180} max={a().colorize ? 360 : 180} onChange={(x) => set({ hue: x })} />
-      <Slider label="Saturation" value={v().saturation} min={a().colorize ? 0 : -100} max={100} onChange={(x) => set({ saturation: x })} />
-      <Slider label="Lightness" value={v().lightness} min={-100} max={100} onChange={(x) => set({ lightness: x })} />
+      <Slider label="Hue" value={v().hue} min={a().colorize ? 0 : -180} max={a().colorize ? 360 : 180} track={a().colorize ? SPECTRUM : SPECTRUM_CENTRED} onChange={(x) => set({ hue: x })} />
+      <Slider label="Saturation" value={v().saturation} min={a().colorize ? 0 : -100} max={100} track="linear-gradient(to right, #808080, #ff0000)" onChange={(x) => set({ saturation: x })} />
+      <Slider label="Lightness" value={v().lightness} min={-100} max={100} track="linear-gradient(to right, #000, #808080, #fff)" onChange={(x) => set({ lightness: x })} />
       <Check
         label="Colorize"
         checked={a().colorize}
@@ -409,8 +502,8 @@ function ColorBalanceEditor(props: { value: Extract<Adjustment, { kind: "color-b
   return (
     <>
       <Select label="Tone" value={tone()} options={["shadows", "midtones", "highlights"] as const} onChange={setTone} testId="balance-tone" />
-      <For keyed={false} each={["Cyan / Red", "Magenta / Green", "Yellow / Blue"]}>
-        {(label, i) => <Slider label={label()} value={v()[i]} min={-100} max={100} onChange={(x) => set(i, x)} />}
+      <For keyed={false} each={BALANCE}>
+        {(b, i) => <Slider label={b().label} value={v()[i]} min={-100} max={100} track={`linear-gradient(to right, ${b().from}, ${b().to})`} onChange={(x) => set(i, x)} />}
       </For>
       <Check label="Preserve Luminosity" checked={props.value.preserveLuminosity} onChange={(on) => props.onChange({ ...props.value, preserveLuminosity: on })} />
     </>
@@ -472,22 +565,23 @@ function GradientMapEditor(props: { value: Extract<Adjustment, { kind: "gradient
   return (
     <>
       <div class="h-6 rounded-xs border border-line" style={{ "background-image": preview() }} data-testid="gradient-preview" />
-      <For each={stops()}>
+      {/* By position: a stop's row (and its open colour picker) stays put while its colour changes. */}
+      <For keyed={false} each={stops()}>
         {(s, i) => (
           <div class="flex items-center gap-2">
-            <Swatch title="Stop Color" color={s.color} onChange={(c) => setStops(stops().map((x, j) => (j === i() ? { ...x, color: c } : x)))} />
+            <Swatch title="Stop Color" color={s().color} onChange={(c) => setStops(stops().map((x, j) => (j === i ? { ...x, color: c } : x)))} />
             <span class="text-dim">Location:</span>
             <Field
               type="number"
               class="w-14 text-right"
-              value={Math.round(s.location * 100)}
+              value={Math.round(s().location * 100)}
               min={0}
               max={100}
-              onChange={(e) => setStops(stops().map((x, j) => (j === i() ? { ...x, location: Math.min(1, Math.max(0, e.currentTarget.valueAsNumber / 100)) } : x)))}
+              onChange={(e) => setStops(stops().map((x, j) => (j === i ? { ...x, location: Math.min(1, Math.max(0, e.currentTarget.valueAsNumber / 100)) } : x)))}
               onKeyDown={(e) => e.stopPropagation()}
             />
             <span class="text-dim">%</span>
-            <button type="button" class="ml-auto text-dim hover:text-fg disabled:opacity-30" disabled={stops().length <= 2} onClick={() => setStops(stops().filter((_, j) => j !== i()))}>
+            <button type="button" class="ml-auto text-dim hover:text-fg disabled:opacity-30" disabled={stops().length <= 2} onClick={() => setStops(stops().filter((_, j) => j !== i))}>
               Delete
             </button>
           </div>

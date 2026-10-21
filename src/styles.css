@@ -32,8 +32,39 @@
   select {
     @apply bg-app border border-line rounded-sm px-1 py-0.5 text-fg outline-none focus:border-accent;
   }
+  /* Sliders as in Photoshop's panels: a thin track (which can carry a gradient) and a small round handle. */
   input[type="range"] {
-    @apply border-0 bg-transparent p-0 accent-accent;
+    @apply h-4 cursor-pointer appearance-none border-0 bg-transparent p-0;
+    --track: var(--color-raised);
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--track);
+  }
+  input[type="range"]::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--track);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    margin-top: -4px;
+    border-radius: 50%;
+    background: var(--color-fg);
+    border: 1px solid rgb(0 0 0 / 0.6);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--color-fg);
+    border: 1px solid rgb(0 0 0 / 0.6);
+  }
+  input[type="range"]:active::-webkit-slider-thumb {
+    background: white;
   }
   input[type="checkbox"] {
     @apply accent-accent;

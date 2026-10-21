@@ -59,6 +59,8 @@ test("while dragging, other rows slide aside to open the gap; Escape cancels and
   for (let i = 0; i < 2; i++) await page.getByTestId("new-layer").click();
   const row = (n: string) => page.locator(`[data-layer-name="${n}"]`);
   const names = () => page.getByTestId("layer-row").evaluateAll((rows) => rows.map((r) => r.getAttribute("data-layer-name")));
+  // New rows animate into place: measure once they've settled, or the press can land on another row.
+  await expect.poll(() => page.getByTestId("layer-row").evaluateAll((rows) => rows.flatMap((r) => r.getAnimations()).length)).toBe(0);
   const box = (await row("Background").boundingBox())!;
   await page.mouse.move(box.x + 60, box.y + box.height / 2);
   await page.mouse.down();
