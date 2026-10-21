@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onSettled, useContext } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onSettled, untrack, useContext } from "solid-js";
 import type { Vec2 } from "../core/geometry";
 import type { transformFloatingCpu } from "../core/raster";
 import type { readRect } from "../core/tiles";
@@ -9,6 +9,7 @@ import type { Overlay, ToolEvent } from "../editor/types";
 import { docToScreen, screenToDoc, zoomAt } from "../editor/view";
 import { createRenderer, type Renderer, type View } from "../gpu/renderer";
 import { AppContext } from "./context";
+import { MemoryIndicator } from "./MemoryIndicator";
 import { LAYER_MENU, SELECTION_MENU, TRANSFORM_MENU, type MenuItem } from "./MenuBar";
 
 declare global {
@@ -22,6 +23,8 @@ declare global {
       pixel?: (x: number, y: number) => number[];
       /** CPU reference implementations, for GPU parity tests. */
       reference?: { transformFloatingCpu: typeof transformFloatingCpu; readRect: typeof readRect };
+      /** Writes recovery information now, regardless of the interval. */
+      saveRecovery?: () => Promise<void>;
     };
   }
 }
@@ -131,7 +134,17 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       canvas.className = "absolute inset-0 h-full w-full";
       canvas.dataset.testid = "canvas";
       host.prepend(canvas);
-      const renderer = createRenderer(device, canvas, { readback });
+      // `?gpuAtlasPages=n` caps the tile atlas, to exercise GPU memory pressure.
+      const pages = Number(new URLSearchParams(location.search).get("gpuAtlasPages")) || undefined;
+      const renderer = createRenderer(device, canvas, {
+        readback,
+        maxAtlasPages: pages,
+        level: untrack(() => editor.memory().gpuLevel),
+        onLevelChange: (level) => {
+          editor.setGpuLevel(level);
+          needsRender = true;
+        },
+      });
       // Test hook: resolves once everything requested so far is on screen.
       const settled = async () => {
         while (needsRender) await new Promise(requestAnimationFrame);
@@ -140,6 +153,11 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       window.__ps = { ...window.__ps, editor, renderer, settled };
       editor.onRenderRequest(() => (needsRender = true));
       editor.setResampler(renderer.resample);
+      editor.onGpuReset(() => {
+        renderer.resetLevel();
+        editor.setGpuLevel(0);
+        needsRender = true;
+      });
       needsRender = true;
 
       let raf = 0;
@@ -400,6 +418,7 @@ function StatusBar(props: { hover: ToolEvent | null }) {
               </span>
             )}
           </Show>
+          <MemoryIndicator />
         </div>
       )}
     </Show>

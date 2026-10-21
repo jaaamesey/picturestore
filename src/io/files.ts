@@ -21,6 +21,14 @@ type WithoutId<T> = T extends unknown ? Omit<T, "id"> : never;
 function call(req: WithoutId<Request>): Promise<Doc | Blob> {
   if (!worker) {
     worker = new Worker(new URL("./io.worker.ts", import.meta.url), { type: "module" });
+    // A worker that dies (e.g. out of memory encoding a huge document) fails what it held, and is replaced on next use.
+    worker.onerror = (e) => {
+      e.preventDefault();
+      for (const p of pending.values()) p.reject(new Error("The file worker stopped unexpectedly (possibly out of memory)."));
+      pending.clear();
+      worker?.terminate();
+      worker = null;
+    };
     worker.onmessage = ({ data }: MessageEvent<Response>) => {
       const p = pending.get(data.id);
       pending.delete(data.id);

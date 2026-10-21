@@ -255,3 +255,44 @@ export function getPixel(tiles: TileMap, x: number, y: number): [number, number,
   const i = pixelIndex(x, y);
   return [t.data[i], t.data[i + 1], t.data[i + 2], t.data[i + 3]];
 }
+
+/**
+ * A tile at 1/2^level resolution: each output pixel is the alpha-weighted
+ * mean of its 2^level × 2^level block (so transparent pixels don't darken
+ * edges). For reduced-quality display under GPU memory pressure.
+ */
+export function downsampleTile(t: Tile, level: number): Uint8ClampedArray<ArrayBuffer> {
+  return downsample(t.data, TILE_SIZE, TILE_SIZE, level);
+}
+
+/** {@link downsampleTile} for any straight-RGBA image; partial blocks at the edges average what they cover. */
+export function downsample(src: Uint8ClampedArray, w: number, h: number, level: number): Uint8ClampedArray<ArrayBuffer> {
+  const k = 1 << level;
+  const ow = Math.ceil(w / k), oh = Math.ceil(h / k);
+  const out = new Uint8ClampedArray(ow * oh * 4);
+  for (let oy = 0; oy < oh; oy++) {
+    const y1 = Math.min(h, (oy + 1) * k);
+    for (let ox = 0; ox < ow; ox++) {
+      const x1 = Math.min(w, (ox + 1) * k);
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      for (let y = oy * k; y < y1; y++) {
+        for (let x = ox * k, i = (y * w + x) * 4; x < x1; x++, i += 4) {
+          const al = src[i + 3];
+          r += src[i] * al;
+          g += src[i + 1] * al;
+          b += src[i + 2] * al;
+          a += al;
+          n++;
+        }
+      }
+      const o = (oy * ow + ox) * 4;
+      if (a > 0) {
+        out[o] = r / a;
+        out[o + 1] = g / a;
+        out[o + 2] = b / a;
+        out[o + 3] = a / n;
+      }
+    }
+  }
+  return out;
+}

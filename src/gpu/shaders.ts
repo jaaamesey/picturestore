@@ -1,9 +1,8 @@
 import { BLEND_MODES } from "../core/blend";
 import { TILE_SIZE } from "../core/tiles";
 
-/** Tiles per atlas page side; a page is ATLAS_TILES² tiles. */
-export const ATLAS_TILES = 8;
-export const ATLAS_PAGE = ATLAS_TILES * TILE_SIZE;
+/** Atlas page side in texels: 8×8 full-resolution tiles, or more at reduced quality. */
+export const ATLAS_PAGE = 8 * TILE_SIZE;
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -105,11 +104,14 @@ ${FULLSCREEN_VS}
 
 /**
  * Layer compositing: one instanced quad per non-empty tile, sampling the
- * tile atlas. Normal-mode layers use fixed-function premultiplied "over"
+ * tile atlas. Tiles occupy `slot`² texels (256, or less at reduced quality),
+ * and the target is the accumulator at the same scale. Normal-mode layers use fixed-function premultiplied "over"
  * blending (fs_normal); other modes read a copy of the destination (fs_mode).
  * Layer pixels are straight RGBA8; the accumulator is premultiplied rgba16f.
  */
-export const TILES_WGSL = /* wgsl */ `
+export const tilesWgsl = (slot: number) => {
+  const perSide = ATLAS_PAGE / slot;
+  return /* wgsl */ `
 struct Draw { opacity: f32, mode: u32, docSize: vec2<f32> }
 @group(0) @binding(0) var<uniform> D: Draw;
 @group(0) @binding(1) var atlas: texture_2d_array<f32>;
@@ -125,12 +127,12 @@ struct VOut {
 
 @vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) tile: vec3<i32>) -> VOut {
   var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
-  let origin = tile.xy * ${TILE_SIZE};
-  let local = tile.z % ${ATLAS_TILES * ATLAS_TILES};
+  let origin = tile.xy * ${slot};
+  let local = tile.z % ${perSide * perSide};
   var o: VOut;
   o.origin = origin;
-  o.base = vec3<i32>((local % ${ATLAS_TILES}) * ${TILE_SIZE}, (local / ${ATLAS_TILES}) * ${TILE_SIZE}, tile.z / ${ATLAS_TILES * ATLAS_TILES});
-  let p = (vec2<f32>(origin) + corners[vi] * ${TILE_SIZE}.0) / D.docSize;
+  o.base = vec3<i32>((local % ${perSide}) * ${slot}, (local / ${perSide}) * ${slot}, tile.z / ${perSide * perSide});
+  let p = (vec2<f32>(origin) + corners[vi] * ${slot}.0) / D.docSize;
   o.pos = vec4<f32>(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
   return o;
 }
@@ -146,6 +148,7 @@ fn texel(v: VOut) -> vec4<f32> {
   return composite(D.mode, texel(v), textureLoad(dst, vec2<i32>(v.pos.xy), 0));
 }
 `;
+};
 
 /**
  * Floating pixels drawn through a mapping's mesh. Vertex positions are
@@ -276,6 +279,8 @@ struct View {
   hasSel: u32,
   lod: f32,
   workspace: vec4<f32>,
+  /** 1 when the composite is stored below document resolution (GPU memory pressure). */
+  reduced: u32,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var composite: texture_2d<f32>;
@@ -294,7 +299,7 @@ fn selected(doc: vec2<f32>) -> bool {
   if (any(doc < vec2<f32>(0.0)) || any(doc >= V.docSize)) { return V.workspace; }
 
   var c: vec4<f32>;
-  if (V.lod <= 0.0) {
+  if (V.lod <= 0.0 && V.reduced == 0u) {
     c = textureLoad(composite, vec2<i32>(doc), 0);
   } else {
     c = textureSampleLevel(composite, samp, doc / V.docSize, V.lod);

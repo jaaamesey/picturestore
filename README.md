@@ -54,7 +54,20 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   new document when none is open). Layer via Copy / Cut (Ctrl+J / Ctrl+Shift+J).
 - **Layers**: add, duplicate, delete, merge down, reorder (drag), rename, visibility, opacity and 20 blend
   modes; right-click a layer (or the canvas) for a context menu.
-- **History**: 50 steps within a memory budget (1 GB), plus a clickable History panel.
+- **History**: undo/redo with a clickable History panel, limited by History States (default 50) and Memory Usage.
+- **Preferences** (Ctrl+K, Edit ▸ Preferences), organised as Photoshop's: General (reset), File Handling (recovery
+  interval) and Performance (Memory Usage, History States, display quality). Kept in the browser.
+- **Running out of memory** is handled rather than fatal:
+  - *RAM*: open documents and their history share the Memory Usage budget; past it the oldest history states
+    are freed. If an allocation fails anyway, the operation is abandoned, undo history is cleared to free memory
+    and a message says so; documents are never discarded.
+  - *GPU*: if the tile atlas can't grow or a GPU allocation fails, the canvas is redrawn at 1/2, 1/4… resolution
+    (down to 1/16), hidden layers keep no GPU copy, and documents larger than the GPU's texture limit open
+    reduced. Commits are still full quality (GPU, or the CPU reference if the GPU can't). Repeated device loss
+    also steps quality down.
+  - A status-bar warning shows what's been given up, with "Retry full quality".
+  - *Recovery*: unsaved documents are written to browser storage (OPFS) every 10 minutes by default and offered
+    back on the next start, so a crashed or killed tab loses at most that long.
 - **PSD**: smart objects round-trip as placed layers with their embedded files (and custom warps); solid-colour
   shape layers round-trip as vector masks with fill and stroke.
 - **View**: zoom (Ctrl +/−/0/1, Ctrl/Alt+wheel about the cursor), pan (wheel, Space-drag, Hand tool).

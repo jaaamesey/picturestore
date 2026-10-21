@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { rect } from "./geometry";
 import {
-  EMPTY_TILES, TILE_SIZE, contentBounds, getPixel, readRect, tileWriter, tilesFromImage, tilesIn, translateTiles, writeRect,
+  EMPTY_TILES, TILE_SIZE, contentBounds, downsample, downsampleTile, getPixel, newTile, readRect, tileWriter, tilesFromImage, tilesIn, translateTiles, writeRect,
 } from "./tiles";
 
 const solid = (w: number, h: number, rgba: number[]) => {
@@ -53,5 +53,26 @@ describe("tiles", () => {
     const moved = translateTiles(tiles, TILE_SIZE, 0);
     expect(getPixel(moved, 5 + TILE_SIZE, 5)).toEqual([9, 9, 9, 255]);
     expect([...moved.values()][0]).toBe([...tiles.values()][0]); // shared, not copied
+  });
+});
+
+describe("downsample", () => {
+  it("alpha-weights colour so transparent pixels don't darken edges", () => {
+    // 2×2: one opaque red pixel, three transparent black ones.
+    const src = new Uint8ClampedArray([255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    expect([...downsample(src, 2, 2, 1)]).toEqual([255, 0, 0, 64]);
+  });
+
+  it("averages partial blocks at the edges over what they cover", () => {
+    const src = new Uint8ClampedArray(3 * 1 * 4).fill(200);
+    expect([...downsample(src, 3, 1, 1)]).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
+  });
+
+  it("reduces whole tiles", () => {
+    const t = newTile();
+    t.data.fill(255);
+    const d = downsampleTile(t, 2);
+    expect(d.length).toBe(64 * 64 * 4);
+    expect(d[0]).toBe(255);
   });
 });

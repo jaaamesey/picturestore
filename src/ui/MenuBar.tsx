@@ -66,6 +66,8 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "-",
       "edit.freeTransform",
       { submenu: "Transform", items: TRANSFORM_MENU },
+      "-",
+      { submenu: "Preferences", items: ["edit.preferences", "edit.preferences.fileHandling", "edit.preferences.performance"] },
     ],
   },
   {

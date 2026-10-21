@@ -1,6 +1,7 @@
 import { TOOLBAR } from "./tools";
 import type { Editor } from "./editor";
 import type { ToolId } from "./types";
+import type { PreferencesPane } from "./preferences";
 
 /** UI-level actions commands can trigger (dialogs, file pickers, downloads). */
 export interface Shell {
@@ -10,6 +11,8 @@ export interface Shell {
   save(): void;
   saveAs(): void;
   exportAs(format: "png" | "jpeg" | "webp"): void;
+  /** Edit ▸ Preferences, optionally opening a given pane. */
+  preferences(pane?: PreferencesPane): void;
   /** File ▸ Place Embedded: picks an image and places it as a smart object. */
   placeEmbedded(): void;
   /** Opens the active smart object's contents as a document. */
@@ -79,6 +82,9 @@ export const COMMANDS = {
     enabled: hasDoc,
   },
   "edit.clear": { label: "Clear", shortcuts: ["Delete", "Backspace"], run: (ed) => ed.clear(), enabled: hasDoc },
+  "edit.preferences": { label: "General…", shortcuts: ["Mod+K"], run: (_, s) => s.preferences("general") },
+  "edit.preferences.fileHandling": { label: "File Handling…", run: (_, s) => s.preferences("fileHandling") },
+  "edit.preferences.performance": { label: "Performance…", run: (_, s) => s.preferences("performance") },
   "edit.freeTransform": {
     label: "Free Transform",
     // Browsers reserve Ctrl+T, so Alt+Ctrl+T is the primary binding (as in Photopea).

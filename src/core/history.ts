@@ -65,20 +65,37 @@ export const createHistory = (doc: Doc, label = "Open"): History => ({
 
 export const currentDoc = (h: History): Doc => h.entries[h.index].doc;
 
+/** The new oldest state owns everything it references. */
+const rebase = (entries: HistoryEntry[]): HistoryEntry[] => {
+  entries[0] = { ...entries[0], bytes: retainedBytes(entries[0].doc, null) };
+  return entries;
+};
+
 /** Drops the oldest entries until within limits, always keeping at least one undoable step. */
 function trim(entries: HistoryEntry[], index: number, limits: HistoryLimits): History {
   let total = entries.reduce((sum, e) => sum + e.bytes, 0);
   let drop = 0;
-  while (entries.length - drop > 2 && (entries.length - drop > limits.steps || total > limits.bytes)) {
+  while (entries.length - drop > 2 && drop < index && (entries.length - drop > limits.steps || total > limits.bytes)) {
     total -= entries[drop].bytes;
     drop++;
   }
   if (drop === 0) return { entries, index };
-  // The new oldest state now owns everything it references.
-  const kept = entries.slice(drop);
-  kept[0] = { ...kept[0], bytes: retainedBytes(kept[0].doc, null) };
-  return { entries: kept, index: index - drop };
+  return { entries: rebase(entries.slice(drop)), index: index - drop };
 }
+
+/**
+ * Frees one state to relieve memory pressure: the oldest undo state, else
+ * the furthest redo state. The current state is never dropped. Null when
+ * only the current state is left.
+ */
+export function dropOne(h: History): History | null {
+  if (h.index > 0) return { entries: rebase(h.entries.slice(1)), index: h.index - 1 };
+  if (h.entries.length > 1) return { entries: h.entries.slice(0, -1), index: h.index };
+  return null;
+}
+
+/** Applies a (possibly lowered) step limit, as when History States is changed in Preferences. */
+export const limitSteps = (h: History, steps: number): History => trim([...h.entries], h.index, { steps, bytes: Infinity });
 
 /** Records a new state, discarding any redo branch. */
 export function push(h: History, label: string, doc: Doc, limits: HistoryLimits = DEFAULT_LIMITS): History {

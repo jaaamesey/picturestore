@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { createDocument, updateLayer } from "./document";
-import { amend, canRedo, createHistory, currentDoc, historyBytes, jump, push, redo, retainedBytes, undo } from "./history";
+import { amend, canRedo, createHistory, currentDoc, dropOne, historyBytes, jump, limitSteps, push, redo, retainedBytes, undo } from "./history";
 import { fillTiles } from "./document";
 import { rect } from "./geometry";
 
@@ -75,4 +75,26 @@ it("always keeps at least one undoable step, however large", () => {
   for (let i = 0; i < 5; i++) h = push(h, `${i}`, painted(currentDoc(h), i), { steps: 50, bytes: 0 });
   expect(h.entries.length).toBe(2);
   expect(h.index).toBe(1);
+});
+
+it("frees memory a state at a time without ever dropping the current state", () => {
+  let h = push(push(push(createHistory(d0), "a", named("a")), "b", named("b")), "c", named("c"));
+  h = undo(undo(h)); // at "a", with "b" and "c" to redo
+  h = dropOne(h)!;
+  expect(h.entries.map((e) => e.label)).toEqual(["a", "b", "c"]);
+  expect(currentDoc(h).layers[0].name).toBe("a");
+  // The new oldest state accounts for everything it holds.
+  expect(h.entries[0].bytes).toBe(retainedBytes(h.entries[0].doc, null));
+  h = dropOne(dropOne(h)!)!;
+  expect(h.entries.map((e) => e.label)).toEqual(["a"]);
+  expect(dropOne(h)).toBeNull();
+});
+
+it("applies a lowered step limit, never past the current state", () => {
+  let h = createHistory(d0);
+  for (let i = 0; i < 10; i++) h = push(h, `${i}`, named(`${i}`));
+  expect(limitSteps(h, 4).entries.map((e) => e.label)).toEqual(["6", "7", "8", "9"]);
+  const back = jump(h, 2);
+  const limited = limitSteps(back, 4);
+  expect(currentDoc(limited)).toBe(currentDoc(back));
 });

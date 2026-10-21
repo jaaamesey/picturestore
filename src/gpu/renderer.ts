@@ -3,9 +3,9 @@ import type { Layer } from "../core/document";
 import { EMPTY_RECT, intersect, isEmpty, rect, union, type Rect } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
-import { TILE_SIZE, keyX, keyY, tileRect, type Tile, type TileKey, type TileMap } from "../core/tiles";
+import { TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileRect, type Tile, type TileKey, type TileMap } from "../core/tiles";
 import { tessellate, type Mapping } from "../core/warp";
-import { ATLAS_PAGE, ATLAS_TILES, CLEAR_WGSL, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, TILES_WGSL } from "./shaders";
+import { ATLAS_PAGE, CLEAR_WGSL, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, tilesWgsl } from "./shaders";
 
 /** Pixels drawn through a mapping above a given layer (Free Transform / Move preview). */
 export interface FloatingLayer {
@@ -45,6 +45,10 @@ export interface Renderer {
   readComposite(): Promise<Uint8ClampedArray>;
   /** Resolves once the most recently rendered frame is on screen. */
   settled(): Promise<void>;
+  /** Current display quality reduction: the canvas is composited at 1/2^level resolution (0 = full). */
+  level(): number;
+  /** Tries full quality again (e.g. after closing documents). */
+  resetLevel(): void;
   destroy(): void;
 }
 
@@ -55,14 +59,25 @@ export interface RendererOptions {
    * WebGPU canvases.
    */
   readonly readback?: boolean;
+  /** Starting quality reduction (kept across device loss). */
+  readonly level?: number;
+  /** Caps the tile atlas below the device's limit (to exercise memory pressure in tests). */
+  readonly maxAtlasPages?: number;
+  /** Called when GPU memory pressure changes the quality reduction. */
+  readonly onLevelChange?: (level: number) => void;
 }
+
+/** The tile atlas can't grow (device limit, or out of GPU memory). */
+class AtlasFull extends Error {}
+
+/** Down to 1/16 resolution (16×16-texel tiles); past that, the display isn't useful. */
+export const MAX_LEVEL = 4;
 
 const ACCUM_FORMAT: GPUTextureFormat = "rgba16float";
 const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
 const TILE_UNIFORM_SIZE = 16; // sizeof(Draw)
 const MESH_UNIFORM_SIZE = 48; // sizeof(Mesh)
 const WORKSPACE = [0.16, 0.16, 0.17, 1];
-const TILES_PER_PAGE = ATLAS_TILES * ATLAS_TILES;
 const CHUNK = 2048; // resample output is rendered and read back in chunks of at most this size
 
 export async function requestDevice(): Promise<GPUDevice> {
@@ -97,6 +112,8 @@ interface FloatingTexture {
   readonly bounds: Rect;
   readonly texture: GPUTexture;
   readonly mipCount: number;
+  /** Stored at 1/2^level resolution. */
+  readonly level: number;
 }
 
 interface MeshBuffers {
@@ -119,7 +136,13 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
     ],
   });
-  const tilesModule = module(TILES_WGSL);
+  // Quality reduction under GPU memory pressure: tiles are stored at
+  // slot² texels and the composite at 1/2^level of document resolution.
+  let level = Math.min(MAX_LEVEL, options.level ?? 0);
+  let slotSize = TILE_SIZE >> level;
+  let slotsPerSide = ATLAS_PAGE / slotSize;
+  let slotsPerPage = slotsPerSide * slotsPerSide;
+  let tilesModule = module(tilesWgsl(slotSize));
   const tilePipeline = (entryPoint: string, blend?: GPUBlendState) =>
     device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [tileLayout] }),
@@ -130,8 +153,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       },
       fragment: { module: tilesModule, entryPoint, targets: [{ format: ACCUM_FORMAT, blend }] },
     });
-  const tileNormal = tilePipeline("fs_normal", PREMULTIPLIED_OVER);
-  const tileMode = tilePipeline("fs_mode");
+  let tileNormal = tilePipeline("fs_normal", PREMULTIPLIED_OVER);
+  let tileMode = tilePipeline("fs_mode");
 
   const meshLayout = device.createBindGroupLayout({
     entries: [
@@ -190,12 +213,31 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     });
   }
 
+  const maxPages = Math.min(device.limits.maxTextureArrayLayers, options.maxAtlasPages ?? Infinity);
+
+  /**
+   * Out-of-memory errors are reported asynchronously; a failed allocation
+   * yields an invalid object, so the next frame rebuilds at lower quality.
+   */
+  let oomReported = false;
+  function allocating<T>(fn: () => T): T {
+    device.pushErrorScope("out-of-memory");
+    const result = fn();
+    void device.popErrorScope().then((e) => {
+      if (e) {
+        console.warn("WebGPU out of memory:", e.message);
+        oomReported = true;
+      }
+    });
+    return result;
+  }
+
   function allocSlot(): number {
     if (freeSlots.length) return freeSlots.pop()!;
-    if (nextSlot >= pages * TILES_PER_PAGE) {
-      const grown = Math.min(device.limits.maxTextureArrayLayers, pages * 2);
-      if (grown === pages) throw new Error("GPU tile atlas is full");
-      const next = createAtlas(grown);
+    if (nextSlot >= pages * slotsPerPage) {
+      const grown = Math.min(maxPages, pages * 2);
+      if (grown === pages) throw new AtlasFull();
+      const next = allocating(() => createAtlas(grown));
       const encoder = device.createCommandEncoder();
       encoder.copyTextureToTexture({ texture: atlas }, { texture: next }, [ATLAS_PAGE, ATLAS_PAGE, pages]);
       device.queue.submit([encoder.finish()]);
@@ -208,17 +250,25 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   }
 
   const uploadTile = (slot: number, tile: Tile) => {
-    const local = slot % TILES_PER_PAGE;
+    const local = slot % slotsPerPage;
     device.queue.writeTexture(
-      { texture: atlas, origin: [(local % ATLAS_TILES) * TILE_SIZE, Math.floor(local / ATLAS_TILES) * TILE_SIZE, Math.floor(slot / TILES_PER_PAGE)] },
-      tile.data as Uint8ClampedArray<ArrayBuffer>,
-      { bytesPerRow: TILE_SIZE * 4, rowsPerImage: TILE_SIZE },
-      [TILE_SIZE, TILE_SIZE, 1],
+      { texture: atlas, origin: [(local % slotsPerSide) * slotSize, Math.floor(local / slotsPerSide) * slotSize, Math.floor(slot / slotsPerPage)] },
+      level === 0 ? (tile.data as Uint8ClampedArray<ArrayBuffer>) : downsampleTile(tile, level),
+      { bytesPerRow: slotSize * 4, rowsPerImage: slotSize },
+      [slotSize, slotSize, 1],
     );
   };
 
   // --- Per-document resources ---------------------------------------------
   let size = { width: 0, height: 0 };
+  /** The composite's resolution: the document at 1/2^level. */
+  let px = { width: 0, height: 0 };
+  /** A document-space rectangle in composite pixels (rounded outwards). */
+  const toPx = (r: Rect): Rect => {
+    if (level === 0) return r;
+    const x0 = r.x >> level, y0 = r.y >> level;
+    return intersect(rect(x0, y0, ((r.x + r.w + (1 << level) - 1) >> level) - x0, ((r.y + r.h + (1 << level) - 1) >> level) - y0), rect(0, 0, px.width, px.height));
+  };
   let accum: GPUTexture | null = null;
   let scratch: GPUTexture | null = null;
   let selectionTexture: GPUTexture | null = null;
@@ -259,8 +309,15 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       ],
     });
 
-  function freeLayer(entry: LayerEntry) {
+  function releaseSlots(entry: LayerEntry) {
     for (const { slot } of entry.slots.values()) freeSlots.push(slot);
+    if (entry.slots.size) entry.instancesDirty = true;
+    entry.slots.clear();
+    entry.instanceCount = 0;
+  }
+
+  function freeLayer(entry: LayerEntry) {
+    releaseSlots(entry);
     entry.instances?.destroy();
   }
 
@@ -271,15 +328,28 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     scratch?.destroy();
     selectionTexture?.destroy();
     size = { width, height };
-    mipCount = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    // A document beyond the device's texture size can only be shown reduced.
+    const maxDim = device.limits.maxTextureDimension2D;
+    while (level < MAX_LEVEL && Math.max(width, height) >> level > maxDim) setLevel(level + 1);
+    px = { width: Math.max(1, Math.ceil(width / (1 << level))), height: Math.max(1, Math.ceil(height / (1 << level))) };
+    mipCount = Math.floor(Math.log2(Math.max(px.width, px.height))) + 1;
+    allocating(() => createDocumentTextures(width, height));
+    rebuildBindGroups();
+    lastOrder = "";
+    lastFloating = null;
+    lastSelection = undefined;
+    selectionBounds = EMPTY_RECT;
+  }
+
+  function createDocumentTextures(width: number, height: number) {
     accum = device.createTexture({
-      size: [width, height],
+      size: [px.width, px.height],
       format: ACCUM_FORMAT,
       mipLevelCount: mipCount,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
     });
     scratch = device.createTexture({
-      size: [width, height],
+      size: [px.width, px.height],
       format: ACCUM_FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
@@ -297,11 +367,39 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         { binding: 3, resource: selectionTexture.createView() },
       ],
     });
-    rebuildBindGroups();
-    lastOrder = "";
+  }
+
+  /** Switches the quality reduction, dropping every GPU copy so it's re-uploaded at the new scale. */
+  function setLevel(next: number) {
+    level = next;
+    slotSize = TILE_SIZE >> level;
+    slotsPerSide = ATLAS_PAGE / slotSize;
+    slotsPerPage = slotsPerSide * slotsPerSide;
+    tilesModule = module(tilesWgsl(slotSize));
+    tileNormal = tilePipeline("fs_normal", PREMULTIPLIED_OVER);
+    tileMode = tilePipeline("fs_mode");
+    for (const entry of layers.values()) freeLayer(entry);
+    layers.clear();
+    freeSlots.length = 0;
+    nextSlot = 0;
+    atlas.destroy();
+    pages = 1;
+    atlas = createAtlas(pages);
+    floating?.texture.destroy();
+    floating = null;
     lastFloating = null;
-    lastSelection = undefined;
-    selectionBounds = EMPTY_RECT;
+    options.onLevelChange?.(level);
+  }
+
+  /** Rebuilds the document's GPU state at the next lower quality. */
+  function degrade(): boolean {
+    if (level >= MAX_LEVEL) return false;
+    console.warn(`GPU memory is constrained; drawing at 1/${2 << level} resolution.`);
+    setLevel(level + 1);
+    const { width, height } = size;
+    size = { width: 0, height: 0 };
+    resetDocument(width, height);
+    return true;
   }
 
   // --- Scene sync ----------------------------------------------------------
@@ -354,12 +452,14 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         entry = { slots: new Map(), instances: null, instanceCount: 0, instancesDirty: true, props: "" };
         layers.set(layer.id, entry);
       }
-      const changed = syncLayer(entry, layer.tiles);
+      // Hidden layers keep no GPU copy; showing one uploads it again.
+      if (!layer.visible) releaseSlots(entry);
+      const changed = layer.visible ? syncLayer(entry, layer.tiles) : EMPTY_RECT;
       const props = `${layer.visible}|${layer.opacity}|${layer.blendMode}`;
       if (props !== entry.props) {
         entry.props = props;
         dirty = full;
-      } else if (layer.visible) {
+      } else {
         dirty = union(dirty, changed);
       }
     }
@@ -377,47 +477,68 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return dirty;
   }
 
-  /** A premultiplied, mipmapped texture of floating pixels (cached by tile-map identity). */
+  /** The preview's premultiplied, mipmapped texture of floating pixels, at the display's quality (cached by tile-map identity). */
   function floatingTexture(source: TileMap, bounds: Rect): FloatingTexture {
-    if (floating && floating.source === source) return floating;
+    if (floating && floating.source === source && floating.level === level) return floating;
     floating?.texture.destroy();
+    floating = null;
+    const f = allocating(() => buildFloating(source, bounds, level));
+    floating = f;
+    floatingBindGroup = accum ? meshBindGroup(f.texture, drawUniforms) : null;
+    return f;
+  }
+
+  /**
+   * Uploads floating pixels at 1/2^lvl resolution and builds the mip chain.
+   * Reduced levels are filtered on the CPU a strip at a time, so no
+   * full-size intermediate is ever allocated.
+   */
+  function buildFloating(source: TileMap, bounds: Rect, lvl: number): FloatingTexture {
+    const w = Math.ceil(bounds.w / (1 << lvl)), h = Math.ceil(bounds.h / (1 << lvl));
     const max = device.limits.maxTextureDimension2D;
-    if (bounds.w > max || bounds.h > max) throw new Error(`Transforms are limited to ${max}px per side`);
-    const levels = Math.floor(Math.log2(Math.max(bounds.w, bounds.h))) + 1;
+    if (w > max || h > max) throw new Error(`Transforms are limited to ${max << lvl}px per side`);
+    const levels = Math.floor(Math.log2(Math.max(w, h))) + 1;
     const texture = device.createTexture({
-      size: [bounds.w, bounds.h],
+      size: [w, h],
       format: ACCUM_FORMAT,
       mipLevelCount: levels,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     });
     const staging = device.createTexture({
-      size: [bounds.w, bounds.h],
+      size: [w, h],
       format: "rgba8unorm",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    for (const [key, tile] of source) {
-      const r = tileRect(keyX(key), keyY(key));
-      const part = intersect(r, bounds);
-      if (isEmpty(part)) continue;
-      device.queue.writeTexture(
-        { texture: staging, origin: [part.x - bounds.x, part.y - bounds.y] },
-        tile.data as Uint8ClampedArray<ArrayBuffer>,
-        { offset: ((part.y - r.y) * TILE_SIZE + (part.x - r.x)) * 4, bytesPerRow: TILE_SIZE * 4, rowsPerImage: TILE_SIZE },
-        [part.w, part.h],
-      );
+    if (lvl === 0) {
+      for (const [key, tile] of source) {
+        const r = tileRect(keyX(key), keyY(key));
+        const part = intersect(r, bounds);
+        if (isEmpty(part)) continue;
+        device.queue.writeTexture(
+          { texture: staging, origin: [part.x - bounds.x, part.y - bounds.y] },
+          tile.data as Uint8ClampedArray<ArrayBuffer>,
+          { offset: ((part.y - r.y) * TILE_SIZE + (part.x - r.x)) * 4, bytesPerRow: TILE_SIZE * 4, rowsPerImage: TILE_SIZE },
+          [part.w, part.h],
+        );
+      }
+    } else {
+      const strip = 64 << lvl;
+      for (let y = 0; y < bounds.h; y += strip) {
+        const sh = Math.min(strip, bounds.h - y);
+        const reduced = downsample(readRect(source, rect(bounds.x, bounds.y + y, bounds.w, sh)), bounds.w, sh, lvl);
+        device.queue.writeTexture({ texture: staging, origin: [0, y >> lvl] }, reduced, { bytesPerRow: w * 4 }, [w, Math.ceil(sh / (1 << lvl))]);
+      }
     }
     const encoder = device.createCommandEncoder();
     fullscreenPass(encoder, premultiplyPipeline, texture.createView({ baseMipLevel: 0, mipLevelCount: 1 }), [staging.createView()]);
-    for (let level = 1; level < levels; level++) {
-      fullscreenPass(encoder, mipPipeline, texture.createView({ baseMipLevel: level, mipLevelCount: 1 }), [
-        texture.createView({ baseMipLevel: level - 1, mipLevelCount: 1 }),
+    for (let m = 1; m < levels; m++) {
+      fullscreenPass(encoder, mipPipeline, texture.createView({ baseMipLevel: m, mipLevelCount: 1 }), [
+        texture.createView({ baseMipLevel: m - 1, mipLevelCount: 1 }),
       ]);
     }
     device.queue.submit([encoder.finish()]);
     staging.destroy();
-    floating = { source, bounds, texture, mipCount: levels };
-    floatingBindGroup = accum ? meshBindGroup(texture, drawUniforms) : null;
-    return floating;
+    return { source, bounds, texture, mipCount: levels, level: lvl };
   }
 
   function fullscreenPass(encoder: GPUCommandEncoder, pipeline: GPURenderPipeline, target: GPUTextureView, inputs: GPUTextureView[], scissor?: Rect) {
@@ -510,7 +631,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       if (op.kind === "tiles") {
         new Float32Array(data, i * UNIFORM_SLOT, 1)[0] = op.opacity;
         new Uint32Array(data, i * UNIFORM_SLOT + 4, 1)[0] = op.mode;
-        new Float32Array(data, i * UNIFORM_SLOT + 8, 2).set([size.width, size.height]);
+        new Float32Array(data, i * UNIFORM_SLOT + 8, 2).set([px.width, px.height]);
       } else {
         writeMeshUniform(data, i * UNIFORM_SLOT, docViewport, floating!, op.opacity, op.mode, 0);
       }
@@ -519,11 +640,12 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
     const encoder = device.createCommandEncoder();
     const target = accum!.createView({ baseMipLevel: 0, mipLevelCount: 1 });
+    const scissor = toPx(area);
     let pass: GPURenderPassEncoder | null = null;
     const open = () => {
       if (pass) return pass;
       pass = encoder.beginRenderPass({ colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }] });
-      pass.setScissorRect(area.x, area.y, area.w, area.h);
+      pass.setScissorRect(scissor.x, scissor.y, scissor.w, scissor.h);
       return pass;
     };
     const close = () => {
@@ -539,7 +661,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       if (!normal) {
         // Blend modes read the destination: snapshot the area first.
         close();
-        encoder.copyTextureToTexture({ texture: accum!, origin: [area.x, area.y] }, { texture: scratch!, origin: [area.x, area.y] }, [area.w, area.h]);
+        encoder.copyTextureToTexture({ texture: accum!, origin: [scissor.x, scissor.y] }, { texture: scratch!, origin: [scissor.x, scissor.y] }, [scissor.w, scissor.h]);
       }
       const p = open();
       if (op.kind === "tiles") {
@@ -558,24 +680,24 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     });
     close();
     device.queue.submit([encoder.finish()]);
-    mipsDirty = union(mipsDirty, area);
+    mipsDirty = union(mipsDirty, scissor);
   }
 
   /** Regenerates the composite's mip chain, but only over the region that changed. */
   function generateMips() {
     const encoder = device.createCommandEncoder();
     let r = mipsDirty;
-    for (let level = 1; level < mipCount; level++) {
-      const w = Math.max(1, size.width >> level);
-      const h = Math.max(1, size.height >> level);
+    for (let m = 1; m < mipCount; m++) {
+      const w = Math.max(1, px.width >> m);
+      const h = Math.max(1, px.height >> m);
       const x0 = r.x >> 1, y0 = r.y >> 1;
       r = intersect(rect(x0, y0, ((r.x + r.w + 1) >> 1) - x0, ((r.y + r.h + 1) >> 1) - y0), rect(0, 0, w, h));
       if (isEmpty(r)) break;
       fullscreenPass(
         encoder,
         mipPipeline,
-        accum!.createView({ baseMipLevel: level, mipLevelCount: 1 }),
-        [accum!.createView({ baseMipLevel: level - 1, mipLevelCount: 1 })],
+        accum!.createView({ baseMipLevel: m, mipLevelCount: 1 }),
+        [accum!.createView({ baseMipLevel: m - 1, mipLevelCount: 1 })],
         r,
       );
     }
@@ -592,13 +714,15 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       canvas.height = h;
     }
     const zoom = view.zoom * dpr;
-    const lod = zoom >= 1 ? 0 : Math.min(mipCount - 1, Math.log2(1 / zoom));
+    // A screen pixel spans 1/zoom document pixels, i.e. 1/(zoom·2^level) composite pixels.
+    const lod = Math.max(0, Math.min(mipCount - 1, -Math.log2(zoom) - level));
     if (lod > 0 && !isEmpty(mipsDirty)) generateMips();
     const u = new ArrayBuffer(64);
     new Float32Array(u, 0, 6).set([size.width, size.height, view.panX * dpr, view.panY * dpr, zoom, time]);
     new Uint32Array(u, 24, 1)[0] = hasSelection ? 1 : 0;
     new Float32Array(u, 28, 1)[0] = lod;
     new Float32Array(u, 32, 4).set(WORKSPACE);
+    new Uint32Array(u, 48, 1)[0] = level > 0 ? 1 : 0;
     device.queue.writeBuffer(viewUniforms, 0, u);
 
     const encoder = device.createCommandEncoder();
@@ -618,12 +742,16 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     const out = new Uint8ClampedArray(dest.w * dest.h * 4);
     if (isEmpty(dest) || isEmpty(source.bounds)) return out;
     if (!accum) throw new Error("Renderer has no document");
-    const f = floatingTexture(source.tiles, source.bounds);
-    const m = meshBuffers(mapping);
+    // Commits are always full quality: at a reduced display level the
+    // source is uploaded again at full resolution, just for this.
+    device.pushErrorScope("out-of-memory");
+    let temporary: FloatingTexture | null = null;
     const uniforms = device.createBuffer({ size: MESH_UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const bindGroup = meshBindGroup(f.texture, uniforms);
-    const filterIndex = { nearest: 0, bilinear: 1, bicubic: 2 }[filter];
     try {
+      const f = level === 0 ? floatingTexture(source.tiles, source.bounds) : (temporary = buildFloating(source.tiles, source.bounds, 0));
+      const m = meshBuffers(mapping);
+      const bindGroup = meshBindGroup(f.texture, uniforms);
+      const filterIndex = { nearest: 0, bilinear: 1, bicubic: 2 }[filter];
       for (let cy = dest.y; cy < dest.y + dest.h; cy += CHUNK) {
         for (let cx = dest.x; cx < dest.x + dest.w; cx += CHUNK) {
           const chunk = intersect(rect(cx, cy, CHUNK, CHUNK), dest);
@@ -660,24 +788,54 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       }
     } finally {
       uniforms.destroy();
+      temporary?.texture.destroy();
+      // An allocation that failed leaves invalid objects whose output is garbage; the caller falls back to the CPU.
+      const err = await device.popErrorScope();
+      if (err) throw new Error(`GPU out of memory: ${err.message}`);
     }
     return out;
   }
 
+  function draw(scene: Scene, view: View, time: number) {
+    if (scene.width !== size.width || scene.height !== size.height) resetDocument(scene.width, scene.height);
+    const dirty = union(syncLayers(scene), syncFloating(scene.floating));
+    syncSelection(scene.selection);
+    const area = intersect(dirty, rect(0, 0, size.width, size.height));
+    if (!isEmpty(area)) composite(scene, area);
+    present(view, time, scene.selection !== null);
+  }
+
   return {
     render(scene, view, time) {
-      if (scene.width !== size.width || scene.height !== size.height) resetDocument(scene.width, scene.height);
-      const dirty = union(syncLayers(scene), syncFloating(scene.floating));
-      syncSelection(scene.selection);
-      const area = intersect(dirty, rect(0, 0, size.width, size.height));
-      if (!isEmpty(area)) composite(scene, area);
-      present(view, time, scene.selection !== null);
+      // Out of GPU memory last frame (or the atlas can't grow): rebuild at lower quality and try again.
+      if (oomReported) {
+        oomReported = false;
+        degrade();
+      }
+      for (;;) {
+        try {
+          return draw(scene, view, time);
+        } catch (err) {
+          if (!(err instanceof AtlasFull) || !degrade()) throw err;
+        }
+      }
+    },
+
+    level: () => level,
+
+    resetLevel() {
+      if (level === 0) return;
+      setLevel(0);
+      const { width, height } = size;
+      size = { width: 0, height: 0 };
+      if (width) resetDocument(width, height);
     },
 
     resample,
 
     async readComposite() {
-      const { width, height } = size;
+      // At reduced quality the composite is smaller; it's scaled back up (nearest) to document size.
+      const { width, height } = px;
       const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
       const buffer = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const encoder = device.createCommandEncoder();
@@ -686,13 +844,13 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       await buffer.mapAsync(GPUMapMode.READ);
       const halves = new Uint16Array(buffer.getMappedRange().slice(0));
       buffer.destroy();
-      const out = new Uint8ClampedArray(width * height * 4);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const s = (y * bytesPerRow) / 2 + x * 4;
+      const out = new Uint8ClampedArray(size.width * size.height * 4);
+      for (let y = 0; y < size.height; y++) {
+        for (let x = 0; x < size.width; x++) {
+          const s = (((y >> level) * bytesPerRow) >> 1) + (x >> level) * 4;
           const a = HALF[halves[s + 3]];
           if (a <= 0) continue;
-          const o = (y * width + x) * 4;
+          const o = (y * size.width + x) * 4;
           out[o] = (HALF[halves[s]] / a) * 255;
           out[o + 1] = (HALF[halves[s + 1]] / a) * 255;
           out[o + 2] = (HALF[halves[s + 2]] / a) * 255;

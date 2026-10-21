@@ -5,7 +5,7 @@ import { transformFloatingCpu } from "../core/raster";
 import { readRect } from "../core/tiles";
 import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
 import { createEditor, type DocumentSession } from "../editor/editor";
-import { requestDevice } from "../gpu/renderer";
+import { MAX_LEVEL, requestDevice } from "../gpu/renderer";
 import {
   EXTENSIONS,
   download,
@@ -23,7 +23,10 @@ import {
   type ExportFormat,
   type OpenedFile,
 } from "../io/files";
-import { activeLayer } from "../core/document";
+import { activeLayer, type Doc } from "../core/document";
+import type { PreferencesPane } from "../editor/preferences";
+import { listRecovery, newRecoveryKey, removeRecovery, saveRecovery } from "../io/recovery";
+import { PreferencesDialog } from "./PreferencesDialog";
 import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
@@ -193,7 +196,69 @@ export function App() {
 
   const [menu, setMenu] = createSignal<{ x: number; y: number; items: readonly MenuItem[] } | null>(null);
   const [confirmation, setConfirmation] = createSignal<{ message: string; resolve: (ok: boolean) => void } | null>(null);
-  editor.onConfirm((message) => new Promise((resolve) => setConfirmation({ message, resolve })));
+  const confirmDialog = (message: string) => new Promise<boolean>((resolve) => setConfirmation({ message, resolve }));
+  editor.onConfirm(confirmDialog);
+  const [prefsPane, setPrefsPane] = createSignal<PreferencesPane | null>(null);
+
+  // --- Recovery information ------------------------------------------------------
+  // Every so often (Preferences ▸ File Handling), each document with unsaved
+  // changes is written to browser storage; saving or closing it removes the
+  // copy. A crash, or the tab being killed for memory, loses at most that long.
+  const recovery = new Map<DocumentSession, { key: string; doc: Doc | null; at: number }>();
+  let recovering = false;
+
+  async function recoveryTick(force = false) {
+    if (recovering) return;
+    recovering = true;
+    try {
+      const minutes = editor.preferences().recoveryMinutes;
+      const open = new Set(editor.sessions());
+      for (const [s, r] of recovery) {
+        if (open.has(s)) continue;
+        recovery.delete(s);
+        await removeRecovery(r.key);
+      }
+      for (const s of open) {
+        let r = recovery.get(s);
+        if (!r) recovery.set(s, (r = { key: newRecoveryKey(), doc: null, at: Date.now() }));
+        if (!s.dirty() || minutes === 0) {
+          if (r.doc) await removeRecovery(r.key);
+          r.doc = null;
+          continue;
+        }
+        const doc = s.doc();
+        if (doc === r.doc || (!force && Date.now() - r.at < minutes * 60_000)) continue;
+        await saveRecovery(r.key, s.name(), await encodeDocument(doc, "psd"));
+        r.doc = doc;
+        r.at = Date.now();
+      }
+    } catch (err) {
+      console.warn("Couldn't save recovery information:", err);
+    } finally {
+      recovering = false;
+    }
+  }
+
+  /** On startup: offers back documents a previous session didn't save. */
+  async function offerRecovery() {
+    const entries = await listRecovery();
+    if (entries.length === 0) return;
+    const names = entries.map((e) => `"${e.name}"`).join(", ");
+    const ok = await confirmDialog(
+      `Picturestore has recovery information for ${entries.length === 1 ? "an unsaved document" : `${entries.length} unsaved documents`} (${names}) from a previous session. Recover ${entries.length === 1 ? "it" : "them"}?`,
+    );
+    for (const e of entries) {
+      try {
+        if (ok) {
+          const s = editor.openDocument(await readDocument(e.file), e.name, "Recovered");
+          editor.markSaved(s.id, null); // still unsaved
+        }
+        await removeRecovery(e.key);
+      } catch (err) {
+        notify(`Couldn't recover ${e.name}: ${errorText(err)}`);
+      }
+    }
+  }
   const answer = (ok: boolean) => {
     confirmation()?.resolve(ok);
     setConfirmation(null);
@@ -210,6 +275,7 @@ export function App() {
     copy: (merged) => toSystemClipboard(editor.copy(merged)),
     cut: () => toSystemClipboard(editor.cut()),
     paste: (inPlace) => void pasteFromMenu(inPlace),
+    preferences: (pane = "general") => setPrefsPane(pane),
   };
   const app: AppValue = { editor, shell, notify, openMenu: (x, y, items) => setMenu({ x, y, items }) };
 
@@ -219,10 +285,13 @@ export function App() {
       editor,
       pixel: (x, y) => [...flatten(editor.active()!.displayed(), rect(x, y, 1, 1))],
       reference: { transformFloatingCpu, readRect },
+      saveRecovery: () => recoveryTick(true),
     };
+    void offerRecovery();
+    const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew() || confirmation()) return;
+      if (isTyping(e.target) || showNew() || confirmation() || prefsPane()) return;
       const id = findCommand(e);
       if (id === "edit.paste" || id === "edit.pasteInPlace") {
         // Let the browser deliver a paste event with the clipboard's contents.
@@ -288,6 +357,7 @@ export function App() {
     window.addEventListener("drop", onDrop);
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => {
+      clearInterval(recoveryTimer);
       window.removeEventListener("keydown", onEscape, { capture: true });
       window.removeEventListener("pointerdown", closeMenu, { capture: true });
       window.removeEventListener("keydown", onKeyDown);
@@ -301,6 +371,7 @@ export function App() {
   // Documents live on the CPU and the GPU only caches them, so a lost device
   // (driver reset, GPU switch) is recovered by requesting a new one.
   const [deviceEpoch, setDeviceEpoch] = createSignal(0);
+  let lastLoss = -Infinity;
   const readback = new URLSearchParams(location.search).get("present") === "readback";
   const device = createMemo(() => {
     const epoch = deviceEpoch();
@@ -308,6 +379,10 @@ export function App() {
       void d.lost.then((info) => {
         if (info.reason === "destroyed" || epoch !== deviceEpoch()) return;
         console.warn("WebGPU device lost:", info.message);
+        // Lost again soon after a reset: likely GPU memory, so come back at lower display quality.
+        const now = performance.now();
+        if (now - lastLoss < 120_000) editor.setGpuLevel(Math.min(MAX_LEVEL, editor.memory().gpuLevel + 1));
+        lastLoss = now;
         notify("The GPU was reset; restored the canvas.");
         setDeviceEpoch(epoch + 1);
       });
@@ -361,6 +436,9 @@ export function App() {
             <MenuList items={m().items} onDone={() => setMenu(null)} />
           </div>
         )}
+      </Show>
+      <Show when={prefsPane()} keyed>
+        {(pane) => <PreferencesDialog pane={pane} onClose={() => setPrefsPane(null)} />}
       </Show>
       <Show when={confirmation()}>{(c) => <ConfirmDialog message={c().message} onAnswer={answer} />}</Show>
       <Show when={message()}>

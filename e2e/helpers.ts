@@ -33,8 +33,8 @@ export async function stubFilePickers(page: Page, { saveInPlace = true } = {}) {
 }
 
 /** Opens the app and creates a document. Readback presentation keeps headless runs deterministic. */
-export async function newDocument(page: Page, width = 400, height = 300, background = "white") {
-  await page.goto("/?present=readback");
+export async function newDocument(page: Page, width = 400, height = 300, background = "white", query = "") {
+  await page.goto(`/?present=readback${query}`);
   await page.getByTestId("start-new").click();
   await page.getByTestId("new-width").fill(String(width));
   await page.getByTestId("new-width").press("Tab");

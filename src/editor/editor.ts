@@ -31,7 +31,10 @@ import {
   canUndo,
   createHistory,
   currentDoc,
+  dropOne,
+  historyBytes,
   jump,
+  limitSteps,
   push,
   redo,
   replaceCurrent,
@@ -51,6 +54,7 @@ import { SHAPE_TOOLS, createTools } from "./tools";
 import { shapeGeometry, shapeStyle } from "./tools/shape";
 import type { TransformCommand } from "./tools/transform";
 import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolSettings } from "./types";
+import { loadPreferences, savePreferences, type Preferences } from "./preferences";
 import { fitView, nextZoomStep, prevZoomStep, screenToDoc, zoomAt } from "./view";
 
 /** One open document (a tab): its history, transient preview state and viewport. */
@@ -82,20 +86,24 @@ interface SessionInternals extends DocumentSession {
   setFloating(f: FloatingLayer | null): void;
   setOverlay(o: Overlay | null): void;
   setView(v: View): void;
-  markSaved(doc: Doc): void;
+  markSaved(doc: Doc | null): void;
 }
 
 let sessionCounter = 0;
 
 function createSession(doc: Doc, name: string, label: string, smartLink: SmartLink | null): SessionInternals {
   const [nameSig, setName] = createSignal(name);
-  const [history, setHistory] = createSignal(createHistory(doc, label));
+  // History is read synchronously by editor logic (signal reads lag writes
+  // until Solid flushes), so the signal only carries change notifications.
+  let h = createHistory(doc, label);
+  const [version, bump] = createSignal(0);
+  const history = () => (version(), h);
   const [preview, setPreview] = createSignal<Doc | null>(null);
   const [floating, setFloating] = createSignal<FloatingLayer | null>(null);
   const [overlay, setOverlay] = createSignal<Overlay | null>(null);
   const [view, setView] = createSignal<View>({ zoom: 1, panX: 0, panY: 0 });
   const [saved, setSaved] = createSignal<Doc | null>(doc);
-  const current = createMemo(() => currentDoc(history()));
+  const current = () => currentDoc(history());
   return {
     id: `doc${++sessionCounter}`,
     name: nameSig,
@@ -108,7 +116,12 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
     dirty: createMemo(() => saved() !== current()),
     smartLink,
     setName,
-    setHistory,
+    setHistory(next) {
+      const n = typeof next === "function" ? next(h) : next;
+      if (n === h) return;
+      h = n;
+      bump((v) => v + 1);
+    },
     setPreview,
     setFloating,
     setOverlay,
@@ -129,6 +142,22 @@ export const DEFAULT_SETTINGS: ToolSettings = {
 
 export type Editor = ReturnType<typeof createEditor>;
 
+/**
+ * How memory-constrained the app is. RAM: "limited" when history states were
+ * freed to stay within Memory Usage; "exhausted" after an allocation failed.
+ * GPU: the display's quality reduction (0 = full; n = drawn at 1/2ⁿ resolution).
+ */
+export interface MemoryStatus {
+  readonly ram: "ok" | "limited" | "exhausted";
+  readonly gpuLevel: number;
+}
+
+/** Engines report failed allocations as RangeErrors ("Array buffer allocation failed", "Invalid array length"). */
+export const isOutOfMemory = (err: unknown) =>
+  err instanceof RangeError && /alloc|memory|array (buffer )?length/i.test(err.message);
+
+export const OUT_OF_MEMORY = "Could not complete your request because there is not enough memory (RAM).";
+
 /** Photoshop's prompts before a pixel edit on a smart object or shape. */
 export const RASTERIZE_PROMPTS = {
   smart: "This Smart Object must be rasterized before proceeding. Its contents will no longer be directly editable. Rasterize the Smart Object?",
@@ -146,9 +175,21 @@ type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[
 export function createEditor() {
   return createRoot(() => {
     const tools = createTools();
-    const [sessions, setSessions] = createSignal<SessionInternals[]>([]);
-    const [activeId, setActiveId] = createSignal<string | null>(null);
-    const active = createMemo(() => sessions().find((s) => s.id === activeId()) ?? null);
+    // Like history, the open sessions and the active one are read
+    // synchronously (e.g. right after opening a document); signals only notify.
+    let sessionList: SessionInternals[] = [];
+    let activeIdNow: string | null = null;
+    const [sessionsVersion, bumpSessions] = createSignal(0);
+    const sessions = () => (sessionsVersion(), sessionList);
+    const setSessions = (fn: (list: SessionInternals[]) => SessionInternals[]) => {
+      sessionList = fn(sessionList);
+      bumpSessions((v) => v + 1);
+    };
+    const setActiveId = (id: string | null) => {
+      activeIdNow = id;
+      bumpSessions((v) => v + 1);
+    };
+    const active = () => sessions().find((s) => s.id === activeIdNow) ?? null;
     const [toolId, setToolSignal] = createSignal<ToolId>("brush");
     // Signal reads lag writes until Solid flushes; editor logic needs the tool synchronously.
     let currentTool: ToolId = "brush";
@@ -160,6 +201,14 @@ export function createEditor() {
     const [foreground, setForeground] = createSignal<RGB>(BLACK);
     const [background, setBackground] = createSignal<RGB>(WHITE);
     const [viewportSize, setViewportSize] = createSignal({ width: 800, height: 600 });
+    const [preferences, setPreferencesSignal] = createSignal<Preferences>(loadPreferences());
+    let prefs = preferences();
+    const [memory, setMemory] = createSignal<MemoryStatus>({ ram: "ok", gpuLevel: 0 });
+    let memoryNow = memory();
+    const updateMemory = (patch: Partial<MemoryStatus>) => {
+      memoryNow = { ...memoryNow, ...patch };
+      setMemory(memoryNow);
+    };
 
     const [busy, setBusy] = createSignal(false);
     // Commits computed asynchronously (GPU resampling). A plain counter, not
@@ -175,6 +224,7 @@ export function createEditor() {
     let renderRequested: () => void = () => {};
     let gpuResample: Resampler | null = null;
     let reportError: (message: string) => void = (m) => console.error(m);
+    let gpuReset: () => void = () => {};
     let askConfirm: (message: string) => Promise<boolean> = async () => false;
     let mergeKey: string | null = null;
     let switching = false;
@@ -183,9 +233,17 @@ export function createEditor() {
       const bounds = roundOut(mappingBounds(mapping));
       const dest = clip ? intersect(bounds, clip) : bounds;
       if (isEmpty(dest) || isEmpty(f.bounds)) return EMPTY_TILES;
-      if (!gpuResample) return transformFloatingCpu(f, mapping, filter, clip);
-      const pixels = await gpuResample(f, mapping, dest, filter);
-      return tilesFromImage(dest.w, dest.h, pixels, dest.x, dest.y);
+      if (gpuResample) {
+        try {
+          const pixels = await gpuResample(f, mapping, dest, filter);
+          return tilesFromImage(dest.w, dest.h, pixels, dest.x, dest.y);
+        } catch (err) {
+          // Out of GPU memory (or the device was lost): the CPU reference gives the same result, just slower.
+          if (isOutOfMemory(err)) throw err;
+          console.warn("GPU resampling failed; falling back to the CPU:", err);
+        }
+      }
+      return transformFloatingCpu(f, mapping, filter, clip);
     }
 
     /** Asks to rasterize a smart object or shape (Photoshop's prompt), then does so as its own step. */
@@ -226,9 +284,72 @@ export function createEditor() {
       s.setPreview(null);
       s.setFloating(null);
       const h = s.history();
-      s.setHistory(key !== null && key === mergeKey ? amend(h, label, doc) : push(h, label, doc));
+      s.setHistory(key !== null && key === mergeKey ? amend(h, label, doc) : push(h, label, doc, { steps: prefs.historyStates, bytes: Infinity }));
       mergeKey = key;
+      enforceMemoryBudget();
       renderRequested();
+    }
+
+    /**
+     * Keeps everything open documents retain (their states and history)
+     * within Preferences ▸ Performance ▸ Memory Usage, freeing the oldest
+     * history state of whichever document holds the most, one at a time.
+     */
+    function enforceMemoryBudget() {
+      const budget = prefs.memoryUsageMB * 2 ** 20;
+      const list = sessions();
+      let total = list.reduce((sum, x) => sum + historyBytes(x.history()), 0);
+      let freed = false;
+      while (total > budget) {
+        let best: SessionInternals | null = null;
+        for (const x of list) if (x.history().entries.length > 1 && (!best || historyBytes(x.history()) > historyBytes(best.history()))) best = x;
+        const next = best && dropOne(best.history());
+        if (!best || !next) break;
+        total += historyBytes(next) - historyBytes(best.history());
+        best.setHistory(next);
+        freed = true;
+      }
+      if (freed && memoryNow.ram === "ok") updateMemory({ ram: "limited" });
+      else if (!freed && total < budget * 0.75 && memoryNow.ram === "limited") updateMemory({ ram: "ok" });
+    }
+
+    /**
+     * An allocation failed: abandon the operation, free every undo state
+     * but the current one (and the clipboard), and say so. Documents
+     * themselves are never touched.
+     */
+    function outOfMemory() {
+      for (const x of sessions()) {
+        x.setPreview(null);
+        x.setFloating(null);
+        x.setOverlay(null);
+        let h: History | null = x.history();
+        while (h && h.entries.length > 1) h = dropOne(h);
+        if (h) x.setHistory(h);
+      }
+      clipboard = null;
+      mergeKey = null;
+      updateMemory({ ram: "exhausted" });
+      reportError(`${OUT_OF_MEMORY} Undo history was cleared to free memory.`);
+      renderRequested();
+    }
+
+    /** Runs `fn`, turning allocation failures into {@link outOfMemory} instead of a broken state. */
+    function guard<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R | undefined {
+      return (...args) => {
+        try {
+          return fn(...args);
+        } catch (err) {
+          if (!isOutOfMemory(err)) throw err;
+          try {
+            withTool((ctx) => tools.byId[currentTool].cancel?.(ctx));
+          } catch {
+            // The tool's own state may be what failed; it's reset below regardless.
+          }
+          outOfMemory();
+          return undefined;
+        }
+      };
     }
 
     /**
@@ -247,7 +368,8 @@ export function createEditor() {
         (err: unknown) => {
           s.setPreview(null);
           s.setFloating(null);
-          reportError(`${label} failed: ${err instanceof Error ? err.message : String(err)}`);
+          if (isOutOfMemory(err)) outOfMemory();
+          else reportError(`${label} failed: ${err instanceof Error ? err.message : String(err)}`);
         },
       );
     }
@@ -284,12 +406,13 @@ export function createEditor() {
       switching = false;
     }
 
-    /** Runs an action unless a commit is still being computed. */
-    const whenIdle =
-      <A extends unknown[]>(fn: (...args: A) => void) =>
-      (...args: A) => {
-        if (pending === 0) fn(...args);
+    /** Runs an action unless a commit is still being computed; allocation failures are contained. */
+    const whenIdle = <A extends unknown[]>(fn: (...args: A) => void) => {
+      const guarded = guard(fn);
+      return (...args: A) => {
+        if (pending === 0) guarded(...args);
       };
+    };
 
     function openDocument(doc: Doc, name: string, label = "Open", smartLink: SmartLink | null = null) {
       cancelTool();
@@ -298,6 +421,7 @@ export function createEditor() {
       s.setView(fitView(doc.width, doc.height, width, height));
       setSessions((list) => [...list, s]);
       setActiveId(s.id);
+      enforceMemoryBudget();
       return s as DocumentSession;
     }
 
@@ -307,8 +431,8 @@ export function createEditor() {
       const i = list.findIndex((s) => s.id === id);
       if (i < 0) return;
       const rest = list.filter((s) => s.id !== id);
-      setSessions(rest);
-      if (activeId() === id) setActiveId(rest[Math.min(i, rest.length - 1)]?.id ?? null);
+      setSessions(() => rest);
+      if (activeIdNow === id) setActiveId(rest[Math.min(i, rest.length - 1)]?.id ?? null);
     }
 
     function setView(v: View) {
@@ -511,10 +635,13 @@ export function createEditor() {
       },
       openDocument,
       newDocument: (opts: NewDocumentOptions, name = "Untitled") => openDocument(createDocument(opts), name, "New"),
-      closeDocument,
+      closeDocument: (id: string) => {
+        closeDocument(id);
+        enforceMemoryBudget();
+      },
       renameDocument: (id: string, name: string) => sessions().find((s) => s.id === id)?.setName(name),
       /** Records `doc` as what's on disk (the user may keep editing while a save is in flight). */
-      markSaved: (id: string, doc: Doc) => sessions().find((s) => s.id === id)?.markSaved(doc),
+      markSaved: (id: string, doc: Doc | null) => sessions().find((s) => s.id === id)?.markSaved(doc),
 
       tool: toolId,
       setTool,
@@ -590,6 +717,25 @@ export function createEditor() {
       onError: (fn: (message: string) => void) => {
         reportError = fn;
       },
+      preferences,
+      /** Applies and persists preferences; a lower History States limit trims history immediately. */
+      setPreferences(p: Preferences) {
+        prefs = p;
+        setPreferencesSignal(p);
+        savePreferences(p);
+        for (const x of sessions()) x.setHistory((h) => limitSteps(h, p.historyStates));
+        enforceMemoryBudget();
+      },
+      memory,
+      /** The renderer reports display quality reductions under GPU memory pressure. */
+      setGpuLevel: (gpuLevel: number) => updateMemory({ gpuLevel }),
+      onGpuReset: (fn: () => void) => {
+        gpuReset = fn;
+      },
+      /** Asks the renderer to try full display quality again. */
+      retryFullQuality: () => gpuReset(),
+      /** Dismisses the "exhausted" state once the user has seen it. */
+      acknowledgeMemory: () => memoryNow.ram === "exhausted" && updateMemory({ ram: "ok" }),
       /** The UI's modal OK/Cancel prompt. */
       onConfirm: (fn: (message: string) => Promise<boolean>) => {
         askConfirm = fn;
