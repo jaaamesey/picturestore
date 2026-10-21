@@ -426,3 +426,13 @@ export function downsample(src: Uint8ClampedArray, w: number, h: number, level: 
   }
   return out;
 }
+
+/** Whether pixels cover the `width × height` area at the origin, opaquely (what can be a Background layer). */
+export function isOpaque(pixels: Pixels, width: number, height: number): boolean {
+  let covered = 0, opaque = true;
+  readSpans(pixels, rect(0, 0, width, height), (d, i, _x, _y, n) => {
+    for (let a = i + 3, end = i + n * 4; a < end; a += 4) if (d[a] !== 255) opaque = false;
+    covered += n;
+  });
+  return opaque && covered === width * height;
+}

@@ -1,6 +1,6 @@
 import { lookup, type Program } from "../core/adjustments";
 import { blendModeIndex, effectiveMode } from "../core/blend";
-import { programOf } from "../core/composite";
+import { fillOf, programOf } from "../core/composite";
 import { placementMapping, wholePixelMove } from "../core/content";
 import type { Layer, LayerContent } from "../core/document";
 import { hasPixels, isClipped, isGroup, walk } from "../core/layers";
@@ -302,6 +302,17 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   };
   const clearPipeline = fullscreen(fillWgsl(0), ACCUM_FORMAT);
   const maskFill = [fullscreen(fillWgsl(0), MASK_FORMAT), fullscreen(fillWgsl(1), MASK_FORMAT)];
+  // A mask's density: v ← d·v + (1 − d), as a constant blend (the blend constant is d).
+  const densityModule = module(fillWgsl(1));
+  const maskDensity = device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: densityModule, entryPoint: "vs" },
+    fragment: {
+      module: densityModule,
+      entryPoint: "fs",
+      targets: [{ format: MASK_FORMAT, blend: { color: { srcFactor: "one-minus-constant", dstFactor: "constant" }, alpha: { srcFactor: "one-minus-constant", dstFactor: "constant" } } }],
+    },
+  });
   const texture = (format: GPUTextureFormat, size: number[], dimension: GPUTextureDimension = "2d") =>
     device.createTexture({ size, format, dimension, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
   // Stand-ins for bindings a draw doesn't use.
@@ -695,7 +706,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       .map((l) => {
         const m = l.mask;
         const c = l.content;
-        let s = `${l.id}|${l.visible}|${l.opacity}|${l.blendMode}|${l.clipped}|${m ? `${m.enabled}${m.background}` : ""}`;
+        let s = `${l.id}|${l.visible}|${l.opacity}|${l.fill}|${l.blendMode}|${l.clipped}|${l.isBackground}|${m ? `${m.enabled}${m.background}${m.density}` : ""}`;
         if (c.kind === "adjustment") {
           let n = adjustmentIds.get(c.adjustment);
           if (n === undefined) adjustmentIds.set(c.adjustment, (n = nextAdjustmentId++));
@@ -948,7 +959,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
   /** One GPU step of a composite, in order. Draws into `target` (a surface, or the composite's level 0). */
   type Op =
-    | { kind: "fill"; target: GPUTexture; pipeline: GPURenderPipeline }
+    | { kind: "fill"; target: GPUTexture; pipeline: GPURenderPipeline; constant?: number }
     | { kind: "copy"; from: GPUTexture; to: GPUTexture }
     | { kind: "tiles"; target: GPUTexture; pipeline: GPURenderPipeline; bindGroup: GPUBindGroup; entry: LayerEntry; slot: number }
     | { kind: "mesh"; target: GPUTexture; pipeline: GPURenderPipeline; slot: number; float: Float }
@@ -1015,6 +1026,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       if (entry?.instanceCount) ops.push({ kind: "tiles", target, pipeline: tile.mask, bindGroup: maskTileBindGroup!, entry, slot: tileSlot(entry, 1, 0, 0, shift) });
       const fl = floatOf(l.id, "mask");
       if (fl) meshOp(target, meshMask, fl, 1, 0, 0);
+      const density = l.mask!.density ?? 1;
+      if (density < 1) ops.push({ kind: "fill", target, pipeline: maskDensity, constant: density });
     }
 
     function stack(ls: readonly Layer[], target: GPUTexture) {
@@ -1040,7 +1053,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       const s = surface(depth++);
       ops.push({ kind: "fill", target: s, pipeline: clearPipeline });
       if (isGroup(base)) stack(base.content.layers, s);
-      else pixels(base, s, 1, 0, 0);
+      else pixels(base, s, fillOf(base), 0, 0);
       if (masked) {
         drawMask(base, 0);
         step(s, compose.applyMask, stepSlot(1, 0, MASK_A));
@@ -1063,7 +1076,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         const r = adjustResources(programOf(l));
         masks();
         copyToScratch(target);
-        return step(target, compose.adjust, stepSlot(l.opacity, mode, flags, r.kind, r.params), dummy.color, r);
+        return step(target, compose.adjust, stepSlot(l.opacity * fillOf(l), mode, flags, r.kind, r.params), dummy.color, r);
       }
       if (c.kind === "group") {
         if (l.blendMode === "pass through" && !atop) {
@@ -1087,7 +1100,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         return;
       }
       masks();
-      pixels(l, target, l.opacity, mode, flags);
+      pixels(l, target, l.opacity * fillOf(l), mode, flags);
     }
 
     /** A layer's own pixels (and the floating pixels being transformed as part of it). */
@@ -1164,6 +1177,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       p.setPipeline(op.pipeline);
       switch (op.kind) {
         case "fill":
+          if (op.constant !== undefined) p.setBlendConstant([op.constant, op.constant, op.constant, op.constant]);
           p.draw(3);
           break;
         case "tiles":

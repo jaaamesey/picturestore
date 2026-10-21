@@ -52,6 +52,8 @@ export interface LayerMask {
   readonly enabled: boolean;
   /** Linked masks move and transform with their layer. */
   readonly linked: boolean;
+  /** Density [0, 1] (default 1): how much the mask hides; at 0.5 its black hides half. */
+  readonly density?: number;
 }
 
 export const PIXELS: LayerContent = { kind: "pixels" };
@@ -69,7 +71,42 @@ export interface Layer {
   /** Clipped to the layer below (Create Clipping Mask): shown only where the clipping group's base layer is. */
   readonly clipped: boolean;
   readonly mask: LayerMask | null;
+  /**
+   * Photoshop's Background layer: always the bottom layer, opaque and
+   * locked (its transparency and position), and never a clipping base,
+   * masked or grouped. Layer ▸ New ▸ Layer from Background makes it a layer.
+   */
+  readonly isBackground?: boolean;
+  /** The Layers panel's locks. */
+  readonly locks?: LayerLocks;
+  /**
+   * Fill opacity [0, 1] (default 1): like opacity, but for the layer's own
+   * content only — on a clipping group's base, its opacity fades the whole
+   * group and its fill just the base.
+   */
+  readonly fill?: number;
 }
+
+/** Lock Transparent Pixels, Lock Image Pixels, Lock Position, Lock All. */
+export interface LayerLocks {
+  readonly transparency?: boolean;
+  readonly pixels?: boolean;
+  readonly position?: boolean;
+  readonly all?: boolean;
+}
+
+/** What a layer's locks prevent (Lock All implies the rest; the Background's transparency and position are locked). */
+export function locksOf(l: Layer): Required<Omit<LayerLocks, "all">> {
+  const k = l.locks ?? {};
+  return {
+    transparency: !!(k.all || k.transparency || l.isBackground),
+    pixels: !!(k.all || k.pixels),
+    position: !!(k.all || k.position || l.isBackground),
+  };
+}
+
+/** Photoshop's message when a lock refuses an edit. */
+export const LOCKED = "Could not complete your request because the layer is locked.";
 
 /** A guide: a vertical line at x = `position`, or a horizontal one at y, in document pixels (it may lie off the canvas). */
 export interface Guide {
@@ -197,11 +234,11 @@ export interface NewDocumentOptions {
   background?: RGB | null;
 }
 
+/** A new document: with a background colour, a Background layer of it; transparent, an empty "Layer 1" (as Photoshop). */
 export function createDocument({ width, height, background = { r: 255, g: 255, b: 255 } }: NewDocumentOptions): Doc {
-  const layer = createLayer({
-    name: "Background",
-    pixels: background ? fillPixels(NO_PIXELS, rect(0, 0, width, height), background) : NO_PIXELS,
-  });
+  const layer = background
+    ? createLayer({ name: "Background", isBackground: true, pixels: fillPixels(NO_PIXELS, rect(0, 0, width, height), background) })
+    : createLayer({ name: "Layer 1" });
   return { width, height, layers: [layer], activeLayerId: layer.id, selection: null };
 }
 
@@ -263,13 +300,19 @@ export function numberedName(d: Doc, base: string): string {
  * clipping group (under a clipped layer) joins it, as in Photoshop; a
  * clipped layer landing outside any is released.
  */
-function settleClipping(layers: readonly Layer[], id: string): readonly Layer[] {
+function settleClipping(layers: readonly Layer[], id: string, added = false): readonly Layer[] {
   const p = locate(layers, id)!;
   const l = p.siblings[p.index];
   const above = p.siblings[p.index + 1], below = p.siblings[p.index - 1];
-  const clipped = !!above?.clipped || (l.clipped && !!below && (below.clipped || false));
+  // A new layer made from a clipped layer (or above a base, under its clipped layers) is clipped too;
+  // a layer moved out of a clipping group is released.
+  const joins = !!above?.clipped || (!!below?.clipped && (added || l.clipped)) || (added && l.clipped);
+  const clipped = joins && canClipTo(below);
   return clipped === l.clipped ? layers : updateIn(layers, id, (x) => ({ ...x, clipped }));
 }
+
+/** Whether a layer can be a clipping base: any layer but the Background. */
+export const canClipTo = (below: Layer | undefined) => !!below && !below.isBackground;
 
 /**
  * Inserts `layer` relative to `targetId` and makes it active. Without a
@@ -278,9 +321,11 @@ function settleClipping(layers: readonly Layer[], id: string): readonly Layer[] 
  */
 export function addLayer(d: Doc, layer: Layer = createLayer({ name: nextLayerName(d) }), targetId = d.activeLayerId, placement?: TreePlacement): Doc {
   const target = findLayer(d.layers, targetId);
-  const where = placement ?? (target && isGroup(target) ? "inside" : "above");
+  let where = placement ?? (target && isGroup(target) ? "inside" : "above");
+  // Nothing goes beneath the Background.
+  if (where === "below" && target?.isBackground) where = "above";
   const layers = insertAt(d.layers, layer, target ? targetId : null, where);
-  return { ...d, layers: layer.clipped ? layers : settleClipping(layers, layer.id), activeLayerId: layer.id };
+  return { ...d, layers: settleClipping(layers, layer.id, true), activeLayerId: layer.id, maskTargeted: false };
 }
 
 /** Deletes a layer (a group with its contents). The document always keeps at least one layer. */
@@ -309,15 +354,19 @@ export function moveLayer(d: Doc, id: string, toIndex: number): Doc {
 export function moveLayerRelative(d: Doc, id: string, targetId: string, placement: TreePlacement): Doc {
   const l = findLayer(d.layers, id);
   const target = findLayer(d.layers, targetId);
-  // A group can't go inside itself.
-  if (!l || !target || id === targetId || findLayer(childrenOf(l), targetId)) return d;
+  // A group can't go inside itself, the Background doesn't move, and nothing goes beneath it.
+  if (!l || !target || id === targetId || l.isBackground || findLayer(childrenOf(l), targetId)) return d;
+  if (placement === "below" && target.isBackground) placement = "above";
+  const before = locate(d.layers, id)!;
   const layers = insertAt(removeFrom(d.layers, id), l, targetId, placement);
+  const after = locate(layers, id)!;
+  if (after.parent?.id === before.parent?.id && after.index === before.index) return d;
   return { ...d, layers: settleClipping(layers, id) };
 }
 
 /** Group Layers (Ctrl+G): puts layers (in their stacking order) into a new group where the topmost one was. */
 export function groupLayers(d: Doc, ids: readonly string[], name = numberedName(d, "Group")): Doc {
-  const order = allLayers(d.layers).filter((l) => ids.includes(l.id));
+  const order = allLayers(d.layers).filter((l) => ids.includes(l.id) && !l.isBackground);
   // Only outermost picks: a group brings its contents along.
   const picked = order.filter((l) => !order.some((g) => g !== l && findLayer(childrenOf(g), l.id)));
   if (!picked.length) return d;
@@ -371,7 +420,13 @@ export function convertToSmartObject(d: Doc, id: string, sourceId = newSourceId(
 /** A copy of a layer (and a group's contents) with new ids. */
 export function cloneLayer(l: Layer, name = l.name): Layer {
   const content = isGroup(l) ? { ...l.content, layers: l.content.layers.map((c) => cloneLayer(c)) } : l.content;
-  return { ...l, id: newId(), name, content };
+  return { ...l, id: newId(), name, content, isBackground: false };
+}
+
+/** Layer ▸ New ▸ Layer from Background: the Background becomes an ordinary layer ("Layer 0"). */
+export function layerFromBackground(d: Doc, id: string, name = "Layer 0"): Doc {
+  const l = findLayer(d.layers, id);
+  return l?.isBackground ? updateLayer(d, id, { isBackground: false, name }) : d;
 }
 
 export function duplicateLayer(d: Doc, id: string): Doc {

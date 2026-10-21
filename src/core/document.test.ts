@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   activeLayer, addLayer, clearPixels, createDocument, createLayer, duplicateLayer, fillPixels, moveLayer,
   moveLayerRelative,
-  removeLayer, updateLayer,
+  removeLayer, updateLayer, layerFromBackground,
 } from "./document";
 import { flatten, mergeDown } from "./composite";
+import { isClipped } from "./layers";
 import { rect } from "./geometry";
 import { rectMask } from "./selection";
 import { NO_PIXELS, getPixel } from "./pixels";
@@ -37,7 +38,7 @@ describe("layers", () => {
 
   it("moves layers above or below a target, in either direction", () => {
     // Bottom to top: A B C D
-    let d = createDocument({ width: 2, height: 2 });
+    let d = createDocument({ width: 2, height: 2, background: null });
     const [a] = d.layers;
     d = addLayer(addLayer(addLayer(updateLayer(d, a.id, { name: "A" }), createLayer({ name: "B" })), createLayer({ name: "C" })), createLayer({ name: "D" }));
     const id = (n: string) => d.layers.find((l) => l.name === n)!.id;
@@ -52,12 +53,41 @@ describe("layers", () => {
   });
 
   it("reorders and duplicates", () => {
-    let d = addLayer(createDocument({ width: 2, height: 2 }));
+    let d = addLayer(createDocument({ width: 2, height: 2, background: null }));
     d = moveLayer(d, d.activeLayerId, 0);
-    expect(d.layers[0].name).toBe("Layer 1");
+    expect(d.layers[0].name).toBe("Layer 2");
     d = duplicateLayer(d, d.layers[0].id);
-    expect(d.layers.map((l) => l.name)).toEqual(["Layer 1", "Layer 1 copy", "Background"]);
+    expect(d.layers.map((l) => l.name)).toEqual(["Layer 2", "Layer 2 copy", "Layer 1"]);
     expect(d.layers[1].pixels).toBe(d.layers[0].pixels);
+  });
+
+  it("keeps the Background at the bottom, where it can't be moved or clipped to", () => {
+    let d = addLayer(createDocument({ width: 2, height: 2 }));
+    const [bg, l1] = d.layers;
+    expect(bg.isBackground).toBe(true);
+    expect(moveLayer(d, l1.id, 0)).toBe(d);
+    expect(moveLayer(d, bg.id, 1)).toBe(d);
+    expect(moveLayerRelative(d, l1.id, bg.id, "below").layers.map((l) => l.name)).toEqual(["Background", "Layer 1"]);
+    d = addLayer(d, createLayer({ name: "x" }), bg.id, "below");
+    expect(d.layers[0].isBackground).toBe(true);
+    const clipped = updateLayer(d, l1.id, { clipped: true });
+    expect(isClipped(clipped.layers, 2)).toBe(false);
+    // Its duplicate is an ordinary layer; Layer from Background makes it one too.
+    expect(duplicateLayer(d, bg.id).layers[1].isBackground).toBe(false);
+    expect(layerFromBackground(d, bg.id).layers[0]).toMatchObject({ isBackground: false, name: "Layer 0" });
+  });
+
+  it("transparent documents start with Layer 1, not a Background", () => {
+    const d = createDocument({ width: 2, height: 2, background: null });
+    expect(d.layers[0].name).toBe("Layer 1");
+    expect(d.layers[0].isBackground).toBeFalsy();
+  });
+
+  it("new layers made over a clipped layer join its clipping group", () => {
+    let d = addLayer(createDocument({ width: 2, height: 2 }), createLayer({ name: "base" }));
+    d = addLayer(d, createLayer({ name: "c", clipped: true }));
+    d = addLayer(d, createLayer({ name: "n" }));
+    expect(d.layers.map((l) => [l.name, l.clipped])).toEqual([["Background", false], ["base", false], ["c", true], ["n", true]]);
   });
 });
 

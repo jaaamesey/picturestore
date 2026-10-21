@@ -108,10 +108,10 @@ export function insertAt(layers: readonly Layer[], layer: Layer, targetId: strin
 
 /**
  * Whether the layer at `index` is clipped: it's marked so and has a layer
- * below it in the same container (the bottom layer of a group or of the
- * document can't be).
+ * below it in the same container to clip to (the bottom layer of a group or
+ * of the document can't be clipped, nor can anything clip to the Background).
  */
-export const isClipped = (siblings: readonly Layer[], index: number) => index > 0 && siblings[index].clipped;
+export const isClipped = (siblings: readonly Layer[], index: number) => index > 0 && siblings[index].clipped && !siblings[index - 1].isBackground;
 
 /** The index of the base layer a (possibly clipped) layer clips to. */
 export function clipBaseIndex(siblings: readonly Layer[], index: number): number {

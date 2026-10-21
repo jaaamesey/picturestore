@@ -17,7 +17,7 @@ import { fromPsd, rgbOf, toPsd } from "./psdAdjustments";
 import { flatten } from "../core/composite";
 import { boundsOf, isEmpty, rect, vec, type Vec2 } from "../core/geometry";
 import { documentKnots, type Knot, type ShapeStyle } from "../core/shape";
-import { NO_PIXELS, contentBounds, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
+import { NO_PIXELS, contentBounds, isOpaque, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
 import { isIdentityPatch, quadOf, type Patch, type Quad } from "../core/warp";
 
 // ag-psd allocates pixel buffers through these hooks. Plain buffers avoid canvas
@@ -45,7 +45,7 @@ function maskIn(c: PsdLayer): LayerMask | null {
   const background = (m.defaultColor ?? 0) >= 128 ? 255 : 0;
   const img = m.imageData;
   const pixels = img && img.width > 0 && img.height > 0 ? pixelsFromImage(img.width, img.height, opaqueGrey(to8bit(img)), m.left ?? 0, m.top ?? 0) : NO_PIXELS;
-  return { pixels, background, enabled: !m.disabled, linked: true };
+  return { pixels, background, enabled: !m.disabled, linked: true, ...(m.userMaskDensity !== undefined && m.userMaskDensity < 1 && { density: m.userMaskDensity }) };
 }
 
 const opaqueGrey = (d: Uint8ClampedArray) => {
@@ -56,7 +56,7 @@ const opaqueGrey = (d: Uint8ClampedArray) => {
 
 /** Our mask as a PSD layer mask: its stored part as opaque grey, the rest its default colour. */
 function maskOut(m: LayerMask): LayerMaskData {
-  const base: LayerMaskData = { defaultColor: m.background, disabled: !m.enabled };
+  const base: LayerMaskData = { defaultColor: m.background, disabled: !m.enabled, ...(m.density !== undefined && m.density < 1 && { userMaskDensity: m.density }) };
   const b = contentBounds(m.pixels);
   if (isEmpty(b)) return base;
   const data = readRect(m.pixels, b);
@@ -187,6 +187,7 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
   let count = 0;
   const read = (children: PsdLayer[]): Layer[] =>
     children.map((c) => {
+      const p = c.protected;
       const common = {
         name: c.name ?? `Layer ${++count}`,
         visible: !c.hidden,
@@ -194,6 +195,8 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
         blendMode: c.blendMode && isBlendMode(c.blendMode) ? c.blendMode : ("normal" as const),
         clipped: !!c.clipping,
         mask: maskIn(c),
+        ...(c.fillOpacity !== undefined && c.fillOpacity < 1 && { fill: c.fillOpacity }),
+        ...(p && (p.transparency || p.composite || p.position) && { locks: { transparency: !!p.transparency, pixels: !!p.composite, position: !!p.position } }),
       };
       if (c.children) {
         const blendMode = c.blendMode === "pass through" ? ("pass through" as const) : common.blendMode;
@@ -210,6 +213,12 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
       return createLayer({ ...common, pixels, content });
     });
   const layers = read(psd.children ?? []);
+  // Photoshop's Background: the bottom layer, transparency-protected and opaque over the whole canvas.
+  const bottom = psd.children?.[0];
+  if (bottom && layers[0].content.kind === "pixels" && bottom.transparencyProtected && !bottom.mask && isOpaque(layers[0].pixels, psd.width, psd.height)) {
+    const { locks: _locks, ...rest } = layers[0];
+    layers[0] = { ...rest, isBackground: true, clipped: false };
+  }
   if (layers.length === 0 && psd.imageData) {
     layers.push(createLayer({ name: "Background", pixels: pixelsFromImage(psd.width, psd.height, to8bit(psd.imageData)) }));
   }
@@ -315,12 +324,16 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
 }
 
 function layerOut(l: Layer, linked: Map<string, LinkedFile>): PsdLayer {
+  const k = l.locks;
   const base: PsdLayer = {
     name: l.name,
     opacity: l.opacity,
     blendMode: l.blendMode,
     hidden: !l.visible,
     clipping: l.clipped,
+    ...(l.fill !== undefined && l.fill < 1 && { fillOpacity: l.fill }),
+    ...(l.isBackground && { transparencyProtected: true }),
+    ...(k && { protected: { transparency: !!(k.transparency || k.all), composite: !!(k.pixels || k.all), position: !!(k.position || k.all) } }),
     ...(l.mask && { mask: maskOut(l.mask) }),
     ...contentFields(l.content, linked),
   };
@@ -346,5 +359,7 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
   // Positions are stored in 1/32 px, unsigned (by ag-psd), so guides left of or above the canvas can't be.
   const guides = (doc.guides ?? []).filter((g) => g.position >= 0).map((g) => ({ location: Math.round(g.position * 32) / 32, direction: g.orientation }));
   if (guides.length) psd.imageResources.gridAndGuidesInformation = { guides };
-  return writePsd(psd, { generateThumbnail: false, noBackground: true });
+  return writePsd(psd, { generateThumbnail: false, noBackground: !doc.layers[0]?.isBackground });
 }
+
+

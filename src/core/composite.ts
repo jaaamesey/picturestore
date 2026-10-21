@@ -63,8 +63,14 @@ export function maskCoverage(mask: LayerMask | null, band: Rect): Float32Array |
       cov[k] = (data[i] * a + bg * (255 - a)) / (255 * 255);
     }
   });
+  // Density scales how much it hides.
+  const d = mask.density ?? 1;
+  if (d < 1) for (let k = 0; k < cov.length; k++) cov[k] = 1 - d * (1 - cov[k]);
   return cov;
 }
+
+/** A layer's Fill opacity (groups have none). */
+export const fillOf = (l: Layer) => l.fill ?? 1;
 
 const programs = new WeakMap<object, Program>();
 /** Compiled adjustments, cached by settings identity (settings are immutable). */
@@ -114,7 +120,9 @@ class Renderer {
     }
     // The base on its own (with its mask), then the clipped layers onto it, keeping its transparency.
     const buf = isGroup(base) ? this.render(base.content.layers) : this.pixels(base.pixels);
-    if (cov) for (let k = 0; k < this.n; k++) for (let c = 0; c < 4; c++) buf[k * 4 + c] *= cov[k];
+    // The base's fill and mask shape the group; its opacity and mode blend the result.
+    const fill = isGroup(base) ? 1 : fillOf(base);
+    if (cov || fill < 1) for (let k = 0; k < this.n; k++) for (let c = 0; c < 4; c++) buf[k * 4 + c] *= fill * (cov ? cov[k] : 1);
     for (const c of clipped) this.layer(c, buf, null, true);
     blendSpan(effectiveMode(base.blendMode), acc, 0, buf, 0, this.n, base.opacity);
   }
@@ -139,7 +147,7 @@ class Renderer {
       }
       return blendSpan(mode, acc, 0, this.render(l.content.layers), 0, this.n, l.opacity, cov, 0, atop);
     }
-    blendSpan(mode, acc, 0, this.pixels(l.pixels), 0, this.n, l.opacity, cov, 0, atop);
+    blendSpan(mode, acc, 0, this.pixels(l.pixels), 0, this.n, l.opacity * fillOf(l), cov, 0, atop);
   }
 
   /**
@@ -159,7 +167,7 @@ class Renderer {
       adjusted[i + 2] = o[2];
       adjusted[i + 3] = 1;
     }
-    blendSpan(effectiveMode(l.blendMode), acc, 0, adjusted, 0, this.n, l.opacity, cov, 0, true);
+    blendSpan(effectiveMode(l.blendMode), acc, 0, adjusted, 0, this.n, l.opacity * fillOf(l), cov, 0, true);
   }
 
   /** Layer pixels over the band, premultiplied. */

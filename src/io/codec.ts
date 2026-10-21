@@ -1,6 +1,6 @@
 import { createLayer, docRect, type Doc } from "../core/document";
 import { flatten } from "../core/composite";
-import { pixelsFromImage } from "../core/pixels";
+import { isOpaque, pixelsFromImage } from "../core/pixels";
 import { walk } from "../core/layers";
 import type { SaveFormat } from "./formats";
 import { readPsdDocument, writePsdDocument } from "./psd";
@@ -19,7 +19,9 @@ export async function decode(file: Blob): Promise<Doc> {
   const ctx = new OffscreenCanvas(width, height).getContext("2d")!;
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
-  const layer = createLayer({ name: "Background", pixels: pixelsFromImage(width, height, ctx.getImageData(0, 0, width, height).data) });
+  const pixels = pixelsFromImage(width, height, ctx.getImageData(0, 0, width, height).data);
+  // As Photoshop: an opaque image opens as a Background layer, one with transparency as "Layer 0".
+  const layer = isOpaque(pixels, width, height) ? createLayer({ name: "Background", isBackground: true, pixels }) : createLayer({ name: "Layer 0", pixels });
   return { width, height, layers: [layer], activeLayerId: layer.id, selection: null };
 }
 
