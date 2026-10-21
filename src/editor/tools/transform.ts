@@ -1,4 +1,4 @@
-import { placementState, sourceFloating, toPlacement, withContent } from "../../core/content";
+import { framedState, placementState, sourceFloating, toPlacement, withContent } from "../../core/content";
 import { activeLayer, docRect, updateLayer, type Doc, type Layer, type LayerContent } from "../../core/document";
 import { intersect, isEmpty, vec, type Vec2 } from "../../core/geometry";
 import { compositeOver, extractFloating } from "../../core/raster";
@@ -39,6 +39,8 @@ export interface Target {
   readonly layer: Layer;
   /** The untransformed state. */
   readonly initial: TransformState;
+  /** Where the controls go: the content's frame, which can differ from `initial` (a warped placement as it is). */
+  readonly frame: TransformState;
   show(ctx: ToolContext, s: TransformState): void;
   /** The document with `s` applied, at commit quality. */
   place(ctx: ToolContext, s: TransformState, filter: Filter): Promise<Doc>;
@@ -52,9 +54,11 @@ export interface Target {
 function pixelTarget(doc: Doc, layer: Layer): Target | null {
   const { floating, rest } = extractFloating(layer.tiles, doc.selection);
   if (isEmpty(floating.bounds)) return null;
+  const initial = initialTransform(floating.bounds);
   return {
     layer,
-    initial: initialTransform(floating.bounds),
+    initial,
+    frame: initial,
     show(ctx, s) {
       ctx.preview({ ...updateLayer(doc, layer.id, { tiles: rest }), selection: null }, {
         tiles: floating.tiles,
@@ -76,12 +80,20 @@ function pixelTarget(doc: Doc, layer: Layer): Target | null {
 }
 
 /** Smart objects and shapes transform as a whole, whatever is selected (as in Photoshop). */
-function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { kind: "pixels" }>): Target {
+/**
+ * Smart objects and shapes: Free Transform edits the content-framed state
+ * (`framed`); the Move tool translates the placement as it is, so a moved
+ * shape is recognisably the same content, moved (which renderers draw
+ * without rasterizing again).
+ */
+function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { kind: "pixels" }>, framed: boolean): Target {
   const clip = docRect(doc);
   const at = (s: TransformState): LayerContent => ({ ...content, placement: toPlacement(s) });
+  const frame = framedState(content.placement);
   return {
     layer,
-    initial: placementState(content.placement),
+    initial: framed ? frame : placementState(content.placement),
+    frame,
     show(ctx, s) {
       // Shapes preview as themselves: the renderer rasterizes the vector on the GPU, exactly, every frame.
       if (content.kind === "shape") return ctx.preview(updateLayer(doc, layer.id, { content: at(s) }));
@@ -100,11 +112,11 @@ function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { 
   };
 }
 
-/** The active layer as a transform target; null when hidden or empty. */
-export function transformTarget(doc: Doc): Target | null {
+/** The active layer as a transform target; null when hidden or empty. `framed`: see {@link contentTarget}. */
+export function transformTarget(doc: Doc, framed = true): Target | null {
   const layer = activeLayer(doc);
   if (!layer || !layer.visible) return null;
-  return layer.content.kind === "pixels" ? pixelTarget(doc, layer) : contentTarget(doc, layer, layer.content);
+  return layer.content.kind === "pixels" ? pixelTarget(doc, layer) : contentTarget(doc, layer, layer.content, framed);
 }
 
 /**
@@ -115,7 +127,7 @@ export function transformTarget(doc: Doc): Target | null {
 export function moveFrame(doc: Doc): TransformState | null {
   const layer = activeLayer(doc);
   if (!layer || !layer.visible) return null;
-  if (layer.content.kind !== "pixels") return placementState(layer.content.placement);
+  if (layer.content.kind !== "pixels") return framedState(layer.content.placement);
   const b = contentBounds(layer.tiles);
   const box = doc.selection ? intersect(b, doc.selection.bounds) : b;
   return isEmpty(box) ? null : initialTransform(box);
@@ -379,7 +391,7 @@ export function createMoveTool(transform: TransformController): Tool {
         ctx.setTool("transform");
         return;
       }
-      target = transformTarget(ctx.doc);
+      target = transformTarget(ctx.doc, false);
       start = vec(e.x, e.y);
       offset = vec(0, 0);
     },
@@ -389,17 +401,20 @@ export function createMoveTool(transform: TransformController): Tool {
       if (e.shift) [dx, dy] = Math.abs(dx) >= Math.abs(dy) ? [dx, 0] : [0, dy];
       offset = vec(Math.round(dx), Math.round(dy));
       target.show(ctx, translate(target.initial, offset.x, offset.y));
+      if (ctx.settings.transform.showControls) ctx.overlay({ kind: "frame", state: translate(target.frame, offset.x, offset.y) });
     },
     up(ctx) {
       if (!target) return;
       const t = target;
       target = null;
+      ctx.overlay(null);
       if (offset.x === 0 && offset.y === 0) return ctx.preview(null);
       ctx.commitAsync("Move", t.place(ctx, translate(t.initial, offset.x, offset.y), ctx.settings.transform.interpolation));
     },
     cancel(ctx) {
       if (!target) return;
       target = null;
+      ctx.overlay(null);
       ctx.preview(null);
     },
   };

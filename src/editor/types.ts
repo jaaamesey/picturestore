@@ -70,7 +70,9 @@ export interface ToolSettings {
 export type Overlay =
   | { readonly kind: "marquee"; readonly shape: "rect" | "ellipse"; readonly rect: Rect }
   | { readonly kind: "lasso"; readonly points: readonly Vec2[] }
-  | { readonly kind: "transform"; readonly state: TransformState; readonly mode: TransformMode };
+  | { readonly kind: "transform"; readonly state: TransformState; readonly mode: TransformMode }
+  /** The Move tool's bounding box, following content while it's dragged. */
+  | { readonly kind: "frame"; readonly state: TransformState };
 
 export interface ToolEvent {
   /** Document coordinates (fractional). */

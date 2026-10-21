@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { initialPlacement, placementMapping, resizedPlacement, smartObjectLayer, smartSource, CPU_RASTERIZERS } from "./content";
+import { framedPlacement, wholePixelMove, initialPlacement, placementMapping, resizedPlacement, smartObjectLayer, smartSource, CPU_RASTERIZERS } from "./content";
 import { resizeCanvas } from "./documentTransform";
 import { addLayer, convertToSmartObject, createDocument, createLayer, fillTiles, rasterizeLayer } from "./document";
-import { rect } from "./geometry";
+import { rect, vec } from "./geometry";
 import { EMPTY_TILES, contentBounds, getPixel, tilesFromImage } from "./tiles";
-import { IDENTITY_PATCH, mapPoint, quadOf, type Mapping } from "./warp";
+import { IDENTITY_PATCH, invert3, mapPoint, project, quadOf, squareToQuad, type Mapping } from "./warp";
 import type { Placement } from "./document";
 
 const cpu = CPU_RASTERIZERS;
@@ -97,5 +97,71 @@ describe("Canvas Size", () => {
     // Part of it was off the old canvas; on the bigger one it's all rendered.
     const big = await resizeCanvas(doc, 200, 200, { x: 0, y: 0 }, cpu);
     expect(contentBounds(big.layers[1].tiles)).toEqual(rect(90, 90, 20, 20));
+  });
+});
+
+describe("framing warped placements", () => {
+  const warped: Placement = {
+    source: rect(0, 0, 100, 100),
+    // Scaled 2×, rotated 30°.
+    quad: [vec(0, 0), vec(173.2, 100), vec(73.2, 273.2), vec(-100, 173.2)],
+    angle: Math.PI / 6,
+    // The middle of the top edge pulled well outside the box.
+    patch: IDENTITY_PATCH.map((p, k) => (k === 1 || k === 2 ? { x: p.x, y: p.y - 0.4 } : p)),
+  };
+
+  it("frames the content, not the pre-warp box, with exactly the same mapping", () => {
+    const f = framedPlacement(warped);
+    expect(f.quad).not.toEqual(warped.quad);
+    for (const [s, t] of [[0, 0], [0.5, 0], [0.25, 0.75], [1, 1]]) {
+      const a = mapPoint(placementMapping(warped), s, t), b = mapPoint(placementMapping(f), s, t);
+      expect(b.x).toBeCloseTo(a.x, 6);
+      expect(b.y).toBeCloseTo(a.y, 6);
+    }
+    // The frame hugs the warped content: every point of it is inside, and the top edge is touched.
+    const inv = invert3(squareToQuad(f.quad)!)!;
+    let minT = Infinity;
+    for (let i = 0; i <= 20; i++)
+      for (let j = 0; j <= 20; j++) {
+        const q = mapPoint(placementMapping(warped), i / 20, j / 20);
+        const u = project(inv, q.x, q.y);
+        expect(u.x).toBeGreaterThan(-1e-6);
+        expect(u.x).toBeLessThan(1 + 1e-6);
+        expect(u.y).toBeGreaterThan(-1e-6);
+        minT = Math.min(minT, u.y);
+      }
+    expect(minT).toBeLessThan(0.01);
+    // Framing is stable: doing it again changes nothing.
+    const again = framedPlacement(f);
+    again.quad.forEach((q, i) => {
+      expect(q.x).toBeCloseTo(f.quad[i].x, 6);
+      expect(q.y).toBeCloseTo(f.quad[i].y, 6);
+    });
+  });
+
+  it("leaves unwarped placements alone", () => {
+    const plain = { ...warped, patch: null };
+    expect(framedPlacement(plain)).toBe(plain);
+  });
+});
+
+describe("wholePixelMove", () => {
+  const placement: Placement = { source: rect(0, 0, 10, 10), quad: quadOf(rect(5, 5, 20, 10)), angle: 0, patch: null };
+  const base = { kind: "shape" as const, geometry: { kind: "ellipse" as const }, style: { fill: { r: 1, g: 2, b: 3 }, stroke: null }, placement };
+  const moved = (dx: number, dy: number) => ({ ...base, placement: { ...base.placement, quad: quadOf(rect(5 + dx, 5 + dy, 20, 10)) } });
+
+  it("recognises whole-pixel moves of the same content", () => {
+    expect(wholePixelMove(base, base)).toEqual({ x: 0, y: 0 });
+    expect(wholePixelMove(base, moved(3, -7))).toEqual({ x: 3, y: -7 });
+    // At a reduced display level only multiples of the reduction count.
+    expect(wholePixelMove(base, moved(4, 2), 2)).toEqual({ x: 4, y: 2 });
+    expect(wholePixelMove(base, moved(3, 2), 2)).toBeNull();
+  });
+
+  it("rejects anything else", () => {
+    expect(wholePixelMove(base, moved(0.5, 0))).toBeNull();
+    expect(wholePixelMove(base, { ...base, placement: { ...base.placement, quad: quadOf(rect(5, 5, 21, 10)) } })).toBeNull();
+    expect(wholePixelMove(base, { ...moved(1, 1), style: { ...base.style } })).toBeNull();
+    expect(wholePixelMove(base, { ...base, placement: { ...base.placement, patch: IDENTITY_PATCH } })).toBeNull();
   });
 });

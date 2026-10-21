@@ -1,11 +1,11 @@
 import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type Placement, type SmartSource } from "./document";
-import { rect, type Rect } from "./geometry";
+import { rect, vec, type Rect, type Vec2 } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "./shape";
 import type { TileMap } from "./tiles";
 import type { TransformState } from "./transform";
-import { project, quadOf, reparameterizePatch, squareToQuad, type Mapping, type Quad } from "./warp";
+import { evalPatch, invert3, isIdentityPatch, project, quadOf, reparameterizePatch, squareToQuad, type Mapping, type Quad } from "./warp";
 
 /** Commit-quality resampling, clipped to `clip` if given (layers may extend past the canvas). */
 export type Resample = (f: Floating, m: Mapping, filter: Filter, clip?: Rect) => Promise<TileMap>;
@@ -26,11 +26,55 @@ export const CPU_RASTERIZERS: Rasterizers = {
 
 export const placementMapping = (p: Placement): Mapping => ({ source: p.source, quad: p.quad, patch: p.patch });
 
-/** A Free Transform session over an existing placement, pivoting about its centre. */
+/** Samples per side when measuring a warped surface's extent. */
+const WARP_SAMPLES = 48;
+
+/**
+ * The same placement, framed by what it actually covers. A warp can carry
+ * content outside its quad (the box before warping), so transform controls
+ * on the quad wouldn't hug what's on screen. With an affine quad, the frame
+ * is re-based onto the warped content's tight bounds in the box's own
+ * orientation, and the warp re-expressed in it — the same mapping, exactly
+ * (affine maps commute with Bézier control points). Unwarped and
+ * perspective placements are returned as they are.
+ */
+export function framedPlacement(p: Placement): Placement {
+  if (!p.patch || isIdentityPatch(p.patch)) return p;
+  const H = squareToQuad(p.quad);
+  if (!H || Math.abs(H[6]) > 1e-12 || Math.abs(H[7]) > 1e-12) return p;
+  const c = Math.cos(p.angle), s = Math.sin(p.angle);
+  // Extent in the box's frame (rotated by -angle).
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let j = 0; j <= WARP_SAMPLES; j++)
+    for (let i = 0; i <= WARP_SAMPLES; i++) {
+      const u = evalPatch(p.patch, i / WARP_SAMPLES, j / WARP_SAMPLES);
+      const q = project(H, u.x, u.y);
+      const x = q.x * c + q.y * s, y = -q.x * s + q.y * c;
+      x0 = Math.min(x0, x);
+      x1 = Math.max(x1, x);
+      y0 = Math.min(y0, y);
+      y1 = Math.max(y1, y);
+    }
+  if (!(x1 - x0 > 1e-9 && y1 - y0 > 1e-9)) return p;
+  const back = (x: number, y: number) => vec(x * c - y * s, x * s + y * c);
+  const quad: Quad = [back(x0, y0), back(x1, y0), back(x1, y1), back(x0, y1)];
+  const inv = invert3(squareToQuad(quad)!)!;
+  // patch'(s, t) = H'⁻¹(H(patch(s, t))): an affine map, applied to the control points.
+  const patch = p.patch.map((u) => {
+    const q = project(H, u.x, u.y);
+    return project(inv, q.x, q.y);
+  });
+  return { ...p, quad, patch };
+}
+
+/** A transform state over a placement as it is, pivoting about its centre. */
 export function placementState(p: Placement): TransformState {
   const H = squareToQuad(p.quad)!;
   return { ...p, reference: project(H, 0.5, 0.5) };
 }
+
+/** A transform state framed by the placement's content (see {@link framedPlacement}): what controls show and Free Transform edits. */
+export const framedState = (p: Placement): TransformState => placementState(framedPlacement(p));
 
 export const toPlacement = (s: TransformState): Placement => ({ source: s.source, quad: s.quad, angle: s.angle, patch: s.patch });
 
@@ -109,3 +153,25 @@ export const smartSource = (name: string, width: number, height: number, tiles: 
   tiles,
   file,
 });
+
+/**
+ * If `next` is `prev` moved by whole pixels (a multiple of `step`), the
+ * move; else null: same content otherwise, same source and warp, every
+ * corner shifted alike. Lets renderers move what they've already
+ * rasterized instead of rasterizing again.
+ */
+export function wholePixelMove<C extends Extract<LayerContent, { placement: Placement }>>(prev: C, next: C, step = 1): Vec2 | null {
+  if (prev === next) return { x: 0, y: 0 };
+  // Everything but the placement must be the very same (contents are immutable, so identity is equality).
+  for (const k of Object.keys(next) as (keyof C)[]) if (k !== "placement" && prev[k] !== next[k]) return null;
+  const a = prev.placement, b = next.placement;
+  if (a.source.x !== b.source.x || a.source.y !== b.source.y || a.source.w !== b.source.w || a.source.h !== b.source.h) return null;
+  if (a.patch !== b.patch && !(a.patch && b.patch && a.patch.every((p, i) => p.x === b.patch![i].x && p.y === b.patch![i].y))) return null;
+  const dx = b.quad[0].x - a.quad[0].x, dy = b.quad[0].y - a.quad[0].y;
+  const rx = Math.round(dx), ry = Math.round(dy);
+  if (Math.abs(dx - rx) > 1e-6 || Math.abs(dy - ry) > 1e-6 || rx % step !== 0 || ry % step !== 0) return null;
+  for (let i = 1; i < 4; i++) {
+    if (Math.abs(b.quad[i].x - a.quad[i].x - dx) > 1e-6 || Math.abs(b.quad[i].y - a.quad[i].y - dy) > 1e-6) return null;
+  }
+  return { x: rx, y: ry };
+}

@@ -223,11 +223,19 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
 
   const cursor = () => (editor.busy() ? "progress" : spaceHeld() || pan ? "grab" : editor.cursor(hover()));
 
-  /** The Move tool's always-on transform controls, when no transform is in progress. */
+  /**
+   * The Move tool's transform controls: the frame it publishes while
+   * dragging, else the frame of what's displayed (so a commit still in
+   * flight shows where things went). Hidden while pixels float, whose frame
+   * the layer alone doesn't describe.
+   */
   const moveControls = createMemo(() => {
     const s = editor.active();
-    if (!s || editor.tool() !== "move" || !editor.settings.transform.showControls || s.overlay() || s.floating()) return null;
-    return moveFrame(s.doc());
+    if (!s || editor.tool() !== "move" || !editor.settings.transform.showControls) return null;
+    const o = s.overlay();
+    if (o?.kind === "frame") return o.state;
+    if (o || s.floating()) return null;
+    return moveFrame(s.displayed());
   });
   const brushRadius = () => {
     const t = editor.tool();

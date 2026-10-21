@@ -112,7 +112,8 @@ ${FULLSCREEN_VS}
 export const tilesWgsl = (slot: number) => {
   const perSide = ATLAS_PAGE / slot;
   return /* wgsl */ `
-struct Draw { opacity: f32, mode: u32, docSize: vec2<f32> }
+// offset: where the layer's tiles are drawn relative to their grid, in composite pixels (a shape being moved).
+struct Draw { opacity: f32, mode: u32, docSize: vec2<f32>, offset: vec2<i32> }
 @group(0) @binding(0) var<uniform> D: Draw;
 @group(0) @binding(1) var atlas: texture_2d_array<f32>;
 @group(0) @binding(2) var dst: texture_2d<f32>;
@@ -127,7 +128,7 @@ struct VOut {
 
 @vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) tile: vec3<i32>) -> VOut {
   var corners = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
-  let origin = tile.xy * ${slot};
+  let origin = tile.xy * ${slot} + D.offset;
   let local = tile.z % ${perSide * perSide};
   var o: VOut;
   o.origin = origin;

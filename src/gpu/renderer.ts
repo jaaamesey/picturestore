@@ -1,9 +1,9 @@
 import { blendModeIndex, type BlendMode } from "../core/blend";
-import { placementMapping } from "../core/content";
+import { placementMapping, wholePixelMove } from "../core/content";
 import type { Layer, LayerContent } from "../core/document";
 import { shapeSegments, type ShapeGeometry, type ShapeStyle } from "../core/shape";
 import { createVectorRasterizer } from "./vector";
-import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect } from "../core/geometry";
+import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect, type Vec2 } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
 import { EMPTY_TILES, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileKey, tileRect, tilesFromImage, tilesIn, type Tile, type TileKey, type TileMap } from "../core/tiles";
@@ -59,6 +59,8 @@ export interface Renderer {
   level(): number;
   /** Tries full quality again (e.g. after closing documents). */
   resetLevel(): void;
+  /** Work counters, for tests guarding the fast paths. */
+  readonly stats: { shapesRasterized: number; shapesMoved: number };
   destroy(): void;
 }
 
@@ -79,6 +81,13 @@ export interface RendererOptions {
 
 type ShapeContent = Extract<LayerContent, { kind: "shape" }>;
 
+const ZERO: Vec2 = { x: 0, y: 0 };
+const translateRect = (r: Rect, d: Vec2): Rect => (d.x || d.y ? rect(r.x + d.x, r.y + d.y, r.w, r.h) : r);
+const contains = (outer: Rect, inner: Rect) =>
+  isEmpty(inner) || (inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h);
+
+
+
 /** The tile atlas can't grow (device limit, or out of GPU memory). */
 class AtlasFull extends Error {}
 
@@ -87,7 +96,7 @@ export const MAX_LEVEL = 4;
 
 const ACCUM_FORMAT: GPUTextureFormat = "rgba16float";
 const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
-const TILE_UNIFORM_SIZE = 16; // sizeof(Draw)
+const TILE_UNIFORM_SIZE = 32; // sizeof(Draw), rounded up
 const MESH_UNIFORM_SIZE = 48; // sizeof(Mesh)
 const WORKSPACE = [0.16, 0.16, 0.17, 1];
 const CHUNK = 2048; // resample output is rendered and read back in chunks of at most this size
@@ -113,9 +122,13 @@ const PREMULTIPLIED_OVER: GPUBlendState = {
 interface LayerEntry {
   /** What's in the atlas for each on-canvas tile (tile is null for tiles the GPU rasterized). */
   readonly slots: Map<TileKey, { slot: number; tile: Tile | null; version: number }>;
-  /** For shape layers: the content last rasterized, and what it covered (document space). */
+  /** For shape layers: the content last rasterized, and what of it was rasterized (document space, within the canvas). */
   shape: ShapeContent | null;
   shapeBounds: Rect;
+  /** The shape's full extent when rasterized (document space, unclipped). */
+  shapeExtent: Rect;
+  /** Where the tiles are drawn relative to where they were rasterized: whole document pixels (a shape being moved). */
+  offset: Vec2;
   instances: GPUBuffer | null;
   instanceCount: number;
   instancesDirty: boolean;
@@ -211,6 +224,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   const presentPipeline = fullscreen(PRESENT_WGSL, output.format);
 
   const vectors = createVectorRasterizer(device);
+  const stats = { shapesRasterized: 0, shapesMoved: 0 };
   const trilinear = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
   const viewUniforms = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   let drawUniforms = device.createBuffer({ size: UNIFORM_SLOT * 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -335,6 +349,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     entry.instanceCount = 0;
     entry.shape = null;
     entry.shapeBounds = EMPTY_RECT;
+    entry.shapeExtent = EMPTY_RECT;
+    entry.offset = ZERO;
   }
 
   function freeLayer(entry: LayerEntry) {
@@ -439,9 +455,11 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   function syncLayer(entry: LayerEntry, tiles: TileMap): Rect {
     const canvasRect = rect(0, 0, size.width, size.height);
     // Was a shape (since rasterized): its GPU-rendered tiles are replaced by uploads below.
-    let dirty = entry.shape ? entry.shapeBounds : EMPTY_RECT;
+    let dirty = entry.shape ? translateRect(entry.shapeBounds, entry.offset) : EMPTY_RECT;
     entry.shape = null;
     entry.shapeBounds = EMPTY_RECT;
+    entry.shapeExtent = EMPTY_RECT;
+    entry.offset = ZERO;
     for (const [key, tile] of tiles) {
       const r = tileRect(keyX(key), keyY(key));
       if (isEmpty(intersect(r, canvasRect))) continue;
@@ -485,11 +503,27 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
    * level does); CPU tiles of shape layers are never uploaded.
    */
   function syncShape(entry: LayerEntry, content: ShapeContent): Rect {
-    if (entry.shape === content) return EMPTY_RECT;
     const canvasRect = rect(0, 0, size.width, size.height);
+    const drawn = translateRect(entry.shapeBounds, entry.offset);
+    // Moved by whole pixels, with nothing previously off the canvas coming into view: draw what's
+    // already rasterized, offset, instead of rasterizing again.
+    const d = entry.shape && wholePixelMove(entry.shape, content, 1 << level);
+    if (d && entry.shape) {
+      const visible = intersect(translateRect(entry.shapeExtent, d), canvasRect);
+      if (contains(translateRect(entry.shapeBounds, d), visible)) {
+        if (d.x === entry.offset.x && d.y === entry.offset.y) return EMPTY_RECT;
+        entry.offset = d;
+        stats.shapesMoved++;
+        return union(drawn, translateRect(entry.shapeBounds, d));
+      }
+    }
+    entry.offset = ZERO;
+    stats.shapesRasterized++;
     const seg = shapeSegments(content.geometry, content.style, placementMapping(content.placement), 1 / (1 << level));
-    const bounds = intersect(roundOut(seg.bounds), canvasRect);
-    const dirty = union(entry.shapeBounds, bounds);
+    const extent = roundOut(seg.bounds);
+    const bounds = intersect(extent, canvasRect);
+    entry.shapeExtent = extent;
+    const dirty = union(drawn, bounds);
     const keep = new Set<TileKey>();
     for (const [tx, ty] of tilesIn(bounds)) keep.add(tileKey(tx, ty));
     for (const [key, { slot }] of entry.slots) {
@@ -537,7 +571,17 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       seen.add(layer.id);
       let entry = layers.get(layer.id);
       if (!entry) {
-        entry = { slots: new Map(), instances: null, instanceCount: 0, instancesDirty: true, props: "", shape: null, shapeBounds: EMPTY_RECT };
+        entry = {
+          slots: new Map(),
+          instances: null,
+          instanceCount: 0,
+          instancesDirty: true,
+          props: "",
+          shape: null,
+          shapeBounds: EMPTY_RECT,
+          shapeExtent: EMPTY_RECT,
+          offset: ZERO,
+        };
         layers.set(layer.id, entry);
       }
       // Hidden layers keep no GPU copy; showing one uploads it again.
@@ -724,6 +768,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         new Float32Array(data, i * UNIFORM_SLOT, 1)[0] = op.opacity;
         new Uint32Array(data, i * UNIFORM_SLOT + 4, 1)[0] = op.mode;
         new Float32Array(data, i * UNIFORM_SLOT + 8, 2).set([px.width, px.height]);
+        new Int32Array(data, i * UNIFORM_SLOT + 16, 2).set([op.entry.offset.x >> level, op.entry.offset.y >> level]);
       } else {
         writeMeshUniform(data, i * UNIFORM_SLOT, docViewport, floating!, op.opacity, op.mode, 0);
       }
@@ -951,6 +996,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     },
 
     level: () => level,
+    stats,
 
     resetLevel() {
       if (level === 0) return;

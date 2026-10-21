@@ -8,9 +8,10 @@ import type { FloatingLayer } from "../../gpu/renderer";
 import { DEFAULT_SETTINGS } from "../editor";
 import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings } from "../types";
 import { createTools } from "./index";
-import { CPU_RASTERIZERS, smartObjectLayer, smartSource } from "../../core/content";
+import { moveFrame } from "./transform";
+import { CPU_RASTERIZERS, smartObjectLayer, smartSource, wholePixelMove } from "../../core/content";
 import { convertToSmartObject, createLayer } from "../../core/document";
-import { quadOf } from "../../core/warp";
+import { IDENTITY_PATCH, quadOf } from "../../core/warp";
 
 const settings: ToolSettings = {
   ...DEFAULT_SETTINGS,
@@ -346,6 +347,34 @@ describe("shape tools", () => {
     move.up!(h.ctx(), h.ev(45, 25));
     await h.s.pending;
     expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(35, 15, 20, 20));
+  });
+
+  it("the Move tool's frame follows the content while dragging", async () => {
+    const h = harness(blank());
+    await h.drag("rectangle", [10, 10], [30, 30]);
+    const move = h.tools.byId.move;
+    move.down!(h.ctx(), h.ev(20, 20));
+    move.move!(h.ctx(), h.ev(45, 25));
+    expect(h.s.overlay).toEqual({ kind: "frame", state: expect.objectContaining({ quad: quadOf(rect(35, 15, 20, 20)) }) });
+    move.up!(h.ctx(), h.ev(45, 25));
+    expect(h.s.overlay).toBeNull();
+  });
+
+  it("moves warped shapes as they are (recognisably moved), while their frame hugs the warp", async () => {
+    const d = blank();
+    const geometry = { kind: "rectangle", radius: 0 } as const;
+    const style = { fill: { r: 1, g: 2, b: 3 }, stroke: null };
+    const patch = IDENTITY_PATCH.map((p, k) => (k === 1 || k === 2 ? { x: p.x, y: p.y - 0.5 } : p));
+    const placement = { source: rect(0, 0, 20, 20), quad: quadOf(rect(20, 40, 20, 20)), angle: 0, patch };
+    const content = { kind: "shape" as const, geometry, style, placement };
+    const h = harness(addLayer(d, createLayer({ name: "warped", content })));
+    // The frame's top is above the quad's: the warp pulls the top edge up.
+    expect(moveFrame(h.s.doc)!.quad[0].y).toBeLessThan(40);
+    const move = h.tools.byId.move;
+    move.down!(h.ctx(), h.ev(30, 50));
+    move.move!(h.ctx(), h.ev(37, 52));
+    const shown = layerOf(h.s.preview!).content;
+    expect(shown.kind === "shape" && wholePixelMove(content, shown)).toEqual({ x: 7, y: 2 });
   });
 
   it("moves a shape by its placement, re-rendering it exactly", async () => {

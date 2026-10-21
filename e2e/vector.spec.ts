@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { settled } from "./helpers";
+import { cpuPixel, docPoint, drag, expectHistory, gpuPixels, newDocument, settled } from "./helpers";
 
 /**
  * GPU shape rasterization against the CPU reference (core/shape.ts):
@@ -101,4 +101,32 @@ test("GPU shape rendering matches the CPU reference, on screen and read back", a
     expect(r.over1 / r.painted).toBeLessThan(0.002);
   }
   await settled(page);
+});
+
+test("moving a shape follows the pointer with its frame, without rasterizing it again", async ({ page }) => {
+  await newDocument(page, 400, 300);
+  await page.keyboard.press("u");
+  await drag(page, [50, 50], [150, 120]);
+  await expectHistory(page, "Rectangle Tool");
+  await page.keyboard.press("v");
+  const stats = () => page.evaluate(() => ({ ...window.__ps!.renderer!.stats }));
+  const before = await stats();
+  const a = await docPoint(page, 100, 85);
+  const b = await docPoint(page, 160, 125);
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move((a.x + b.x) / 2, (a.y + b.y) / 2, { steps: 5 });
+  // The frame is drawn where the shape is now, mid-drag.
+  const box = (await page.getByTestId("move-controls").locator("polygon").boundingBox())!;
+  const mid = await docPoint(page, 80, 70);
+  expect(Math.abs(box.x - mid.x)).toBeLessThan(5); // (a stale frame would be 30 document pixels off)
+  await page.mouse.move(b.x, b.y, { steps: 5 });
+  await page.mouse.up();
+  await expectHistory(page, "Move");
+  const after = await stats();
+  expect(after.shapesRasterized - before.shapesRasterized).toBe(0);
+  expect(after.shapesMoved - before.shapesMoved).toBeGreaterThan(3);
+  // On screen it's where the committed pixels say.
+  expect(await gpuPixels(page, [[115, 115], [105, 105]])).toEqual([await cpuPixel(page, 115, 115), await cpuPixel(page, 105, 105)]);
+  expect(await cpuPixel(page, 115, 115)).toEqual([0, 0, 0, 255]);
 });
