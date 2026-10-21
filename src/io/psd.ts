@@ -12,7 +12,7 @@ import {
 import { isBlendMode } from "../core/blend";
 import type { RGB } from "../core/color";
 import { placementMapping } from "../core/content";
-import { PIXELS, createLayer, docRect, flatten, type Doc, type Layer, type LayerContent, type SmartSource } from "../core/document";
+import { PIXELS, resolutionOf, createLayer, docRect, flatten, type Doc, type Layer, type LayerContent, type SmartSource } from "../core/document";
 import { boundsOf, isEmpty, rect, vec, type Vec2 } from "../core/geometry";
 import { documentKnots, type Knot, type ShapeStyle } from "../core/shape";
 import { EMPTY_TILES, contentBounds, readRect, tilesFromImage, type TileMap } from "../core/tiles";
@@ -212,7 +212,10 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
     layers.push(createLayer({ name: "Background", tiles: tilesFromImage(psd.width, psd.height, to8bit(psd.imageData)) }));
   }
   if (layers.length === 0) layers.push(createLayer({ name: "Layer 1" }));
-  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null };
+  const res = psd.imageResources?.resolutionInfo;
+  // Stored as pixels per inch or per centimetre; documents keep ppi.
+  const resolution = res ? (res.horizontalResolutionUnit === "PPCM" ? res.horizontalResolution * 2.54 : res.horizontalResolution) : undefined;
+  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null, resolution };
 }
 
 const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
@@ -324,5 +327,9 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
     imageData: { width: doc.width, height: doc.height, data: flatten(doc, docRect(doc)) },
   };
   if (linked.size) psd.linkedFiles = [...linked.values()];
+  const ppi = resolutionOf(doc);
+  psd.imageResources = {
+    resolutionInfo: { horizontalResolution: ppi, horizontalResolutionUnit: "PPI", widthUnit: "Inches", verticalResolution: ppi, verticalResolutionUnit: "PPI", heightUnit: "Inches" },
+  };
   return writePsd(psd, { generateThumbnail: false, noBackground: true });
 }

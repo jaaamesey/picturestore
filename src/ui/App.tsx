@@ -25,11 +25,12 @@ import {
   type ExportFormat,
   type OpenedFile,
 } from "../io/files";
-import { activeLayer, type Doc } from "../core/document";
+import { activeLayer, resolutionOf, type Doc } from "../core/document";
 import type { PreferencesPane } from "../editor/preferences";
 import { listRecovery, newRecoveryKey, removeRecovery, saveRecovery } from "../io/recovery";
 import { PreferencesDialog } from "./PreferencesDialog";
 import { CanvasSizeDialog } from "./CanvasSizeDialog";
+import { ImageSizeDialog } from "./ImageSizeDialog";
 import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
@@ -203,6 +204,7 @@ export function App() {
   editor.onConfirm(confirmDialog);
   const [prefsPane, setPrefsPane] = createSignal<PreferencesPane | null>(null);
   const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
+  const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
 
   // --- Recovery information ------------------------------------------------------
   // Every so often (Preferences ▸ File Handling), each document with unsaved
@@ -281,6 +283,7 @@ export function App() {
     paste: (inPlace) => void pasteFromMenu(inPlace),
     preferences: (pane = "general") => setPrefsPane(pane),
     canvasSize: () => setCanvasSize(editor.active() as DocumentSession | null),
+    imageSize: () => setImageSizeFor(editor.active() as DocumentSession | null),
   };
   const app: AppValue = { editor, shell, notify, openMenu: (x, y, items) => setMenu({ x, y, items }) };
 
@@ -296,7 +299,7 @@ export function App() {
     const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize()) return;
+      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor()) return;
       const id = findCommand(e);
       if (id === "edit.paste" || id === "edit.pasteInPlace") {
         // Let the browser deliver a paste event with the clipboard's contents.
@@ -452,6 +455,16 @@ export function App() {
             height={s.doc().height}
             onApply={(w, h, anchor) => editor.active() === s && editor.canvasSize(w, h, anchor)}
             onClose={() => setCanvasSize(null)}
+          />
+        )}
+      </Show>
+      <Show when={imageSizeFor()} keyed>
+        {(s) => (
+          <ImageSizeDialog
+            original={{ width: s.doc().width, height: s.doc().height, resolution: resolutionOf(s.doc()) }}
+            preview={editor.thumbnail(220)}
+            onApply={(r) => editor.active() === s && editor.imageSize(r)}
+            onClose={() => setImageSizeFor(null)}
           />
         )}
       </Show>

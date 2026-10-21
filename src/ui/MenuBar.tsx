@@ -70,7 +70,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       { submenu: "Preferences", items: ["edit.preferences", "edit.preferences.fileHandling", "edit.preferences.performance"] },
     ],
   },
-  { title: "Image", items: ["image.canvasSize"] },
+  { title: "Image", items: ["image.imageSize", "image.canvasSize"] },
   {
     title: "Layer",
     items: [

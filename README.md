@@ -45,6 +45,12 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   Rasterize Layer, and Edit Contents (opens the contents as a document; saving it updates every instance). If
   the contents' canvas size changes, the layer keeps its transform — same scale, rotation, perspective and warp
   — with the new contents centred where the old ones were, as in Photoshop.
+- **Image ▸ Image Size** (Alt+Ctrl+I), as Photoshop's: preview, size readout, Dimensions, Fit To presets,
+  linked Width/Height in pixels, percent or physical units, Resolution (ppi or ppcm, saved in PSDs), and
+  Resample (Automatic, Bicubic, Nearest Neighbor, Bilinear). Everything scales: pixel layers are resampled,
+  smart objects and shapes scale exactly as vectors (smart objects re-render from their full-resolution
+  contents), and with Scale Styles (on by default; proportional resizes only) stroke widths scale too. Without
+  Resample only the resolution changes.
 - **Image ▸ Canvas Size** (Alt+Ctrl+C): new width/height, Relative, and a 3×3 anchor.
   Pixel tools on a smart object or shape ask to rasterize it first, with Photoshop's prompts.
 - **Shapes**: Rectangle (corner radius), Ellipse, Triangle, Polygon (sides, star ratio) and Line (weight) tools
@@ -98,6 +104,12 @@ tile with its predecessor; undo history is a list of snapshots costing roughly w
 history entry records the bytes it newly retains (by object identity: new tiles, smart object sources), and
 the oldest states are dropped past 50 steps or the memory budget. Asynchronous commits (GPU resampling) block
 input until they land, and a result is discarded rather than applied if its base document changed.
+
+**Document transforms** (`core/documentTransform.ts`): Canvas Size and Image Size (and later Rotate/Flip
+Canvas, Crop) are one affine map of document space. Pixel layers are resampled (whole-pixel moves copied
+exactly); non-raster content says how it follows the map in one table — placements compose the map onto
+their quad, which is exact even for perspective and warps — and lengths that belong to content (stroke
+widths, later effect sizes and type) scale by Scale Styles' factor.
 
 **Layer content** is pixels, a smart object (an embedded source plus a placement: quad, orientation, warp) or a
 shape (vector geometry plus fill/stroke, also placed). A layer's tiles are always its rendered pixels, so the

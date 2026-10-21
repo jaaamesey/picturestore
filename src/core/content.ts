@@ -1,10 +1,9 @@
 import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type Placement, type SmartSource } from "./document";
-import { rect, vec, type Rect } from "./geometry";
-import { translateMask } from "./selection";
+import { rect, type Rect } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "./shape";
-import { translateTiles, type TileMap } from "./tiles";
+import type { TileMap } from "./tiles";
 import type { TransformState } from "./transform";
 import { project, quadOf, reparameterizePatch, squareToQuad, type Mapping, type Quad } from "./warp";
 
@@ -110,34 +109,3 @@ export const smartSource = (name: string, width: number, height: number, tiles: 
   tiles,
   file,
 });
-
-
-
-/** Where existing content sits within a resized canvas: 0, ½ or 1 of the added (or removed) space on each axis. */
-export interface Anchor {
-  readonly x: 0 | 0.5 | 1;
-  readonly y: 0 | 0.5 | 1;
-}
-
-/**
- * Image ▸ Canvas Size: a new canvas with the content placed by `anchor`.
- * Layers keep everything, including what falls outside the new canvas;
- * smart objects and shapes move their placement and re-render.
- */
-export async function resizeCanvas(doc: Doc, width: number, height: number, anchor: Anchor, r: Rasterizers): Promise<Doc> {
-  const dx = Math.round((width - doc.width) * anchor.x);
-  const dy = Math.round((height - doc.height) * anchor.y);
-  const clip = rect(0, 0, width, height);
-  const layers = await Promise.all(
-    doc.layers.map((l) => {
-      if (l.content.kind === "pixels") return { ...l, tiles: translateTiles(l.tiles, dx, dy) };
-      const { placement } = l.content;
-      const [a, b, c, d] = placement.quad.map((p) => vec(p.x + dx, p.y + dy));
-      const moved = { ...placement, quad: [a, b, c, d] as const };
-      return withContent(l, { ...l.content, placement: moved }, clip, r);
-    }),
-  );
-  const sel = doc.selection;
-  const selection = sel && translateMask({ ...sel, width, height, bounds: rect(sel.bounds.x + dx, sel.bounds.y + dy, sel.bounds.w, sel.bounds.h) }, 0, 0);
-  return { ...doc, width, height, layers, selection };
-}

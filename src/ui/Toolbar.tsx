@@ -11,12 +11,15 @@ const HOLD_MS = 400;
 /**
  * One toolbar slot: shows the group's current tool. Right-click, or press
  * and hold, opens a flyout of the other tools in the group (as in Photoshop).
+ * Held open, it's one gesture: slide onto a tool and release to pick it.
  */
 function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (open: boolean) => void }) {
   const { editor } = useContext(AppContext);
   const [last, setLast] = createSignal(props.tools[0]);
   const shown = () => props.tools.find((t) => t.id === editor.tool()) ?? last();
   let hold = 0;
+  /** Opened by pressing and holding: the release picks, and its click on the button is not a click. */
+  let held = false;
   const choose = (t: ToolInfo) => {
     setLast(t);
     editor.setTool(t.id);
@@ -29,8 +32,25 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
         e.preventDefault();
         if (props.tools.length > 1) props.onOpen(true);
       }}
-      onPointerDown={() => {
-        if (props.tools.length > 1) hold = window.setTimeout(() => props.onOpen(true), HOLD_MS);
+      onPointerDown={(e) => {
+        if (props.tools.length < 2 || e.button !== 0) return;
+        hold = window.setTimeout(() => {
+          held = true;
+          props.onOpen(true);
+          const release = (u: PointerEvent) => {
+            if (u.pointerId !== e.pointerId) return;
+            window.removeEventListener("pointerup", release, true);
+            const item = document.elementFromPoint(u.clientX, u.clientY)?.closest<HTMLElement>("[data-flyout-tool]");
+            const tool = item && props.tools.find((t) => t.id === item.dataset.flyoutTool);
+            if (tool) {
+              u.stopPropagation();
+              choose(tool);
+            }
+            // Released elsewhere: the flyout stays open for a click.
+            setTimeout(() => (held = false), 0);
+          };
+          window.addEventListener("pointerup", release, true);
+        }, HOLD_MS);
       }}
       onPointerUp={() => clearTimeout(hold)}
       onPointerLeave={() => clearTimeout(hold)}
@@ -40,7 +60,7 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
         title={`${shown().label} (${shown().key.toUpperCase()})`}
         testId={`tool-${shown().id}`}
         active={editor.tool() === shown().id}
-        onClick={() => choose(shown())}
+        onClick={() => !held && choose(shown())}
       />
       <Show when={props.tools.length > 1}>
         {/* Photoshop's flyout marker. */}
@@ -55,6 +75,7 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
                 role="menuitemradio"
                 aria-checked={shown().id === t.id ? "true" : "false"}
                 data-testid={`flyout-${t.id}`}
+                data-flyout-tool={t.id}
                 class="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent hover:text-white"
                 onClick={() => choose(t)}
               >

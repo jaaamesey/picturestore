@@ -1,0 +1,81 @@
+import { describe, expect, it } from "vitest";
+import { CPU_RASTERIZERS, placementMapping } from "./content";
+import { addLayer, createDocument, createLayer, fillTiles, resolutionOf, type Doc, type Placement } from "./document";
+import { imageSize, resizeCanvas, transformPlacement } from "./documentTransform";
+import { rect, scaling, type Vec2 } from "./geometry";
+import { rectMask } from "./selection";
+import { renderShape } from "./shape";
+import { EMPTY_TILES, contentBounds, getPixel } from "./tiles";
+import { IDENTITY_PATCH, mapPoint, quadOf } from "./warp";
+
+const cpu = CPU_RASTERIZERS;
+const red = { r: 255, g: 0, b: 0 }, blue = { r: 0, g: 0, b: 255 };
+
+/** A 200×100 document: a red square (pixels) and a shape with a 4 px centred stroke. */
+function doc(): Doc {
+  const d = createDocument({ width: 200, height: 100, background: null });
+  const pixels = createLayer({ name: "px", tiles: fillTiles(EMPTY_TILES, rect(10, 10, 20, 20), red) });
+  const geometry = { kind: "rectangle", radius: 5 } as const;
+  const style = { fill: null, stroke: { color: blue, width: 4, align: "center" as const } };
+  const placement = { source: rect(0, 0, 60, 40), quad: quadOf(rect(100, 30, 60, 40)), angle: 0, patch: null };
+  const shape = createLayer({
+    name: "shape",
+    tiles: renderShape(geometry, style, placementMapping(placement), rect(0, 0, 200, 100)),
+    content: { kind: "shape", geometry, style, placement },
+  });
+  return { ...addLayer(addLayer(d, pixels), shape), selection: rectMask(200, 100, rect(10, 10, 20, 20)) };
+}
+
+describe("document transforms", () => {
+  it("Image Size scales pixels, vectors, stroke widths and the selection together", async () => {
+    const d = doc();
+    const big = await imageSize(d, { width: 400, height: 200, resolution: 144, filter: "bicubic", scaleStyles: true }, cpu);
+    expect([big.width, big.height, resolutionOf(big)]).toEqual([400, 200, 144]);
+    expect(contentBounds(big.layers[1].tiles)).toEqual(rect(20, 20, 40, 40));
+    const s = big.layers[2].content;
+    if (s.kind !== "shape") throw new Error();
+    expect(s.placement.quad).toEqual(quadOf(rect(200, 60, 120, 80)));
+    // The stroke scales with the image (Scale Styles), so the outline looks the same, just bigger.
+    expect(s.style.stroke!.width).toBe(8);
+    const outline = contentBounds(big.layers[2].tiles);
+    expect(outline).toEqual(rect(196, 56, 128, 88));
+    expect(big.selection!.bounds).toEqual(rect(20, 20, 40, 40));
+  });
+
+  it("leaves stroke widths alone without Scale Styles, or when not proportional (as Photoshop does)", async () => {
+    const off = await imageSize(doc(), { width: 400, height: 200, resolution: 72, filter: "bicubic", scaleStyles: false }, cpu);
+    const stretched = await imageSize(doc(), { width: 400, height: 100, resolution: 72, filter: "bicubic", scaleStyles: true }, cpu);
+    for (const d of [off, stretched]) {
+      const s = d.layers[2].content;
+      expect(s.kind === "shape" && s.style.stroke!.width).toBe(4);
+    }
+    // Geometry still follows the (non-uniform) scale.
+    const s = stretched.layers[2].content;
+    expect(s.kind === "shape" && s.placement.quad).toEqual(quadOf(rect(200, 30, 120, 40)));
+  });
+
+  it("Canvas Size is the same transform: a whole-pixel translation, copied exactly", async () => {
+    const d = doc();
+    const moved = await resizeCanvas(d, 300, 100, { x: 1, y: 0.5 }, cpu);
+    expect(contentBounds(moved.layers[1].tiles)).toEqual(rect(110, 10, 20, 20));
+    expect(getPixel(moved.layers[1].tiles, 115, 15)).toEqual([255, 0, 0, 255]);
+    expect(moved.selection!.bounds).toEqual(rect(110, 10, 20, 20));
+  });
+
+  it("transforms placements exactly, warps included", () => {
+    const warped: Placement = {
+      source: rect(0, 0, 10, 10),
+      quad: [{ x: 5, y: 5 }, { x: 40, y: 10 }, { x: 35, y: 50 }, { x: 0, y: 30 }] as const,
+      angle: 0.3,
+      patch: IDENTITY_PATCH.map((p, k) => (k === 6 ? { x: p.x + 0.1, y: p.y + 0.05 } : p)),
+    };
+    const m = scaling(2, 3);
+    const t = transformPlacement(warped, m);
+    const at = (p: Placement, s: number, u: number): Vec2 => mapPoint(placementMapping(p), s, u);
+    for (const [s, u] of [[0, 0], [0.3, 0.7], [1, 1], [0.5, 0.2]]) {
+      const before = at(warped, s, u), after = at(t, s, u);
+      expect(after.x).toBeCloseTo(before.x * 2, 9);
+      expect(after.y).toBeCloseTo(before.y * 3, 9);
+    }
+  });
+});

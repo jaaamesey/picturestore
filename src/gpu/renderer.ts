@@ -49,6 +49,8 @@ export interface Renderer {
    * tiles, clipped to `clip` (a committed shape layer's pixels).
    */
   rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<TileMap>;
+  /** A downscaled composite (straight RGBA8) no larger than `max` per side, from the mip chain: cheap at any size. */
+  thumbnail(max: number): Promise<ImageData>;
   /** Reads back the composite as straight RGBA8 (for tests and debugging). */
   readComposite(): Promise<Uint8ClampedArray>;
   /** Resolves once the most recently rendered frame is on screen. */
@@ -960,6 +962,34 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
     resample,
     rasterizeShape,
+
+    async thumbnail(max) {
+      if (!accum) return new ImageData(1, 1);
+      if (!isEmpty(mipsDirty)) generateMips();
+      const level = Math.min(mipCount - 1, Math.max(0, Math.ceil(Math.log2(Math.max(px.width, px.height) / max))));
+      const w = Math.max(1, px.width >> level), h = Math.max(1, px.height >> level);
+      const bytesPerRow = Math.ceil((w * 8) / 256) * 256;
+      const buffer = device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = device.createCommandEncoder();
+      encoder.copyTextureToBuffer({ texture: accum, mipLevel: level }, { buffer, bytesPerRow }, [w, h]);
+      device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+      buffer.destroy();
+      const out = new ImageData(w, h);
+      for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) {
+          const s = (y * bytesPerRow) / 2 + x * 4;
+          const a = HALF[halves[s + 3]];
+          if (a <= 0) continue;
+          const o = (y * w + x) * 4;
+          out.data[o] = (HALF[halves[s]] / a) * 255;
+          out.data[o + 1] = (HALF[halves[s + 1]] / a) * 255;
+          out.data[o + 2] = (HALF[halves[s + 2]] / a) * 255;
+          out.data[o + 3] = a * 255;
+        }
+      return out;
+    },
 
     async readComposite() {
       // At reduced quality the composite is smaller; it's scaled back up (nearest) to document size.

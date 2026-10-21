@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { initialPlacement, placementMapping, resizeCanvas, resizedPlacement, smartObjectLayer, smartSource, CPU_RASTERIZERS } from "./content";
+import { initialPlacement, placementMapping, resizedPlacement, smartObjectLayer, smartSource, CPU_RASTERIZERS } from "./content";
+import { resizeCanvas } from "./documentTransform";
 import { addLayer, convertToSmartObject, createDocument, createLayer, fillTiles, rasterizeLayer } from "./document";
 import { rect } from "./geometry";
 import { EMPTY_TILES, contentBounds, getPixel, tilesFromImage } from "./tiles";

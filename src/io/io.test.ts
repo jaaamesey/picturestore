@@ -39,6 +39,8 @@ describe("PSD", () => {
     expect(back.layers.map((l) => l.name)).toEqual(["Background", "Circle"]);
     expect(back.layers[1].blendMode).toBe("screen");
     expect(back.layers.map((l) => l.content.kind)).toEqual(["pixels", "pixels"]);
+    expect(back.resolution).toBe(72);
+    expect((await readPsdDocument(new Uint8Array(writePsdDocument({ ...doc, resolution: 300 })))).resolution).toBe(300);
     const a = flatten(doc);
     const b = flatten(back);
     let maxDiff = 0;

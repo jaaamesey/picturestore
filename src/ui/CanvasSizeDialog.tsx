@@ -1,5 +1,5 @@
 import { For, createSignal, onSettled, untrack } from "solid-js";
-import type { Anchor } from "../core/content";
+import type { Anchor } from "../core/documentTransform";
 import { Button, NumberField } from "./controls";
 
 const ANCHORS: readonly Anchor[] = [0, 0.5, 1].flatMap((y) => [0, 0.5, 1].map((x) => ({ x, y }) as Anchor));

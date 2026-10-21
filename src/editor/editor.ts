@@ -1,6 +1,7 @@
 import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
-import { placementMapping, resizeCanvas, resizedPlacement, smartObjectLayer, withContent, type Anchor, type Rasterizers } from "../core/content";
+import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
+import { imageSize, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -26,6 +27,7 @@ import {
   type Layer,
   type LayerContent,
   type NewDocumentOptions,
+  resolutionOf,
   type SmartSource,
 } from "../core/document";
 import {
@@ -168,7 +170,7 @@ export const RASTERIZE_PROMPTS = {
 } as const;
 
 /** What the editor uses the GPU renderer for, besides display. */
-type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape">;
+type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape" | "thumbnail">;
 
 type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };
 
@@ -818,6 +820,24 @@ export function createEditor() {
         if (!isEmpty(bounds)) paste({ tiles, bounds }, false);
       }),
       placeEmbedded: whenIdle(placeEmbedded),
+      /**
+       * Image ▸ Image Size. With `resample`, everything scales to the new
+       * pixel dimensions; without, only the resolution changes.
+       */
+      imageSize: whenIdle((o: ImageSizeOptions & { resample: boolean }) => {
+        const s = active();
+        if (!s) return;
+        cancelTool();
+        const d = s.doc();
+        if (!o.resample) {
+          if (o.resolution !== resolutionOf(d)) commitTo(s, "Image Size", setResolution(d, o.resolution));
+          return;
+        }
+        if (o.width === d.width && o.height === d.height && o.resolution === resolutionOf(d)) return;
+        commitAsync(s, "Image Size", imageSize(d, o, raster));
+      }),
+      /** A small composite of the active document, for previews (null without a GPU). */
+      thumbnail: (max: number) => gpu?.thumbnail(max) ?? Promise.resolve(null),
       /** Image ▸ Canvas Size. */
       canvasSize: whenIdle((width: number, height: number, anchor: Anchor) => {
         const s = active();

@@ -15,6 +15,8 @@ export interface Shell {
   preferences(pane?: PreferencesPane): void;
   /** Image ▸ Canvas Size dialog. */
   canvasSize(): void;
+  /** Image ▸ Image Size dialog. */
+  imageSize(): void;
   /** File ▸ Place Embedded: picks an image and places it as a smart object. */
   placeEmbedded(): void;
   /** Opens the active smart object's contents as a document. */
@@ -111,6 +113,7 @@ export const COMMANDS = {
   "edit.transform.flipVertical": { label: "Flip Vertical", run: (ed) => ed.transformCommand("flip-vertical"), enabled: hasDoc },
 
   // Image
+  "image.imageSize": { label: "Image Size…", shortcuts: ["Alt+Mod+I"], run: (_, s) => s.imageSize(), enabled: hasDoc },
   "image.canvasSize": { label: "Canvas Size…", shortcuts: ["Alt+Mod+C"], run: (_, s) => s.canvasSize(), enabled: hasDoc },
 
   // Layer

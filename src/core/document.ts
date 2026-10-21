@@ -71,7 +71,13 @@ export interface Doc {
   readonly activeLayerId: string;
   /** null = nothing selected (operations apply to the whole layer). */
   readonly selection: Mask | null;
+  /** Pixels per inch; only affects physical sizes (print, Image Size's units). Default {@link DEFAULT_RESOLUTION}. */
+  readonly resolution?: number;
 }
+
+/** Photoshop's default for screen documents. */
+export const DEFAULT_RESOLUTION = 72;
+export const resolutionOf = (d: Pick<Doc, "resolution">) => d.resolution ?? DEFAULT_RESOLUTION;
 
 let idCounter = 0;
 export const newId = () => `l${Date.now().toString(36)}${(idCounter++).toString(36)}`;
