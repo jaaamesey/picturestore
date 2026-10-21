@@ -18,7 +18,6 @@ import {
   rotateBox,
   swapOrientation,
   type CropBox,
-  type Snap,
 } from "../../core/crop";
 import { resolutionOf, type Doc } from "../../core/document";
 import { mapPoint, transformDocument } from "../../core/documentTransform";
@@ -119,7 +118,8 @@ export function createCropTool(): CropController {
     follow(ctx, b, c.autoCenter ? vec(ctx.viewport.width / 2, ctx.viewport.height / 2) : docToScreen(ctx.view, vec(b.cx, b.cy)));
   }
 
-  const snap = (ctx: ToolContext): Snap => ({ xs: [0, ctx.doc.width], ys: [0, ctx.doc.height], tolerance: HANDLE_PX / ctx.view.zoom });
+  /** An unrotated box's edges snap (Photoshop's "cropping marquees"); a turned one's can't line up with anything. */
+  const snapped = (ctx: ToolContext, p: Vec2, b: CropBox) => (b.angle === 0 ? ctx.snap.point(p) : p);
 
   const crop = (ctx: ToolContext) => {
     const s = session;
@@ -189,7 +189,7 @@ export function createCropTool(): CropController {
         // A click brings the box back; a drag draws one.
         hidden = false;
         session = fresh(ctx);
-        drag = { kind: "draw", start: p, startScreen: screen, moved: false };
+        drag = { kind: "draw", start: snapped(ctx, p, session.box), startScreen: screen, moved: false };
         return publish(ctx);
       }
       const s = current(ctx);
@@ -197,7 +197,7 @@ export function createCropTool(): CropController {
       if (e.clicks >= 2 && hit.kind === "inside") return crop(ctx);
       if (straightening(ctx, e)) drag = { kind: "straighten", a: p, b: p };
       else if (hit.kind === "handle") drag = { kind: "resize", hx: hit.hx, hy: hit.hy, from: s.box };
-      else if (hit.kind === "inside" && s.pristine) drag = { kind: "draw", start: p, startScreen: screen, moved: false };
+      else if (hit.kind === "inside" && s.pristine) drag = { kind: "draw", start: snapped(ctx, p, s.box), startScreen: screen, moved: false };
       else drag = { kind: hit.kind === "inside" ? "move" : "rotate", from: s.box, start: screen, view: ctx.view };
       publish(ctx);
     },
@@ -210,10 +210,9 @@ export function createCropTool(): CropController {
       const before = s.box;
       switch (drag.kind) {
         case "resize":
-          s.box = resizeBox(drag.from, drag.hx, drag.hy, p, {
+          s.box = resizeBox(drag.from, drag.hx, drag.hy, snapped(ctx, p, drag.from), {
             ratio: s.ratio ?? (e.shift ? drag.from.w / drag.from.h : null),
             fromCentre: e.alt,
-            snap: snap(ctx),
           });
           break;
         case "move": {
@@ -223,6 +222,11 @@ export function createCropTool(): CropController {
           const a = screenToDoc(drag.view, drag.start), b = screenToDoc(drag.view, vec(drag.start.x + d.x, drag.start.y + d.y));
           const delta = classic ? vec(b.x - a.x, b.y - a.y) : vec(a.x - b.x, a.y - b.y);
           s.box = moveBox(drag.from, delta);
+          if (s.box.angle === 0) {
+            // The box's edges or centre snap (Shift keeps it on its axis).
+            const b = s.box, sn = ctx.snap.rect({ x: b.cx - b.w / 2, y: b.cy - b.h / 2, w: b.w, h: b.h });
+            s.box = moveBox(b, e.shift ? (d.x ? vec(sn.x, 0) : vec(0, sn.y)) : sn);
+          }
           follow(ctx, s.box, docToScreen(drag.view, vec(drag.from.cx, drag.from.cy)));
           break;
         }
@@ -237,7 +241,7 @@ export function createCropTool(): CropController {
         case "draw":
           drag.moved ||= Math.hypot(screen.x - drag.startScreen.x, screen.y - drag.startScreen.y) > 2;
           if (!drag.moved) return;
-          s.box = drawBox(drag.start, p, -(ctx.view.rotation ?? 0), { ratio: s.ratio, square: e.shift, fromCentre: e.alt, snap: snap(ctx) });
+          s.box = drawBox(drag.start, snapped(ctx, p, s.box), -(ctx.view.rotation ?? 0), { ratio: s.ratio, square: e.shift, fromCentre: e.alt });
           break;
         case "straighten":
           drag.b = p;

@@ -103,6 +103,20 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
 - **PSD**: smart objects round-trip as placed layers with their embedded files (and custom warps); solid-colour
   shape layers round-trip as vector masks with fill and stroke.
 - **View**: zoom (Ctrl +/−/0/1, Ctrl/Alt+wheel about the cursor), pan (wheel, Space-drag, Hand tool).
+- **Snapping, guides and grid**, following Photoshop's manual (and Photopea's behaviour for what it leaves
+  open): with View ▸ Snap (Shift+Ctrl+;) on, dragged points and moving boxes are pulled, within 8 screen pixels,
+  onto guides, the grid (its subdivisions), other layers' edges and centres, and the document's edges and centre
+  (View ▸ Snap To ▸ Guides / Grid / Layers / Document Bounds / All / None; guides and the grid only while shown).
+  Each axis snaps to its nearest target; layers only win when strictly nearest. What snaps: marquee corners,
+  shape tool corners and line ends, the crop box (drawing, handles, moving, unrotated), Perspective Crop corners,
+  the Move tool (the moved bounds' edges or centre; Ctrl suspends it; Shift keeps the axis), Free Transform
+  (handles and the reference point where they land, and moves by the bounds) and guides being dragged.
+  Smart guides (magenta) show the alignment with layers and the canvas while dragging. View ▸ Rulers (Ctrl+R):
+  drag a guide out of a ruler (Alt flips it, Shift snaps to ruler ticks), move guides with the Move tool and drop
+  them off the window to delete; New Guide…, Lock Guides (Alt+Ctrl+;), Clear Guides; Show ▸ Guides (Ctrl+;),
+  Grid (Ctrl+'), Smart Guides; Extras (Ctrl+H) hides them all and selection edges. Guides belong to the document
+  (undoable, saved in PSD, carried through Canvas/Image Size and crops); Preferences ▸ Guides, Grid & Slices sets
+  colours, styles, Gridline Every (any unit) and Subdivisions.
 
 ## Architecture
 

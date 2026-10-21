@@ -2,6 +2,7 @@ import { TOOLBAR } from "./tools";
 import type { Editor } from "./editor";
 import type { ToolId } from "./types";
 import type { PreferencesPane } from "./preferences";
+import type { SnapToOptions, ViewOptions } from "./viewOptions";
 
 /** UI-level actions commands can trigger (dialogs, file pickers, downloads). */
 export interface Shell {
@@ -21,6 +22,8 @@ export interface Shell {
   placeEmbedded(): void;
   /** Opens the active smart object's contents as a document. */
   editContents(): void;
+  /** View ▸ Guides ▸ New Guide dialog. */
+  newGuide(): void;
   /** Copy/Cut also put a PNG on the system clipboard; Paste reads it (or our own copy). */
   copy(merged: boolean): void;
   cut(): void;
@@ -33,9 +36,24 @@ export interface CommandSpec {
   readonly shortcuts?: readonly string[];
   readonly run: (ed: Editor, shell: Shell) => void;
   readonly enabled?: (ed: Editor) => boolean;
+  /** For toggles: shown with a check mark when true. */
+  readonly checked?: (ed: Editor) => boolean;
 }
 
 const hasDoc = (ed: Editor) => ed.active() !== null;
+
+type ViewFlag = { [K in keyof ViewOptions]: ViewOptions[K] extends boolean ? K : never }[keyof ViewOptions];
+const viewToggle = (label: string, key: ViewFlag, shortcuts?: string[]): CommandSpec => ({
+  label,
+  shortcuts,
+  run: (ed) => ed.setViewOptions({ [key]: !ed.viewOptions()[key] }),
+  checked: (ed) => ed.viewOptions()[key],
+});
+const snapToToggle = (label: string, key: keyof SnapToOptions): CommandSpec => ({
+  label,
+  run: (ed) => ed.setViewOptions({ snapTo: { ...ed.viewOptions().snapTo, [key]: !ed.viewOptions().snapTo[key] } }),
+  checked: (ed) => ed.viewOptions().snapTo[key],
+});
 const hasSelection = (ed: Editor) => !!ed.active()?.doc().selection;
 const cropping = (ed: Editor) => ed.tool() === "crop" || ed.tool() === "perspective-crop";
 const layerCount = (ed: Editor) => ed.active()?.doc().layers.length ?? 0;
@@ -163,6 +181,22 @@ export const COMMANDS = {
   "view.zoomOut": { label: "Zoom Out", shortcuts: ["Mod+-"], run: (ed) => ed.zoomOut(), enabled: hasDoc },
   "view.fit": { label: "Fit The Area", shortcuts: ["Mod+0"], run: (ed) => ed.fitOnScreen(), enabled: hasDoc },
   "view.actual": { label: "Pixel to Pixel", shortcuts: ["Mod+1"], run: (ed) => ed.actualPixels(), enabled: hasDoc },
+  "view.extras": viewToggle("Extras", "extras", ["Mod+H"]),
+  "view.show.guides": viewToggle("Guides", "showGuides", ["Mod+;"]),
+  "view.show.grid": viewToggle("Grid", "showGrid", ["Mod+'"]),
+  "view.show.smartGuides": viewToggle("Smart Guides", "showSmartGuides"),
+  "view.rulers": viewToggle("Rulers", "rulers", ["Mod+R"]),
+  "view.snap": viewToggle("Snap", "snap", ["Shift+Mod+;"]),
+  "view.snapTo.guides": snapToToggle("Guides", "guides"),
+  // As in Photoshop, the grid is a target only while it's shown.
+  "view.snapTo.grid": { ...snapToToggle("Grid", "grid"), enabled: (ed) => ed.viewOptions().showGrid },
+  "view.snapTo.layers": snapToToggle("Layers", "layers"),
+  "view.snapTo.bounds": snapToToggle("Document Bounds", "bounds"),
+  "view.snapTo.all": { label: "All", run: (ed) => ed.setViewOptions({ snapTo: { guides: true, grid: true, layers: true, bounds: true } }) },
+  "view.snapTo.none": { label: "None", run: (ed) => ed.setViewOptions({ snapTo: { guides: false, grid: false, layers: false, bounds: false } }) },
+  "view.lockGuides": viewToggle("Lock Guides", "lockGuides", ["Alt+Mod+;"]),
+  "view.clearGuides": { label: "Clear Guides", run: (ed) => ed.clearGuides(), enabled: (ed) => !!ed.active()?.doc().guides?.length },
+  "view.newGuide": { label: "New Guide…", run: (_, s) => s.newGuide(), enabled: hasDoc },
 } as const satisfies Record<string, CommandSpec>;
 
 export type CommandId = keyof typeof COMMANDS;
@@ -197,8 +231,9 @@ export function matchShortcut(shortcut: string, e: KeyLike): boolean {
   if (/^[a-z]$/i.test(key)) return e.code === `Key${key.toUpperCase()}`;
   if (/^[0-9]$/.test(key)) return e.code === `Digit${key}` || e.key === key;
   if (key === "=") return e.key === "=" || e.key === "+";
-  // Brackets by physical key: Shift turns them into braces.
-  if (key === "[" || key === "]") return e.code === (key === "[" ? "BracketLeft" : "BracketRight");
+  // Brackets, ; and ' by physical key: Shift turns them into other characters.
+  const physical: Record<string, string> = { "[": "BracketLeft", "]": "BracketRight", ";": "Semicolon", "'": "Quote" };
+  if (key in physical) return e.code === physical[key];
   return e.key.toLowerCase() === key.toLowerCase();
 }
 

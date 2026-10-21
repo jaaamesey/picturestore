@@ -41,6 +41,8 @@ describe("PSD", () => {
     expect(back.layers.map((l) => l.content.kind)).toEqual(["pixels", "pixels"]);
     expect(back.resolution).toBe(72);
     expect((await readPsdDocument(new Uint8Array(writePsdDocument({ ...doc, resolution: 300 })))).resolution).toBe(300);
+    const guides = [{ orientation: "vertical", position: 12.5 }, { orientation: "horizontal", position: 40 }] as const;
+    expect((await readPsdDocument(new Uint8Array(writePsdDocument({ ...doc, guides })))).guides).toEqual(guides);
     const a = flatten(doc);
     const b = flatten(back);
     let maxDiff = 0;

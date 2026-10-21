@@ -1,6 +1,8 @@
 import { framedState, placementState, sourceFloating, toPlacement, withContent } from "../../core/content";
-import { activeLayer, docRect, updateLayer, type Doc, type Layer, type LayerContent } from "../../core/document";
-import { intersect, isEmpty, vec, type Vec2 } from "../../core/geometry";
+import { activeLayer, docRect, updateLayer, type Doc, type Guide, type Layer, type LayerContent } from "../../core/document";
+import { boundsOf, intersect, isEmpty, vec, type Vec2 } from "../../core/geometry";
+import { guidePosition } from "../snapping";
+import { RULER_PX } from "../view";
 import { compositeOver, extractFloating } from "../../core/raster";
 import type { Filter } from "../../core/rasterize";
 import { transformMask, translateMask } from "../../core/selection";
@@ -330,8 +332,8 @@ export function createTransformController(): TransformController {
     },
     down: (ctx, e) => down(ctx, e),
     move(ctx, e) {
-      if (!drag || !state) return;
-      state = dragTransform(drag, e, e);
+      if (!drag || !state || !target) return;
+      state = dragTransform(drag, snappedPointer(ctx, drag, e, target.layer.id), e);
       show(ctx);
     },
     up() {
@@ -367,6 +369,8 @@ export function createMoveTool(transform: TransformController): Tool {
   let target: Target | null = null;
   let start: Vec2 = vec(0, 0);
   let offset: Vec2 = vec(0, 0);
+  /** A guide being dragged (its index), and where it would go (null: off the window or onto a ruler, deleting it). */
+  let guide: { index: number; to: number | null } | null = null;
 
   const controlHit = (ctx: ToolContext, e: ToolEvent): TransformHit => {
     if (!ctx.settings.transform.showControls) return { kind: "none" };
@@ -386,11 +390,19 @@ export function createMoveTool(transform: TransformController): Tool {
     latestMoveOnly: true,
     cursor(ctx, e) {
       if (!e || target) return "move";
+      const g = guide ? ctx.doc.guides![guide.index] : guideHit(ctx, e) >= 0 ? ctx.doc.guides![guideHit(ctx, e)] : null;
+      if (g) return g.orientation === "vertical" ? "col-resize" : "row-resize";
       const hit = controlHit(ctx, e);
       const frame = hit.kind === "none" ? null : moveFrame(ctx.doc);
       return frame ? cursorFor(frame, hit, "free") : "move";
     },
     down(ctx, e) {
+      // Guides are moved with the Move tool (unless locked).
+      const g = guideHit(ctx, e);
+      if (g >= 0) {
+        guide = { index: g, to: ctx.doc.guides![g].position };
+        return;
+      }
       const hit = controlHit(ctx, e);
       if (hit.kind !== "none" && transform.begin(ctx, { returnTo: "move", grab: { event: e, hit } })) {
         ctx.setTool("transform");
@@ -401,14 +413,32 @@ export function createMoveTool(transform: TransformController): Tool {
       offset = vec(0, 0);
     },
     move(ctx, e) {
+      if (guide) {
+        const g = ctx.doc.guides![guide.index];
+        guide.to = offGuideArea(ctx, e, g.orientation) ? null : guidePosition(ctx.snap, ctx.view.zoom, g.orientation, vec(e.x, e.y), e.shift);
+        return ctx.preview(withGuide(ctx.doc, guide.index, guide.to));
+      }
       if (!target) return;
       let dx = e.x - start.x, dy = e.y - start.y;
-      if (e.shift) [dx, dy] = Math.abs(dx) >= Math.abs(dy) ? [dx, 0] : [0, dy];
+      const axis = !e.shift ? null : Math.abs(dx) >= Math.abs(dy) ? "x" : "y";
+      if (axis) [dx, dy] = axis === "x" ? [dx, 0] : [0, dy];
+      // The moved bounds snap by an edge or the centre; Ctrl suspends snapping, as in Photoshop.
+      const b = boundsOf(translate(target.frame, dx, dy).quad);
+      const sn = ctx.snap.rect(b, { exclude: [target.layer.id], off: e.mod });
+      if (axis !== "y") dx += sn.x;
+      if (axis !== "x") dy += sn.y;
       offset = vec(Math.round(dx), Math.round(dy));
       target.show(ctx, translate(target.initial, offset.x, offset.y));
       if (ctx.settings.transform.showControls) ctx.overlay({ kind: "frame", state: translate(target.frame, offset.x, offset.y) });
     },
     up(ctx) {
+      if (guide) {
+        const { index, to } = guide;
+        guide = null;
+        const g = ctx.doc.guides![index];
+        if (to === g.position) return ctx.preview(null);
+        return ctx.commit(to === null ? "Delete Guide" : "Move Guide", withGuide(ctx.doc, index, to));
+      }
       if (!target) return;
       const t = target;
       target = null;
@@ -417,6 +447,7 @@ export function createMoveTool(transform: TransformController): Tool {
       ctx.commitAsync("Move", t.place(ctx, translate(t.initial, offset.x, offset.y), ctx.settings.transform.interpolation));
     },
     cancel(ctx) {
+      guide = null;
       if (!target) return;
       target = null;
       ctx.overlay(null);
@@ -424,3 +455,65 @@ export function createMoveTool(transform: TransformController): Tool {
     },
   };
 }
+
+/**
+ * Where the pointer counts as being in a transform drag: what it drags — a
+ * handle, the reference point, or the content's bounds when moving — lands
+ * snapped. Rotation doesn't snap (Shift steps it by 15°), and nor does a
+ * move constrained by Shift.
+ */
+function snappedPointer(ctx: ToolContext, drag: Drag, e: ToolEvent, layerId: string): Vec2 {
+  const p = vec(e.x, e.y), d = vec(p.x - drag.start.x, p.y - drag.start.y);
+  const o = { exclude: [layerId] };
+  const pulled = (at: Vec2) => {
+    const s = ctx.snap.point(at, o);
+    return vec(p.x + s.x - at.x, p.y + s.y - at.y);
+  };
+  const { hit, from, mode } = drag;
+  switch (hit.kind) {
+    case "corner":
+    case "edge": {
+      if (mode === "rotate") return p;
+      const h = hit.kind === "corner" ? from.quad[hit.index] : handles(from).edges[hit.index];
+      return pulled(vec(h.x + d.x, h.y + d.y));
+    }
+    case "reference":
+      return ctx.snap.point(p, o);
+    case "move": {
+      if (mode === "rotate" || e.shift) return p;
+      const s = ctx.snap.rect(boundsOf(translate(from, d.x, d.y).quad), o);
+      return vec(p.x + s.x, p.y + s.y);
+    }
+    default:
+      return p;
+  }
+}
+
+/** Grab distance for guides, in screen pixels. */
+const GUIDE_PX = 4;
+
+/** The guide under the pointer (one that can be moved: shown and unlocked), or −1. */
+function guideHit(ctx: ToolContext, e: ToolEvent): number {
+  const v = ctx.viewOptions;
+  if (!v.extras || !v.showGuides || v.lockGuides || ctx.view.rotation) return -1;
+  const guides = ctx.doc.guides ?? [];
+  let best = -1, bestD = GUIDE_PX / ctx.view.zoom;
+  guides.forEach((g, i) => {
+    const d = Math.abs((g.orientation === "vertical" ? e.x : e.y) - g.position);
+    if (d <= bestD) [best, bestD] = [i, d];
+  });
+  return best;
+}
+
+/** Dropped here, a guide is deleted: on its ruler, or outside the window. */
+function offGuideArea(ctx: ToolContext, e: ToolEvent, orientation: Guide["orientation"]): boolean {
+  const { width, height } = ctx.viewport;
+  if (e.screenX < 0 || e.screenY < 0 || e.screenX > width || e.screenY > height) return true;
+  return ctx.viewOptions.rulers && (orientation === "vertical" ? e.screenX < RULER_PX : e.screenY < RULER_PX);
+}
+
+/** `doc` with guide `index` moved to `position`, or removed (null). */
+const withGuide = (doc: Doc, index: number, position: number | null): Doc => ({
+  ...doc,
+  guides: position === null ? doc.guides!.filter((_, i) => i !== index) : doc.guides!.map((g, i) => (i === index ? { ...g, position } : g)),
+});

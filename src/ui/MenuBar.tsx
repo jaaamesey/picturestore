@@ -93,7 +93,28 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
     ],
   },
   { title: "Select", items: ["select.all", "select.deselect", "select.inverse"] },
-  { title: "View", items: ["view.zoomIn", "view.zoomOut", "-", "view.fit", "view.actual"] },
+  {
+    title: "View",
+    items: [
+      "view.zoomIn",
+      "view.zoomOut",
+      "-",
+      "view.fit",
+      "view.actual",
+      "-",
+      "view.extras",
+      { submenu: "Show", items: ["view.show.guides", "view.show.grid", "view.show.smartGuides"] },
+      "-",
+      "view.rulers",
+      "-",
+      "view.snap",
+      { submenu: "Snap To", items: ["view.snapTo.guides", "view.snapTo.grid", "view.snapTo.layers", "view.snapTo.bounds", "-", "view.snapTo.all", "view.snapTo.none"] },
+      "-",
+      "view.lockGuides",
+      "view.clearGuides",
+      "view.newGuide",
+    ],
+  },
 ];
 
 /** A dropdown list of commands; used by the menu bar and context menus. */
@@ -119,7 +140,8 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
           ) : (
             <button
               type="button"
-              role="menuitem"
+              role={command(item).checked ? "menuitemcheckbox" : "menuitem"}
+              aria-checked={command(item).checked ? (command(item).checked!(editor) ? "true" : "false") : undefined}
               data-command={item}
               disabled={!isEnabled(item, editor)}
               class="flex w-full items-center justify-between gap-6 px-4 py-1 text-left hover:bg-accent hover:text-white disabled:text-dim disabled:hover:bg-transparent"
@@ -128,7 +150,10 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
                 runCommand(item, editor, shell);
               }}
             >
-              <span>{command(item).label}</span>
+              <span class="flex items-center gap-1.5">
+                <span class="w-3 text-center">{command(item).checked?.(editor) ? "✓" : ""}</span>
+                {command(item).label}
+              </span>
               <span class="text-dim">{command(item).shortcuts ? formatShortcut(command(item).shortcuts![0], isMac) : ""}</span>
             </button>
           )

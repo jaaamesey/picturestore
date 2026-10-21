@@ -1,3 +1,5 @@
+import { LENGTH_UNITS, toPixels, type LengthUnit } from "./imageSize";
+
 /**
  * User preferences (Edit ▸ Preferences), persisted per browser. Organised as
  * in Photoshop: History States and Memory Usage live under Performance,
@@ -13,7 +15,33 @@ export interface Preferences {
   readonly memoryUsageMB: number;
   /** File Handling ▸ Automatically Save Recovery Information Every N minutes; 0 = off. */
   readonly recoveryMinutes: number;
+  /** Guides, Grid & Slices ▸ Guides: colour ("#rrggbb") and style. */
+  readonly guideColor: string;
+  readonly guideStyle: LineStyle;
+  /** Guides, Grid & Slices ▸ Smart Guides: colour. */
+  readonly smartGuideColor: string;
+  /** Guides, Grid & Slices ▸ Grid: colour, style, Gridline Every (a length in a unit) and Subdivisions. */
+  readonly gridColor: string;
+  readonly gridStyle: LineStyle;
+  readonly gridEvery: number;
+  readonly gridUnit: LengthUnit;
+  readonly gridSubdivisions: number;
 }
+
+export type LineStyle = "lines" | "dashed" | "dots";
+
+/** Photoshop's named guide and grid colours. */
+export const GUIDE_COLORS: readonly { readonly label: string; readonly hex: string }[] = [
+  { label: "Light Blue", hex: "#4a8cff" },
+  { label: "Light Red", hex: "#ff4a4a" },
+  { label: "Green", hex: "#4aff4a" },
+  { label: "Medium Blue", hex: "#4a4aff" },
+  { label: "Yellow", hex: "#ffff4a" },
+  { label: "Magenta", hex: "#ff4aff" },
+  { label: "Cyan", hex: "#4affff" },
+  { label: "Light Gray", hex: "#c0c0c0" },
+  { label: "Black", hex: "#000000" },
+];
 
 export const HISTORY_STATES_RANGE = { min: 1, max: 1000 } as const;
 export const RECOVERY_INTERVALS = [0, 1, 5, 10, 15, 30, 60] as const;
@@ -39,6 +67,15 @@ export const defaultPreferences = (): Preferences => ({
   historyStates: 50,
   memoryUsageMB: memoryUsageRange().default,
   recoveryMinutes: 10,
+  // Photoshop's defaults: cyan guides, magenta smart guides, a grey grid every 25 mm in 4 subdivisions.
+  guideColor: "#4affff",
+  guideStyle: "lines",
+  smartGuideColor: "#ff4aff",
+  gridColor: "#9c9c9c",
+  gridStyle: "lines",
+  gridEvery: 25,
+  gridUnit: "millimeters",
+  gridSubdivisions: 4,
 });
 
 const clampInt = (v: unknown, min: number, max: number, fallback: number) =>
@@ -51,10 +88,21 @@ export function normalizePreferences(raw: unknown, defaults = defaultPreferences
   const recovery = RECOVERY_INTERVALS.includes(p.recoveryMinutes as (typeof RECOVERY_INTERVALS)[number])
     ? (p.recoveryMinutes as number)
     : defaults.recoveryMinutes;
+  const color = (v: unknown, fallback: string) => (typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : fallback);
+  const oneOf = <T extends string>(v: unknown, options: readonly T[], fallback: T) => (options.includes(v as T) ? (v as T) : fallback);
+  const styles: readonly LineStyle[] = ["lines", "dashed", "dots"];
   return {
     historyStates: clampInt(p.historyStates, HISTORY_STATES_RANGE.min, HISTORY_STATES_RANGE.max, defaults.historyStates),
     memoryUsageMB: clampInt(p.memoryUsageMB, mem.min, mem.max, defaults.memoryUsageMB),
     recoveryMinutes: recovery,
+    guideColor: color(p.guideColor, defaults.guideColor),
+    guideStyle: oneOf(p.guideStyle, ["lines", "dashed"], defaults.guideStyle),
+    smartGuideColor: color(p.smartGuideColor, defaults.smartGuideColor),
+    gridColor: color(p.gridColor, defaults.gridColor),
+    gridStyle: oneOf(p.gridStyle, styles, defaults.gridStyle),
+    gridEvery: typeof p.gridEvery === "number" && p.gridEvery > 0 && Number.isFinite(p.gridEvery) ? p.gridEvery : defaults.gridEvery,
+    gridUnit: oneOf(p.gridUnit, LENGTH_UNITS.map((u) => u.id), defaults.gridUnit),
+    gridSubdivisions: clampInt(p.gridSubdivisions, 1, 100, defaults.gridSubdivisions),
   };
 }
 
@@ -90,7 +138,7 @@ export const PREFERENCES_PANES = [
   { id: "cursors", label: "Cursors", available: false },
   { id: "transparency", label: "Transparency & Gamut", available: false },
   { id: "units", label: "Units & Rulers", available: false },
-  { id: "guides", label: "Guides, Grid & Slices", available: false },
+  { id: "guides", label: "Guides, Grid & Slices", available: true },
   { id: "plugins", label: "Plugins", available: false },
   { id: "type", label: "Type", available: false },
   { id: "technologyPreviews", label: "Technology Previews", available: false },
@@ -98,3 +146,13 @@ export const PREFERENCES_PANES = [
 ] as const;
 
 export type PreferencesPane = (typeof PREFERENCES_PANES)[number]["id"];
+
+/**
+ * The grid's spacing in a `width × height` document at `ppi`: between
+ * gridlines, and between subdivisions (what snapping uses). Percent is of
+ * the document's size on each axis.
+ */
+export function gridSpacing(p: Pick<Preferences, "gridEvery" | "gridUnit" | "gridSubdivisions">, width: number, height: number, ppi: number) {
+  const x = toPixels(p.gridEvery, p.gridUnit, ppi, width), y = toPixels(p.gridEvery, p.gridUnit, ppi, height);
+  return { major: { x, y }, minor: { x: x / p.gridSubdivisions, y: y / p.gridSubdivisions } };
+}

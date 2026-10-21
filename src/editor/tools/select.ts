@@ -38,11 +38,16 @@ export function createMarqueeTool(shape: "rect" | "ellipse"): Tool {
   let mode: SelectionMode = "replace";
   let downMods = { shift: false, alt: false };
   let current: Rect = rect(0, 0, 0, 0);
+  /** Where a corner lands: snapped, and on whole pixels for rectangles. */
+  const corner = (ctx: ToolContext, e: ToolEvent) => {
+    const p = ctx.snap.point(vec(e.x, e.y));
+    return shape === "rect" ? vec(Math.round(p.x), Math.round(p.y)) : p;
+  };
 
   const update = (ctx: ToolContext, e: ToolEvent) => {
     if (!start) return;
     // Modifiers held from the start pick the mode; pressed later they constrain.
-    const p = shape === "rect" ? vec(Math.round(e.x), Math.round(e.y)) : vec(e.x, e.y);
+    const p = corner(ctx, e);
     current = marqueeRect(start, p, e.shift && !downMods.shift, e.alt && !downMods.alt);
     ctx.overlay({ kind: "marquee", shape, rect: current });
   };
@@ -51,7 +56,7 @@ export function createMarqueeTool(shape: "rect" | "ellipse"): Tool {
     id: shape === "rect" ? "marquee-rect" : "marquee-ellipse",
     cursor: () => "crosshair",
     down(ctx, e) {
-      start = shape === "rect" ? vec(Math.round(e.x), Math.round(e.y)) : vec(e.x, e.y);
+      start = corner(ctx, e);
       downMods = { shift: e.shift, alt: e.alt };
       mode = modeFromModifiers(ctx.settings.selectionMode, e.shift, e.alt);
       current = rect(start.x, start.y, 0, 0);

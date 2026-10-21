@@ -67,8 +67,10 @@ export function createShapeTool(id: ShapeToolId): Tool {
 
   const placementFor = (ctx: ToolContext, e: ToolEvent): Placement | null => {
     if (!start) return null;
-    if (id === "line") return linePlacement(start, e, ctx.settings.shape.weight, e.shift);
-    const r = marqueeRect(start, e, e.shift && !downMods.shift, e.alt && !downMods.alt);
+    // Both ends snap; constraints apply after (as in Photoshop: a snapped corner, then Shift's proportions).
+    const p = ctx.snap.point(vec(e.x, e.y));
+    if (id === "line") return linePlacement(start, p, ctx.settings.shape.weight, e.shift);
+    const r = marqueeRect(start, p, e.shift && !downMods.shift, e.alt && !downMods.alt);
     return r.w >= 1 && r.h >= 1 ? boxPlacement(r) : null;
   };
 
@@ -108,7 +110,7 @@ export function createShapeTool(id: ShapeToolId): Tool {
         const layer = activeLayer(ctx.doc);
         if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
       }
-      start = vec(e.x, e.y);
+      start = ctx.snap.point(vec(e.x, e.y));
       downMods = { shift: e.shift, alt: e.alt };
       placement = null;
     },

@@ -11,7 +11,11 @@ import { moveFrame } from "../editor/tools/transform";
 import { boxCorners, boxToDoc, overlayLines } from "../core/crop";
 import { toHex } from "../core/color";
 import type { Overlay, ToolEvent } from "../editor/types";
-import { docToScreen, screenToDoc, zoomAt } from "../editor/view";
+import { RULER_PX, docToScreen, rulerStep, screenToDoc, zoomAt } from "../editor/view";
+import { shown } from "../editor/viewOptions";
+import { gridSpacing } from "../editor/preferences";
+import type { SmartGuide } from "../core/snap";
+import { resolutionOf, type Doc, type Guide } from "../core/document";
 import { WORKSPACE_CSS, createRenderer, type Renderer, type View } from "../gpu/renderer";
 import { AppContext } from "./context";
 import { MemoryIndicator } from "./MemoryIndicator";
@@ -49,6 +53,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
   let host!: HTMLDivElement;
   const [hover, setHover] = createSignal<ToolEvent | null>(null);
   const [spaceHeld, setSpaceHeld] = createSignal(false);
+  const [size, setSize] = createSignal({ width: 0, height: 0 });
   let pan: { x: number; y: number; view: View } | null = null;
   let toolPointer: number | null = null;
   let needsRender = true;
@@ -58,7 +63,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
   createEffect(
     () => {
       const s = editor.active();
-      return s ? [s.displayed(), s.view(), s.floating()] : null;
+      return s ? [s.displayed(), s.view(), s.floating(), editor.viewOptions().extras] : null;
     },
     () => {
       needsRender = true;
@@ -187,7 +192,9 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
         if (!needsRender && step === antsStep) return;
         needsRender = false;
         antsStep = step;
-        renderer.render({ ...doc, floating: s.floating() }, s.view(), step < 0 ? 0 : (step % 8) / 8);
+        // View ▸ Extras hides selection edges too.
+        const selection = editor.viewOptions().extras ? doc.selection : null;
+        renderer.render({ ...doc, selection, floating: s.floating() }, s.view(), step < 0 ? 0 : (step % 8) / 8);
       };
       raf = requestAnimationFrame(frame);
       return () => {
@@ -202,6 +209,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
   onSettled(() => {
     const resize = new ResizeObserver(() => {
       editor.setViewportSize({ width: host.clientWidth, height: host.clientHeight });
+      setSize({ width: host.clientWidth, height: host.clientHeight });
       needsRender = true;
     });
     resize.observe(host);
@@ -274,6 +282,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       <Show when={editor.active()}>
         {(s) => (
           <svg class="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
+            <ViewExtras doc={s().displayed()} view={s().view()} guides={s().smartGuides()} size={size()} />
             <Show when={s().overlay()}>
               {(o) => <OverlayShape overlay={o()} view={s().view()} showReference={editor.settings.transform.showReference} hover={hover()} />}
             </Show>
@@ -292,6 +301,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
           </svg>
         )}
       </Show>
+      <Show when={editor.viewOptions().rulers && editor.active()}>{(s) => <Rulers view={s().view()} size={size()} />}</Show>
       <StatusBar hover={hover()} />
     </div>
   );
@@ -575,5 +585,204 @@ function StatusBar(props: { hover: ToolEvent | null }) {
         </div>
       )}
     </Show>
+  );
+}
+
+type Size = { readonly width: number; readonly height: number };
+
+/** The document rectangle visible in the viewport (its bounds, for a rotated view). */
+function visibleDocRect(view: View, size: Size) {
+  const corners = [
+    { x: 0, y: 0 },
+    { x: size.width, y: 0 },
+    { x: size.width, y: size.height },
+    { x: 0, y: size.height },
+  ].map((p) => screenToDoc(view, p));
+  const xs = corners.map((p) => p.x), ys = corners.map((p) => p.y);
+  return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+}
+
+const DASH = { lines: undefined, dashed: "6 4", dots: "1 3" } as const;
+
+/** Multiples of `step` within [lo, hi], at most `max` of them. */
+function multiples(step: number, lo: number, hi: number, max = 2000): number[] {
+  if (!(step > 0) || (hi - lo) / step > max) return [];
+  const out: number[] = [];
+  for (let k = Math.ceil(lo / step - 1e-9); k * step <= hi + 1e-9; k++) out.push(k * step);
+  return out;
+}
+
+/**
+ * What View ▸ Show puts over the canvas: the grid (over the canvas, minor
+ * lines lighter), guides (across the whole window) and the smart guides of
+ * the current drag.
+ */
+function ViewExtras(props: { doc: Doc; view: View; guides: readonly SmartGuide[]; size: Size }) {
+  const { editor } = useContext(AppContext);
+  const show = () => shown(editor.viewOptions());
+  const prefs = () => editor.preferences();
+  const pt = (x: number, y: number) => docToScreen(props.view, { x, y });
+  const line = (x0: number, y0: number, x1: number, y1: number) => {
+    const a = pt(x0, y0), b = pt(x1, y1);
+    return { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+  };
+  const grid = () => {
+    if (!show().grid) return [];
+    const { width: w, height: h } = props.doc;
+    const { major, minor } = gridSpacing(prefs(), w, h, resolutionOf(props.doc));
+    const vis = visibleDocRect(props.view, props.size);
+    const [x0, x1, y0, y1] = [Math.max(0, vis.x0), Math.min(w, vis.x1), Math.max(0, vis.y0), Math.min(h, vis.y1)];
+    const lines: { major: boolean; at: ReturnType<typeof line> }[] = [];
+    const zoom = props.view.zoom;
+    const axis = (minorStep: number, majorStep: number, lo: number, hi: number, draw: (v: number) => ReturnType<typeof line>) => {
+      // Subdivisions only when they're far enough apart to read; gridlines likewise.
+      const step = minorStep * zoom >= 6 ? minorStep : majorStep * zoom >= 6 ? majorStep : 0;
+      for (const v of multiples(step, lo, hi)) {
+        const isMajor = Math.abs(v / majorStep - Math.round(v / majorStep)) < 1e-6;
+        lines.push({ major: isMajor, at: draw(v) });
+      }
+    };
+    axis(minor.x, major.x, x0, x1, (x) => line(x, y0, x, y1));
+    axis(minor.y, major.y, y0, y1, (y) => line(x0, y, x1, y));
+    return lines;
+  };
+  // Guides cross the whole window, pasteboard included.
+  const guides = () => (show().guides ? (props.doc.guides ?? []) : []);
+  const FAR = 1e6;
+  return (
+    <g data-testid="view-extras">
+      <For each={grid()}>
+        {(l) => (
+          <line {...l.at} stroke={prefs().gridColor} stroke-width="1" stroke-dasharray={DASH[prefs().gridStyle]} opacity={l.major ? 0.9 : 0.45} data-testid="grid-line" />
+        )}
+      </For>
+      <For each={guides()}>
+        {(g) => (
+          <line
+            {...(g.orientation === "vertical" ? line(g.position, -FAR, g.position, FAR) : line(-FAR, g.position, FAR, g.position))}
+            stroke={prefs().guideColor}
+            stroke-width="1"
+            stroke-dasharray={DASH[prefs().guideStyle]}
+            data-testid="guide"
+            data-orientation={g.orientation}
+            data-position={g.position}
+          />
+        )}
+      </For>
+      <For each={props.guides}>
+        {(g) => (
+          <line
+            {...(g.axis === "x" ? line(g.at, g.from, g.at, g.to) : line(g.from, g.at, g.to, g.at))}
+            stroke={prefs().smartGuideColor}
+            stroke-width="1"
+            data-testid="smart-guide"
+          />
+        )}
+      </For>
+    </g>
+  );
+}
+
+/**
+ * View ▸ Rulers: pixel rulers along the top and left (ticks on a 1–2–5
+ * scale). Dragging from one pulls out a guide — horizontal from the top,
+ * vertical from the left, Alt for the other — which snaps as it goes (Shift:
+ * to the ruler's ticks) and is dropped onto the canvas, or back onto the
+ * ruler to cancel.
+ */
+function Rulers(props: { view: View; size: Size }) {
+  const { editor } = useContext(AppContext);
+  const [drag, setDrag] = createSignal<{ orientation: Guide["orientation"]; position: number } | null>(null);
+  const step = () => rulerStep(props.view.zoom);
+  // Rulers read the unrotated view (a rotated view, only ever the Crop tool's, has no straight rulers).
+  const toScreen = (v: number, axis: "x" | "y") => v * props.view.zoom + (axis === "x" ? props.view.panX : props.view.panY);
+  const ticks = (axis: "x" | "y") => {
+    const len = axis === "x" ? props.size.width : props.size.height;
+    const pan = axis === "x" ? props.view.panX : props.view.panY;
+    const lo = (RULER_PX - pan) / props.view.zoom, hi = (len - pan) / props.view.zoom;
+    const { major, minor } = step();
+    return multiples(minor, lo, hi).map((v) => ({ at: toScreen(v, axis), major: Math.abs(v / major - Math.round(v / major)) < 1e-6, label: Math.round(v) }));
+  };
+
+  const startGuide = (from: "top" | "left") => (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const host = el.parentElement!.getBoundingClientRect();
+    const local = (m: PointerEvent) => ({ x: m.clientX - host.left, y: m.clientY - host.top });
+    const update = (m: PointerEvent) => {
+      const base: Guide["orientation"] = from === "top" ? "horizontal" : "vertical";
+      const orientation = m.altKey ? (base === "horizontal" ? "vertical" : "horizontal") : base;
+      const p = screenToDoc(props.view, local(m));
+      setDrag({ orientation, position: editor.guidePosition(orientation, p, m.shiftKey) });
+    };
+    const up = (m: PointerEvent) => {
+      el.removeEventListener("pointermove", update);
+      el.removeEventListener("pointerup", up);
+      const d = drag();
+      setDrag(null);
+      editor.endGuideDrag();
+      const q = local(m);
+      const onRuler = q.x < RULER_PX || q.y < RULER_PX || q.x > props.size.width || q.y > props.size.height;
+      if (!d || onRuler) return;
+      // A new guide shows guides, as in Photoshop.
+      if (!shown(editor.viewOptions()).guides) editor.setViewOptions({ extras: true, showGuides: true });
+      editor.addGuide(d.orientation, d.position);
+    };
+    el.addEventListener("pointermove", update);
+    el.addEventListener("pointerup", up);
+    update(e);
+  };
+
+  const ruler = "absolute overflow-hidden bg-panel text-[9px] text-dim select-none";
+  return (
+    <>
+      <svg class="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
+        <Show when={drag()}>
+          {(d) => {
+            const at = () => (d().orientation === "vertical" ? toScreen(d().position, "x") : toScreen(d().position, "y"));
+            return d().orientation === "vertical" ? (
+              <line x1={at()} y1={0} x2={at()} y2={props.size.height} stroke={editor.preferences().guideColor} data-testid="guide-preview" />
+            ) : (
+              <line x1={0} y1={at()} x2={props.size.width} y2={at()} stroke={editor.preferences().guideColor} data-testid="guide-preview" />
+            );
+          }}
+        </Show>
+      </svg>
+      <div class={ruler} style={{ left: `${RULER_PX}px`, right: "0", top: "0", height: `${RULER_PX}px` }} data-testid="ruler-top" onPointerDown={startGuide("top")}>
+        <svg class="absolute h-full w-full overflow-visible" style={{ left: `-${RULER_PX}px` }}>
+          <For each={ticks("x")}>
+            {(t) => (
+              <>
+                <line x1={t.at} y1={t.major ? 0 : RULER_PX - 4} x2={t.at} y2={RULER_PX} stroke="currentColor" />
+                <Show when={t.major}>
+                  <text x={t.at + 2} y={9} fill="currentColor">
+                    {t.label}
+                  </text>
+                </Show>
+              </>
+            )}
+          </For>
+        </svg>
+      </div>
+      <div class={ruler} style={{ top: `${RULER_PX}px`, bottom: "0", left: "0", width: `${RULER_PX}px` }} data-testid="ruler-left" onPointerDown={startGuide("left")}>
+        <svg class="absolute h-full w-full overflow-visible" style={{ top: `-${RULER_PX}px` }}>
+          <For each={ticks("y")}>
+            {(t) => (
+              <>
+                <line x1={t.major ? 0 : RULER_PX - 4} y1={t.at} x2={RULER_PX} y2={t.at} stroke="currentColor" />
+                <Show when={t.major}>
+                  <text x={11} y={t.at + 2} fill="currentColor" transform={`rotate(-90 11 ${t.at + 2})`} text-anchor="end">
+                    {t.label}
+                  </text>
+                </Show>
+              </>
+            )}
+          </For>
+        </svg>
+      </div>
+      <div class="absolute top-0 left-0 bg-panel" style={{ width: `${RULER_PX}px`, height: `${RULER_PX}px` }} />
+    </>
   );
 }

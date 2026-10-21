@@ -215,7 +215,10 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
   const res = psd.imageResources?.resolutionInfo;
   // Stored as pixels per inch or per centimetre; documents keep ppi.
   const resolution = res ? (res.horizontalResolutionUnit === "PPCM" ? res.horizontalResolution * 2.54 : res.horizontalResolution) : undefined;
-  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null, resolution };
+  // Guides: ag-psd's "vertical" is a guide at x, as ours.
+  const stored = psd.imageResources?.gridAndGuidesInformation?.guides ?? [];
+  const guides = stored.length ? stored.map((g) => ({ orientation: g.direction, position: g.location })) : undefined;
+  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null, resolution, guides };
 }
 
 const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
@@ -331,5 +334,8 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
   psd.imageResources = {
     resolutionInfo: { horizontalResolution: ppi, horizontalResolutionUnit: "PPI", widthUnit: "Inches", verticalResolution: ppi, verticalResolutionUnit: "PPI", heightUnit: "Inches" },
   };
+  // Positions are stored in 1/32 px, unsigned (by ag-psd), so guides left of or above the canvas can't be.
+  const guides = (doc.guides ?? []).filter((g) => g.position >= 0).map((g) => ({ location: Math.round(g.position * 32) / 32, direction: g.orientation }));
+  if (guides.length) psd.imageResources.gridAndGuidesInformation = { guides };
   return writePsd(psd, { generateThumbnail: false, noBackground: true });
 }

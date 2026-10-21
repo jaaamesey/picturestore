@@ -66,12 +66,6 @@ describe("crop boxes", () => {
     expect([b.w, b.h]).toEqual([1, 1]);
   });
 
-  it("snap to the canvas edges", () => {
-    const snap = { xs: [0, 100], ys: [0, 80], tolerance: 3 };
-    const b = resizeBox(canvasBox(100, 80), 1, 1, vec(98, 40), { ...free, snap });
-    expect([b.w, b.h]).toEqual([100, 40]);
-  });
-
   it("are drawn by dragging, square with Shift, from the centre with Alt", () => {
     expect(drawBox(vec(10, 10), vec(40, 30), 0, { ratio: null, square: false, fromCentre: false })).toEqual({ cx: 25, cy: 20, w: 30, h: 20, angle: 0 });
     expect(drawBox(vec(10, 10), vec(-20, 30), 0, { ratio: null, square: true, fromCentre: false })).toEqual({ cx: -5, cy: 25, w: 30, h: 30, angle: 0 });

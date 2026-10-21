@@ -58,6 +58,12 @@ export interface Layer {
   readonly content: LayerContent;
 }
 
+/** A guide: a vertical line at x = `position`, or a horizontal one at y, in document pixels (it may lie off the canvas). */
+export interface Guide {
+  readonly orientation: "vertical" | "horizontal";
+  readonly position: number;
+}
+
 /**
  * An immutable document snapshot. Every edit produces a new Doc that shares
  * unchanged layers and tiles with its predecessor, so history is just a list
@@ -73,6 +79,8 @@ export interface Doc {
   readonly selection: Mask | null;
   /** Pixels per inch; only affects physical sizes (print, Image Size's units). Default {@link DEFAULT_RESOLUTION}. */
   readonly resolution?: number;
+  /** Ruler guides (View ▸ Guides): part of the document, saved with it and undoable. */
+  readonly guides?: readonly Guide[];
 }
 
 /** Photoshop's default for screen documents. */

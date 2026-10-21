@@ -57,26 +57,11 @@ export function roundBox(b: CropBox): CropBox {
 export const isCanvasBox = (b: CropBox, width: number, height: number) =>
   b.angle === 0 && b.w === width && b.h === height && b.cx === width / 2 && b.cy === height / 2;
 
-/** Snapping to document lines (the canvas edges), for unrotated boxes: Photoshop's Snap To ▸ Document Bounds. */
-export interface Snap {
-  readonly xs: readonly number[];
-  readonly ys: readonly number[];
-  /** In document pixels. */
-  readonly tolerance: number;
-}
-
-const snapTo = (v: number, lines: readonly number[], tolerance: number) => {
-  let best = v, gap = tolerance;
-  for (const l of lines) if (Math.abs(l - v) <= gap) [best, gap] = [l, Math.abs(l - v)];
-  return best;
-};
-
 export interface ResizeOptions {
   /** Width ÷ height to keep (a fixed ratio, or Shift's current proportions), or null. */
   readonly ratio: number | null;
   /** Alt: resize about the centre. */
   readonly fromCentre: boolean;
-  readonly snap?: Snap | null;
 }
 
 /**
@@ -85,11 +70,7 @@ export interface ResizeOptions {
  * dimension that grew most; an edge sets the other dimension, centred.
  */
 export function resizeBox(b: CropBox, hx: -1 | 0 | 1, hy: -1 | 0 | 1, p: Vec2, o: ResizeOptions): CropBox {
-  let q = docToBox(b, p);
-  if (o.snap && b.angle === 0) {
-    const ox = b.cx - b.w / 2, oy = b.cy - b.h / 2;
-    q = vec(snapTo(q.x + ox, o.snap.xs, o.snap.tolerance) - ox, snapTo(q.y + oy, o.snap.ys, o.snap.tolerance) - oy);
-  }
+  const q = docToBox(b, p);
   let l = 0, r = b.w, t = 0, btm = b.h;
   if (o.fromCentre) {
     const hw = Math.max(MIN_SIDE / 2, Math.abs(q.x - b.w / 2)), hh = Math.max(MIN_SIDE / 2, Math.abs(q.y - b.h / 2));
@@ -123,13 +104,11 @@ export interface DrawOptions {
   readonly square: boolean;
   /** Alt: drawn from the centre. */
   readonly fromCentre: boolean;
-  readonly snap?: Snap | null;
 }
 
 /** A new box dragged from `a` to `b` (document points), aligned to `angle` (the screen's axes). */
 export function drawBox(a: Vec2, b: Vec2, angle: number, o: DrawOptions): CropBox {
   const c = Math.cos(angle), s = Math.sin(angle);
-  if (o.snap && angle === 0) b = vec(snapTo(b.x, o.snap.xs, o.snap.tolerance), snapTo(b.y, o.snap.ys, o.snap.tolerance));
   const dx = c * (b.x - a.x) + s * (b.y - a.y), dy = -s * (b.x - a.x) + c * (b.y - a.y);
   let w = Math.max(MIN_SIDE, Math.abs(dx)), h = Math.max(MIN_SIDE, Math.abs(dy));
   const ratio = o.ratio ?? (o.square ? 1 : null);

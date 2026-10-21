@@ -11,6 +11,8 @@ import {
   type Preferences,
   type PreferencesPane,
 } from "../editor/preferences";
+import { GUIDE_COLORS, type LineStyle } from "../editor/preferences";
+import { LENGTH_UNITS, type LengthUnit } from "../editor/imageSize";
 import { AppContext } from "./context";
 import { Button, NumberField } from "./controls";
 import { dismissable } from "./Popover";
@@ -130,6 +132,41 @@ export function PreferencesDialog(props: { pane: PreferencesPane; onClose: () =>
                 </p>
               </Group>
             </Match>
+            <Match when={pane() === "guides"}>
+              <Group title="Guides">
+                <ColorChoice testId="prefs-guide-color" value={draft().guideColor} onChange={(guideColor) => set({ guideColor })} />
+                <StyleChoice value={draft().guideStyle} styles={["lines", "dashed"]} onChange={(guideStyle) => set({ guideStyle })} />
+              </Group>
+              <Group title="Smart Guides">
+                <ColorChoice testId="prefs-smart-guide-color" value={draft().smartGuideColor} onChange={(smartGuideColor) => set({ smartGuideColor })} />
+              </Group>
+              <Group title="Grid">
+                <ColorChoice testId="prefs-grid-color" value={draft().gridColor} onChange={(gridColor) => set({ gridColor })} />
+                <StyleChoice value={draft().gridStyle} styles={["lines", "dashed", "dots"]} onChange={(gridStyle) => set({ gridStyle })} />
+                <div class="flex items-center gap-2">
+                  <NumberField
+                    label="Gridline Every"
+                    testId="prefs-grid-every"
+                    value={draft().gridEvery}
+                    min={0.01}
+                    max={100000}
+                    step={0.01}
+                    onChange={(gridEvery) => set({ gridEvery })}
+                  />
+                  <select data-testid="prefs-grid-unit" value={draft().gridUnit} onChange={(e) => set({ gridUnit: e.currentTarget.value as LengthUnit })}>
+                    <For each={LENGTH_UNITS}>{(u) => <option value={u.id}>{u.label}</option>}</For>
+                  </select>
+                </div>
+                <NumberField
+                  label="Subdivisions"
+                  testId="prefs-grid-subdivisions"
+                  value={draft().gridSubdivisions}
+                  min={1}
+                  max={100}
+                  onChange={(gridSubdivisions) => set({ gridSubdivisions })}
+                />
+              </Group>
+            </Match>
             <Match when={pane() === "performance"}>
               <Group title="Memory Usage">
                 <div class="grid grid-cols-[10rem_1fr] gap-x-3 gap-y-1">
@@ -203,5 +240,32 @@ export function PreferencesDialog(props: { pane: PreferencesPane; onClose: () =>
         </div>
       </div>
     </div>
+  );
+}
+
+/** Photoshop's colour menu: named colours, or Custom (a colour well). */
+function ColorChoice(props: { value: string; testId: string; onChange: (hex: string) => void }) {
+  const named = () => GUIDE_COLORS.find((c) => c.hex === props.value);
+  return (
+    <label class="flex items-center gap-2">
+      <span class="w-14 text-dim">Color:</span>
+      <select data-testid={props.testId} value={named()?.hex ?? "custom"} onChange={(e) => e.currentTarget.value !== "custom" && props.onChange(e.currentTarget.value)}>
+        <For each={GUIDE_COLORS}>{(c) => <option value={c.hex}>{c.label}</option>}</For>
+        <option value="custom">Custom…</option>
+      </select>
+      <input type="color" class="h-5 w-8" value={props.value} onInput={(e) => props.onChange(e.currentTarget.value)} />
+    </label>
+  );
+}
+
+function StyleChoice<S extends LineStyle>(props: { value: S; styles: readonly S[]; onChange: (s: S) => void }) {
+  const labels: Record<LineStyle, string> = { lines: "Lines", dashed: "Dashed Lines", dots: "Dots" };
+  return (
+    <label class="flex items-center gap-2">
+      <span class="w-14 text-dim">Style:</span>
+      <select value={props.value} onChange={(e) => props.onChange(e.currentTarget.value as S)}>
+        <For each={props.styles}>{(s) => <option value={s}>{labels[s]}</option>}</For>
+      </select>
+    </label>
   );
 }

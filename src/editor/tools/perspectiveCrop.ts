@@ -1,7 +1,7 @@
 import { lengthToPixels, orderQuad, perspectiveMatrix, perspectiveSize } from "../../core/crop";
 import { resolutionOf, type Doc } from "../../core/document";
 import { transformDocument } from "../../core/documentTransform";
-import { vec, type Vec2 } from "../../core/geometry";
+import { boundsOf, vec, type Vec2 } from "../../core/geometry";
 import { isConvex, type Quad } from "../../core/warp";
 import type { Tool, ToolContext } from "../types";
 import { docToScreen, followRemap } from "../view";
@@ -89,7 +89,7 @@ export function createPerspectiveCropTool(): Tool {
       const p = vec(e.x, e.y), screen = vec(e.screenX, e.screenY);
       const q = quad();
       if (!q) {
-        drag = { kind: "draw", start: p, startScreen: screen, moved: false };
+        drag = { kind: "draw", start: ctx.snap.point(p), startScreen: screen, moved: false };
         return publish(ctx);
       }
       const hit = hitQuad(q, toScreen(ctx), screen);
@@ -109,16 +109,24 @@ export function createPerspectiveCropTool(): Tool {
           drag.moved ||= Math.hypot(e.screenX - drag.startScreen.x, e.screenY - drag.startScreen.y) > 3;
           // A drag (before any corner is clicked) draws a rectangle.
           if (!drag.moved || points.length > 0) return;
-          const a = drag.start;
-          points = [a, vec(p.x, a.y), p, vec(a.x, p.y)];
+          const a = drag.start, b = ctx.snap.point(p);
+          points = [a, vec(b.x, a.y), b, vec(a.x, b.y)];
           points = [...orderQuad(points)];
           break;
         }
         case "corner":
         case "edge":
         case "move": {
-          const d = vec(p.x - drag.start.x, p.y - drag.start.y);
+          let d = vec(p.x - drag.start.x, p.y - drag.start.y);
           const { kind, from } = drag;
+          // A corner snaps where it lands; the whole quad by its bounds.
+          if (kind === "corner") {
+            const at = vec(from[drag.index].x + d.x, from[drag.index].y + d.y), s = ctx.snap.point(at);
+            d = vec(d.x + s.x - at.x, d.y + s.y - at.y);
+          } else if (kind === "move") {
+            const s = ctx.snap.rect(boundsOf(from.map((c) => vec(c.x + d.x, c.y + d.y))));
+            d = vec(d.x + s.x, d.y + s.y);
+          }
           const moves = (i: number) =>
             kind === "move" || i === (drag as { index: number }).index || (kind === "edge" && i === ((drag as { index: number }).index + 1) % 4);
           points = from.map((c, i) => (moves(i) ? vec(c.x + d.x, c.y + d.y) : c));
@@ -140,7 +148,7 @@ export function createPerspectiveCropTool(): Tool {
       drag = null;
       // Clicks place corners one at a time.
       if (d?.kind === "draw" && !d.moved && points.length < 4) {
-        points = [...points, vec(e.x, e.y)];
+        points = [...points, ctx.snap.point(vec(e.x, e.y))];
         if (points.length === 4) points = [...orderQuad(points)];
       }
       publish(ctx);

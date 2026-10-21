@@ -10,6 +10,10 @@ import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings, Writable } 
 import { createTools } from "./index";
 import { moveFrame } from "./transform";
 import { screenToDoc } from "../view";
+import { createSnapper } from "../snapping";
+import { defaultPreferences } from "../preferences";
+import { DEFAULT_VIEW_OPTIONS, type SnapToOptions } from "../viewOptions";
+import type { SmartGuide } from "../../core/snap";
 import { CPU_RASTERIZERS, smartObjectLayer, smartSource, wholePixelMove } from "../../core/content";
 import { convertToSmartObject, createLayer } from "../../core/document";
 import { IDENTITY_PATCH, quadOf } from "../../core/warp";
@@ -34,6 +38,10 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     pending: Promise.resolve() as Promise<void>,
     /** Rasterize prompts the tools raised. */
     prompts: [] as string[],
+    /** Snapping is off unless a test turns it on. */
+    snapTo: null as SnapToOptions | null,
+    smartGuides: [] as readonly SmartGuide[],
+    lockGuides: false,
     settings: structuredClone({ ...settings, ...options }) as Writable<ToolSettings>,
   };
   const ctx = (): ToolContext => ({
@@ -64,6 +72,8 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     setForeground: (c) => (s.fg = c),
     setTool: (id) => (s.tool = id),
     viewport: { width: 800, height: 600 },
+    viewOptions: { ...DEFAULT_VIEW_OPTIONS, snap: !!s.snapTo, lockGuides: s.lockGuides },
+    snap: createSnapper(s.doc, s.view.zoom, s.snapTo, defaultPreferences(), (g) => (s.smartGuides = g)),
     updateSettings: (fn) => fn(s.settings),
   });
   const ev = (x: number, y: number, mods: Partial<ToolEvent> = {}): ToolEvent => ({
@@ -551,6 +561,7 @@ describe("crop", () => {
 
   it("resizes from a handle, snapping to the canvas edge, and grows the canvas beyond it", async () => {
     const { h, drag } = start(doc(), { classic: true });
+    h.s.snapTo = { guides: true, grid: false, layers: true, bounds: true };
     await drag([100, 50], [97, 50]); // snaps back to the edge
     expect(cropBox(h)!.w).toBe(100);
     await drag([100, 50], [130, 50]);
@@ -668,5 +679,81 @@ describe("perspective crop", () => {
     expect(h.s.overlay).toMatchObject({ valid: false });
     t.commit!(h.ctx());
     expect(h.s.history).toEqual([]);
+  });
+});
+
+describe("snapping", () => {
+  const ALL = { guides: true, grid: false, layers: true, bounds: true };
+  /** 100×100: a 24×24 square at (10, 10) on one layer, and a 20×20 one at (60, 60) on the active one. */
+  const twoSquares = () => {
+    const d = blank();
+    const other = createLayer({ name: "other", tiles: fillTiles(EMPTY_TILES, rect(10, 10, 24, 24), { r: 0, g: 0, b: 255 }) });
+    const withOther = { ...d, layers: [d.layers[0], other, d.layers[1]] };
+    return updateLayer(withOther, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(60, 60, 20, 20), { r: 255, g: 0, b: 0 }) });
+  };
+
+  it("marquee corners snap to guides and the canvas edge", async () => {
+    const h = harness({ ...blank(), guides: [{ orientation: "vertical", position: 40 }] });
+    h.s.snapTo = ALL;
+    await h.drag("marquee-rect", [3, 4], [37, 97]);
+    expect(h.s.doc.selection!.bounds).toEqual(rect(0, 0, 40, 100));
+  });
+
+  it("the Move tool snaps a layer's edges and centre to other layers, with smart guides; Ctrl suspends it", async () => {
+    const h = harness(twoSquares());
+    h.s.snapTo = ALL;
+    // Moved 24 left, its left edge (36) is 2 from the other square's right edge (34); its centre is 4 from the canvas's.
+    const t = h.tools.byId.move;
+    h.s.tool = "move";
+    t.down!(h.ctx(), h.ev(70, 70));
+    t.move!(h.ctx(), h.ev(46, 70));
+    expect(h.s.smartGuides).toContainEqual({ axis: "x", at: 34, from: 10, to: 80 });
+    t.up!(h.ctx(), h.ev(46, 70));
+    await h.s.pending;
+    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(34, 60, 20, 20));
+
+    const h2 = harness(twoSquares());
+    h2.s.snapTo = ALL;
+    await h2.drag("move", [70, 70], [46, 70], { mod: true });
+    expect(contentBounds(layerOf(h2.s.doc).tiles)).toEqual(rect(36, 60, 20, 20));
+  });
+
+  it("nothing snaps with snapping off", async () => {
+    const h = harness(twoSquares());
+    await h.drag("move", [70, 70], [46, 70]);
+    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(36, 60, 20, 20));
+  });
+
+  it("Free Transform corners snap where they land", async () => {
+    const h = harness(twoSquares());
+    h.s.snapTo = ALL;
+    h.tools.transform.begin(h.ctx(), { returnTo: "move" });
+    h.s.tool = "transform";
+    const t = h.tools.transform;
+    // Bottom-right corner (80, 80) dragged to (97, 98): snaps to the canvas corner.
+    t.down!(h.ctx(), h.ev(80, 80));
+    t.move!(h.ctx(), h.ev(97, 98, { shift: true }));
+    expect(t.state()!.quad[2]).toEqual({ x: 100, y: 100 });
+  });
+
+  it("the Move tool drags guides (snapping them), and drops them off the window to delete", async () => {
+    const d = { ...twoSquares(), guides: [{ orientation: "vertical" as const, position: 50 }] };
+    const h = harness(d);
+    h.s.snapTo = ALL;
+    await h.drag("move", [50, 5], [32, 5]);
+    expect(h.s.history).toEqual(["Move Guide"]);
+    expect(h.s.doc.guides).toEqual([{ orientation: "vertical", position: 34 }]);
+    // Untouched content: the drag moved the guide, not the layer.
+    expect(contentBounds(layerOf(h.s.doc).tiles)).toEqual(rect(60, 60, 20, 20));
+    await h.drag("move", [34, 5], [-900, 5]);
+    expect(h.s.history).toEqual(["Move Guide", "Delete Guide"]);
+    expect(h.s.doc.guides).toEqual([]);
+  });
+
+  it("locked guides stay put", async () => {
+    const h = harness({ ...twoSquares(), guides: [{ orientation: "vertical" as const, position: 50 }] });
+    h.s.lockGuides = true;
+    await h.drag("move", [50, 5], [28, 5]);
+    expect(h.s.doc.guides).toEqual([{ orientation: "vertical", position: 50 }]);
   });
 });

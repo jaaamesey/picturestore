@@ -24,6 +24,7 @@ import {
   removeLayer,
   updateLayer,
   type Doc,
+  type Guide,
   type Layer,
   type LayerContent,
   type NewDocumentOptions,
@@ -47,7 +48,7 @@ import {
   type History,
 } from "../core/history";
 import { invertSelection, selectAll } from "../core/selection";
-import { intersect, isEmpty, rect, roundOut, translation, type Rect } from "../core/geometry";
+import { intersect, isEmpty, rect, roundOut, translation, type Rect, type Vec2 } from "../core/geometry";
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "../core/shape";
@@ -59,6 +60,9 @@ import { createPreviewWorker } from "../preview/client";
 import { SHAPE_TOOLS, createTools } from "./tools";
 import { shapeGeometry, shapeStyle } from "./tools/shape";
 import type { TransformCommand } from "./tools/transform";
+import { createSnapper, guidePosition } from "./snapping";
+import { activeSnapTo, loadViewOptions, saveViewOptions, shown, type ViewOptions } from "./viewOptions";
+import type { SmartGuide } from "../core/snap";
 import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolKey, ToolSettings, Writable } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
 import { fitView, followRemap, nextZoomStep, placeAt, prevZoomStep, screenToDoc, zoomAt } from "./view";
@@ -74,6 +78,8 @@ export interface DocumentSession {
   readonly displayed: Accessor<Doc>;
   readonly floating: Accessor<FloatingLayer | null>;
   readonly overlay: Accessor<Overlay | null>;
+  /** Smart guides of the current drag's snap. */
+  readonly smartGuides: Accessor<readonly SmartGuide[]>;
   readonly view: Accessor<View>;
   readonly dirty: Accessor<boolean>;
   /** For a smart object's contents opened with Edit Contents: where saving writes back to. */
@@ -91,6 +97,7 @@ interface SessionInternals extends DocumentSession {
   setPreview(d: Doc | null): void;
   setFloating(f: FloatingLayer | null): void;
   setOverlay(o: Overlay | null): void;
+  setSmartGuides(g: readonly SmartGuide[]): void;
   setView(v: View): void;
   markSaved(doc: Doc | null): void;
 }
@@ -107,6 +114,7 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
   const [preview, setPreview] = createSignal<Doc | null>(null);
   const [floating, setFloating] = createSignal<FloatingLayer | null>(null);
   const [overlay, setOverlay] = createSignal<Overlay | null>(null);
+  const [smartGuides, setSmartGuides] = createSignal<readonly SmartGuide[]>([]);
   const [view, setView] = createSignal<View>({ zoom: 1, panX: 0, panY: 0 });
   const [saved, setSaved] = createSignal<Doc | null>(doc);
   const current = () => currentDoc(history());
@@ -118,6 +126,7 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
     displayed: createMemo(() => preview() ?? current()),
     floating,
     overlay,
+    smartGuides,
     view,
     dirty: createMemo(() => saved() !== current()),
     smartLink,
@@ -131,6 +140,7 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
     setPreview,
     setFloating,
     setOverlay,
+    setSmartGuides: (g) => setSmartGuides((prev) => (prev.length === 0 && g.length === 0 ? prev : g)),
     setView,
     markSaved: (doc) => setSaved(doc),
   };
@@ -224,6 +234,8 @@ export function createEditor() {
     const [viewportSize, setViewportSize] = createSignal({ width: 800, height: 600 });
     const [preferences, setPreferencesSignal] = createSignal<Preferences>(loadPreferences());
     let prefs = preferences();
+    const [viewOptions, setViewOptionsSignal] = createSignal<ViewOptions>(loadViewOptions());
+    let viewNow = viewOptions();
     const [memory, setMemory] = createSignal<MemoryStatus>({ ram: "ok", gpuLevel: 0 });
     let memoryNow = memory();
     const updateMemory = (patch: Partial<MemoryStatus>) => {
@@ -313,11 +325,25 @@ export function createEditor() {
           return false;
         },
         overlay: s.setOverlay,
+        snap: snapperFor(s),
+        viewOptions: viewNow,
         requestRender: () => renderRequested(),
         setView: s.setView,
         setForeground,
         setTool,
       };
+    }
+
+    /** Snapping as View ▸ Snap and Snap To say, at the session's zoom; smart guides when shown. */
+    const snapperFor = (s: SessionInternals) =>
+      createSnapper(s.doc(), s.view().zoom, activeSnapTo(viewNow), prefs, (g) => s.setSmartGuides(shown(viewNow).smartGuides ? g : []));
+
+    /** Applies `fn` to the active document's guides as one undoable step. */
+    function guideEdit(label: string, fn: (g: readonly Guide[]) => readonly Guide[]) {
+      edit(label, (d) => {
+        const guides = fn(d.guides ?? []);
+        return guides === (d.guides ?? []) ? d : { ...d, guides };
+      });
     }
 
     function commitTo(s: SessionInternals, label: string, doc: Doc, key: string | null = null) {
@@ -752,7 +778,13 @@ export function createEditor() {
       /** Whether the current tool wants only the latest of a frame's pointer moves. */
       latestMoveOnly: () => !!tools.byId[currentTool].latestMoveOnly,
       pointerMove: whenIdle((e: ToolEvent) => withTool((ctx) => tools.byId[currentTool].move?.(ctx, e))),
-      pointerUp: whenIdle((e: ToolEvent) => withTool((ctx) => tools.byId[currentTool].up?.(ctx, e))),
+      pointerUp: whenIdle((e: ToolEvent) =>
+        withTool((ctx, s) => {
+          tools.byId[currentTool].up?.(ctx, e);
+          // Smart guides show only while dragging.
+          s.setSmartGuides([]);
+        }),
+      ),
       cursor: (e: ToolEvent | null) => {
         const s = active();
         return s ? (tools.byId[toolId()].cursor?.(context(s), e) ?? "default") : "default";
@@ -805,6 +837,27 @@ export function createEditor() {
       }),
       canUndo: () => !!active() && canUndo(active()!.history()),
       canRedo: () => !!active() && canRedo(active()!.history()),
+
+      // View ▸ Show, Snap, Snap To, Rulers, Lock Guides: application-wide and remembered.
+      viewOptions,
+      setViewOptions(patch: Partial<ViewOptions>) {
+        viewNow = { ...viewNow, ...patch };
+        setViewOptionsSignal(viewNow);
+        saveViewOptions(viewNow);
+      },
+      // Guides: part of the document, so each change is a history step.
+      addGuide: whenIdle((orientation: Guide["orientation"], position: number) => guideEdit("New Guide", (g) => [...g, { orientation, position }])),
+      clearGuides: whenIdle(() => guideEdit("Clear Guides", (g) => (g.length ? [] : g))),
+      /**
+       * Where a guide dragged to `p` (document space) lands: snapped like
+       * anything else (but not to other guides), or with Shift to the
+       * ruler's ticks.
+       */
+      guidePosition(orientation: Guide["orientation"], p: Vec2, shift: boolean): number {
+        const s = active();
+        return s ? guidePosition(snapperFor(s), s.view().zoom, orientation, p, shift) : 0;
+      },
+      endGuideDrag: () => active()?.setSmartGuides([]),
 
       // Viewport
       setView,

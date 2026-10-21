@@ -4,6 +4,7 @@ import { boundsOf, integerTranslation, intersect, multiply, rect, rectCorners, r
 import type { Filter } from "./rasterize";
 import { transformMask, translateMask } from "./selection";
 import { EMPTY_TILES, clipTiles, contentBounds, translateTiles } from "./tiles";
+import { transformGuides } from "./snap";
 import { invert3, isConvex, project, type Mat3, type Quad } from "./warp";
 
 /**
@@ -125,7 +126,8 @@ export async function transformDocument(doc: Doc, t: DocTransform, r: Rasterizer
           quad: mapRect(t.matrix, sel.bounds),
           patch: null,
         }));
-  return { ...doc, width: t.width, height: t.height, layers, selection, resolution: t.resolution ?? doc.resolution };
+  const guides = transformGuides(doc.guides, t.matrix);
+  return { ...doc, width: t.width, height: t.height, layers, selection, resolution: t.resolution ?? doc.resolution, guides };
 }
 
 /** Where existing content sits within a resized canvas: 0, ½ or 1 of the added (or removed) space on each axis. */

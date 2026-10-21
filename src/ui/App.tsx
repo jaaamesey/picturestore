@@ -30,6 +30,7 @@ import type { PreferencesPane } from "../editor/preferences";
 import { listRecovery, newRecoveryKey, removeRecovery, saveRecovery } from "../io/recovery";
 import { PreferencesDialog } from "./PreferencesDialog";
 import { CanvasSizeDialog } from "./CanvasSizeDialog";
+import { NewGuideDialog } from "./NewGuideDialog";
 import { ImageSizeDialog } from "./ImageSizeDialog";
 import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
@@ -206,6 +207,7 @@ export function App() {
   const [prefsPane, setPrefsPane] = createSignal<PreferencesPane | null>(null);
   const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
+  const [newGuideFor, setNewGuideFor] = createSignal<DocumentSession | null>(null);
 
   // --- Recovery information ------------------------------------------------------
   // Every so often (Preferences ▸ File Handling), each document with unsaved
@@ -285,6 +287,7 @@ export function App() {
     preferences: (pane = "general") => setPrefsPane(pane),
     canvasSize: () => setCanvasSize(editor.active() as DocumentSession | null),
     imageSize: () => setImageSizeFor(editor.active() as DocumentSession | null),
+    newGuide: () => setNewGuideFor(editor.active() as DocumentSession | null),
   };
   const app: AppValue = { editor, shell, notify, openMenu: (x, y, items) => setMenu({ x, y, items }) };
 
@@ -300,7 +303,7 @@ export function App() {
     const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor()) return;
+      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor() || newGuideFor()) return;
       const id = findCommand(e);
       if (id === "edit.paste" || id === "edit.pasteInPlace") {
         // Let the browser deliver a paste event with the clipboard's contents.
@@ -442,6 +445,15 @@ export function App() {
             height={s.doc().height}
             onApply={(w, h, anchor) => editor.active() === s && editor.canvasSize(w, h, anchor)}
             onClose={() => setCanvasSize(null)}
+          />
+        )}
+      </Show>
+      <Show when={newGuideFor()} keyed>
+        {(s) => (
+          <NewGuideDialog
+            resolution={resolutionOf(s.doc())}
+            onAdd={(o, p) => editor.active() === s && editor.addGuide(o, p)}
+            onClose={() => setNewGuideFor(null)}
           />
         )}
       </Show>

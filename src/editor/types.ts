@@ -9,6 +9,8 @@ import type { SelectionMode } from "../core/selection";
 import type { Filter } from "../core/rasterize";
 import type { TransformMode, TransformState } from "../core/transform";
 import type { FloatingLayer, View } from "../gpu/renderer";
+import type { Snapper } from "./snapping";
+import type { ViewOptions } from "./viewOptions";
 
 export type ToolId =
   | "move"
@@ -178,6 +180,10 @@ export interface ToolContext {
    */
   requireEditable(layer: Layer, proceed?: (ctx: ToolContext) => void): boolean;
   overlay(o: Overlay | null): void;
+  /** Snapping (View ▸ Snap): where dragged points and moving boxes land. */
+  readonly snap: Snapper;
+  /** The View menu's toggles (whether guides are shown and locked, rulers). */
+  readonly viewOptions: ViewOptions;
   /** Redraws after in-place changes to previewed tiles. */
   requestRender(): void;
   setView(v: View): void;

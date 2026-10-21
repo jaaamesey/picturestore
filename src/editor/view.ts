@@ -69,3 +69,26 @@ export function followRemap(
   if (centreIfFits && size.height * v.zoom <= viewport.height) panY = (viewport.height - size.height * v.zoom) / 2;
   return { zoom: v.zoom, panX: Math.round(panX), panY: Math.round(panY) };
 }
+
+/**
+ * Ruler ticks at `zoom`: labelled ticks at least ~64 screen pixels apart,
+ * on a 1–2–5 progression of document pixels, with minor ticks between
+ * (what Shift snaps a dragged guide to).
+ */
+export function rulerStep(zoom: number): { major: number; minor: number } {
+  const target = 64 / zoom;
+  let major = 1;
+  for (let p = 1; ; p *= 10) {
+    const m = [1, 2, 5].map((k) => k * p).find((s) => s >= target);
+    if (m) {
+      major = m;
+      break;
+    }
+  }
+  // As many minor ticks as fit at least 6 screen pixels apart, on whole pixels.
+  const minor = [10, 5, 2].map((n) => major / n).find((s) => s >= 1 && s * zoom >= 6) ?? major;
+  return { major, minor };
+}
+
+/** The rulers' thickness (View ▸ Rulers), in CSS pixels, along the viewport's top and left edges. */
+export const RULER_PX = 18;
