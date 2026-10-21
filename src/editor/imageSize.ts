@@ -158,3 +158,41 @@ export function formatSize(width: number, height: number): string {
 
 /** A value for display: whole pixels, else two decimals (trailing zeros dropped). */
 export const display = (v: number, unit: LengthUnit) => (unit === "pixels" ? Math.round(v) : Math.round(v * 100) / 100);
+
+/** Preview zoom levels, relative to fitting the preview area (100% = the whole image fits). */
+export const PREVIEW_ZOOMS = [1, 2, 3, 4, 8] as const;
+
+export interface PreviewView {
+  /** The part of the new image shown (whole pixels of it). */
+  readonly window: { readonly x: number; readonly y: number; readonly w: number; readonly h: number };
+  /** Device pixels per image pixel to render at: never more than 1 (the image's own pixels) or the screen's. */
+  readonly scale: number;
+  /** Where it's drawn in the preview area, in CSS pixels. */
+  readonly css: { readonly x: number; readonly y: number; readonly w: number; readonly h: number };
+  /** Whether there's anything to pan to. */
+  readonly pannable: boolean;
+}
+
+/**
+ * The preview's view of a `width × height` image in an `areaW × areaH`
+ * (CSS pixel) preview area: fitted without stretching, then `zoom`ed
+ * (relative to the fit) about `centre` (fractions of the image). Rendering
+ * stops at the screen's resolution, so a big image costs no more than the
+ * area's device pixels; zoomed past the image's own pixels it's shown
+ * magnified, unblurred.
+ */
+export function previewView(width: number, height: number, areaW: number, areaH: number, dpr: number, zoom: number, centre: { x: number; y: number }): PreviewView {
+  const fit = Math.min(areaW / width, areaH / height);
+  const k = fit * zoom; // CSS pixels per image pixel
+  const vw = Math.min(width, Math.ceil(areaW / k)), vh = Math.min(height, Math.ceil(areaH / k));
+  const x = Math.min(width - vw, Math.max(0, Math.round(centre.x * width - vw / 2)));
+  const y = Math.min(height - vh, Math.max(0, Math.round(centre.y * height - vh / 2)));
+  const cssW = vw * k, cssH = vh * k;
+  return {
+    window: { x, y, w: vw, h: vh },
+    scale: Math.min(1, k * dpr),
+    // Centred when it's smaller than the area; otherwise placed so the window's centre is the area's.
+    css: { x: (areaW - cssW) / 2, y: (areaH - cssH) / 2, w: cssW, h: cssH },
+    pannable: vw < width || vh < height,
+  };
+}

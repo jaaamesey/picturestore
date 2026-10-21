@@ -613,7 +613,11 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
   /** The preview's premultiplied, mipmapped texture of floating pixels, at the display's quality (cached by tile-map identity). */
   function floatingTexture(source: TileMap, bounds: Rect): FloatingTexture {
-    if (floating && floating.source === source && floating.level === level) return floating;
+    // Keyed by what was uploaded: the same tiles over a different region (a preview window, then the whole layer) are a different texture.
+    const b = floating?.bounds;
+    if (floating && floating.source === source && floating.level === level && b!.x === bounds.x && b!.y === bounds.y && b!.w === bounds.w && b!.h === bounds.h) {
+      return floating;
+    }
     floating?.texture.destroy();
     floating = null;
     const f = allocating(() => buildFloating(source, bounds, level));

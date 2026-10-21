@@ -448,9 +448,12 @@ export function App() {
         {(s) => (
           <ImageSizeDialog
             original={{ width: s.doc().width, height: s.doc().height, resolution: resolutionOf(s.doc()) }}
-            renderPreview={(r, w) => (editor.active() === s ? editor.imageSizePreview(r, w) : Promise.resolve(null))}
+            renderPreview={(r, w, scale) => (editor.active() === s ? editor.imageSizePreview(r, w, scale) : Promise.resolve(null))}
             onApply={(r) => editor.active() === s && editor.imageSize(r)}
-            onClose={() => setImageSizeFor(null)}
+            onClose={() => {
+              setImageSizeFor(null);
+              editor.endImageSizePreview();
+            }}
           />
         )}
       </Show>

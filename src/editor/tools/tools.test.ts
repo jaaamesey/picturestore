@@ -460,3 +460,20 @@ function withSquareDoc() {
   const d = blank();
   return updateLayer(d, d.activeLayerId, { tiles: fillTiles(EMPTY_TILES, rect(10, 10, 10, 10), { r: 9, g: 9, b: 9 }) });
 }
+
+describe("rasterize prompts", () => {
+  it("pass along how to carry on, for single-click actions", async () => {
+    const d = blank();
+    const shape = createLayer({ name: "s", content: { kind: "shape", geometry: { kind: "ellipse" }, style: { fill: { r: 0, g: 0, b: 0 }, stroke: null }, placement: { source: rect(0, 0, 10, 10), quad: quadOf(rect(0, 0, 10, 10)), angle: 0, patch: null } } });
+    const h = harness(addLayer(d, shape));
+    let proceed: ((c: ToolContext) => void) | undefined;
+    const ctx = { ...h.ctx(), requireEditable: (_: unknown, p?: (c: ToolContext) => void) => ((proceed = p), false) };
+    h.tools.byId.bucket.down!(ctx, h.ev(50, 50));
+    expect(proceed).toBeDefined();
+    // Once rasterized, carrying on fills.
+    const rasterized = updateLayer(h.s.doc, shape.id, { content: { kind: "pixels" } });
+    h.s.doc = rasterized;
+    proceed!(h.ctx());
+    expect(h.s.history).toEqual(["Paint Bucket"]);
+  });
+});

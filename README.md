@@ -45,15 +45,18 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   Rasterize Layer, and Edit Contents (opens the contents as a document; saving it updates every instance). If
   the contents' canvas size changes, the layer keeps its transform — same scale, rotation, perspective and warp
   — with the new contents centred where the old ones were, as in Photoshop.
-- **Image ▸ Image Size** (Alt+Ctrl+I), as Photoshop's: a live preview of the result at 100% (drag to look
-  around; it runs the real transform on just that window, at most every 200 ms), size readout, Dimensions, Fit To presets,
+- **Image ▸ Image Size** (Alt+Ctrl+I), as Photoshop's: a live preview of the whole result fitted to the
+  preview area, with a zoom (relative to the fit; drag to pan when zoomed in). It runs the real transform in a
+  worker (tiles are sent there once, by identity), at no more than the area's device pixels, at most every
+  200 ms. Size readout, Dimensions, Fit To presets,
   linked Width/Height in pixels, percent or physical units, Resolution (ppi or ppcm, saved in PSDs), and
   Resample (Automatic, Bicubic, Nearest Neighbor, Bilinear). Everything scales: pixel layers are resampled,
   smart objects and shapes scale exactly as vectors (smart objects re-render from their full-resolution
   contents), and with Scale Styles (on by default; proportional resizes only) stroke widths scale too. Without
   Resample only the resolution changes.
 - **Image ▸ Canvas Size** (Alt+Ctrl+C): new width/height, Relative, and a 3×3 anchor.
-  Pixel tools on a smart object or shape ask to rasterize it first, with Photoshop's prompts.
+  Pixel tools on a smart object or shape ask to rasterize it first, with Photoshop's prompts; agreeing
+  rasterizes and then carries on with the action (Fill, Clear, Cut, Paint Bucket), as Photoshop does.
 - **Shapes**: Rectangle (corner radius), Ellipse, Triangle, Polygon (sides, star ratio) and Line (weight) tools
   (U / Shift+U, toolbar flyout). Shift constrains, Alt draws from the centre. Shape mode makes live shape
   layers with fill and stroke (width, inside/centre/outside); with a shape selected the options bar edits it.

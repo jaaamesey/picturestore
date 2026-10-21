@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FIT_PRESETS, fitTo, formatSize, fromPixels, initialState, setDimension, setResample, setResolutionValue, toPixels } from "./imageSize";
+import { FIT_PRESETS, fitTo, formatSize, fromPixels, initialState, setDimension, previewView, setResample, setResolutionValue, toPixels } from "./imageSize";
 
 const o = { width: 2000, height: 1000, resolution: 300 };
 
@@ -42,5 +42,25 @@ describe("Image Size logic", () => {
   it("reads out sizes like Photoshop", () => {
     expect(formatSize(1280, 720)).toBe("2.64M");
     expect(formatSize(400, 300)).toBe("351.6K");
+  });
+});
+
+describe("Image Size preview view", () => {
+  it("fits the whole image without stretching, rendering no more pixels than the screen has", () => {
+    const v = previewView(4000, 2000, 240, 240, 2, 1, { x: 0.5, y: 0.5 });
+    expect(v.window).toEqual({ x: 0, y: 0, w: 4000, h: 2000 });
+    expect(v.css).toEqual({ x: 0, y: 60, w: 240, h: 120 });
+    expect(v.scale).toBeCloseTo(0.12); // 480 device px across 4000 image px
+    expect(v.pannable).toBe(false);
+  });
+
+  it("zooms relative to the fit, pans within the image, and stops at the image's own pixels", () => {
+    const v = previewView(4000, 2000, 240, 240, 2, 4, { x: 0.9, y: 0.5 });
+    expect(v.window.w).toBe(1000);
+    expect(v.window.x + v.window.w).toBeLessThanOrEqual(4000);
+    expect(v.window.x).toBe(3000); // clamped at the right edge
+    expect(v.pannable).toBe(true);
+    const close = previewView(200, 100, 240, 240, 2, 8, { x: 0.5, y: 0.5 });
+    expect(close.scale).toBe(1);
   });
 });

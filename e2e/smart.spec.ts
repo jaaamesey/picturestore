@@ -196,3 +196,19 @@ test("changing a smart object's canvas in Edit Contents keeps its scale, centred
   expect(await cpuPixel(page, 100, 40)).toEqual([255, 255, 255, 255]);
   expect(await cpuPixel(page, 100, 60)).toEqual([255, 0, 0, 255]);
 });
+
+test("Fill on a shape asks to rasterize, then fills (one action, two steps, as in Photoshop)", async ({ page }) => {
+  await newDocument(page);
+  await setForeground(page, "00ff00");
+  await page.keyboard.press("u");
+  await drag(page, [50, 50], [150, 120]);
+  await expectHistory(page, "Rectangle Tool");
+  await setForeground(page, "ff00ff");
+  await page.keyboard.press("Alt+Backspace");
+  await page.getByTestId("confirm-ok").click();
+  await expectHistory(page, "Fill");
+  const labels = await historyLabels(page);
+  expect(labels.slice(-2)).toEqual(["Rasterize Layer", "Fill"]);
+  expect((await kinds(page))[0]).toBe("pixels");
+  expect(await cpuPixel(page, 10, 10)).toEqual([255, 0, 255, 255]);
+});

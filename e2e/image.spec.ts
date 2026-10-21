@@ -78,28 +78,81 @@ test("Image Size scales pixels, shapes and their strokes together; without Resam
   expect([after.width, after.height, after.resolution]).toEqual([800, 600, 300]);
 });
 
-test("the Image Size preview shows the result at 100%, follows the settings, and pans", async ({ page }) => {
+test("the Image Size preview fits the whole result, zooms relative to that, and pans when zoomed", async ({ page }) => {
   await newDocument(page, 400, 300);
   await rectOnLayer(page, 180, 130, 220, 170, "ff0000"); // a 40 px red square in the middle
   await page.keyboard.press("Alt+Control+i");
-  const preview = page.getByTestId("image-size-preview").locator("canvas");
+  const canvas = page.getByTestId("image-size-preview").locator("canvas");
   const at = (x: number, y: number) =>
-    preview.evaluate((c: HTMLCanvasElement, [x, y]) => [...c.getContext("2d")!.getImageData(x, y, 1, 1).data], [x, y]);
-  // A 220 px window on the middle of the image: the square spans 90–130 of it.
-  await expect.poll(async () => [await at(100, 100), await at(140, 110)]).toEqual([[255, 0, 0, 255], [255, 255, 255, 255]]);
+    canvas.evaluate((c: HTMLCanvasElement, [x, y]) => [...c.getContext("2d")!.getImageData(x, y, 1, 1).data], [x, y]);
+  const size = () => canvas.evaluate((c: HTMLCanvasElement) => [c.width, c.height, c.getBoundingClientRect().width]);
+  // Fitted into the 260 px area (×0.65), rendered at the area's own resolution.
+  await expect.poll(size).toEqual([260, 195, 260]);
+  expect(await at(130, 97)).toEqual([255, 0, 0, 255]);
+  expect(await at(150, 97)).toEqual([255, 255, 255, 255]);
 
-  // At 200% the square is 80 px, 70–150 of the window: the preview catches up.
+  // Twice the size still renders no more pixels than the area has.
   await page.getByTestId("image-size-width-unit").selectOption("percent");
   await page.getByTestId("image-size-width").fill("200");
   await page.getByTestId("image-size-width").press("Tab");
-  await expect.poll(() => at(140, 110)).toEqual([255, 0, 0, 255]);
+  await expect(page.getByTestId("image-size-readout")).toHaveText("1.37M (was 351.6K)");
+  await expect.poll(size).toEqual([260, 195, 260]);
 
-  // Dragging moves the image under the pointer.
+  // 800% of the fit: 100 image pixels across, shown magnified (at the image's own resolution).
+  await page.getByTestId("image-size-zoom").selectOption("8");
+  await expect.poll(async () => (await size())[0]).toBe(100);
+  // The window is centred on the square (360–440): it spans 10–90 of it.
+  await expect.poll(async () => [await at(5, 50), await at(50, 50)]).toEqual([[255, 255, 255, 255], [255, 0, 0, 255]]);
+
+  // Drag right by 130 CSS px = 50 image px: the square moves right with the pointer.
   const box = (await page.getByTestId("image-size-preview").boundingBox())!;
-  await page.mouse.move(box.x + 110, box.y + 110);
+  await page.mouse.move(box.x + 100, box.y + 130);
   await page.mouse.down();
-  await page.mouse.move(box.x + 170, box.y + 110, { steps: 4 });
+  await page.mouse.move(box.x + 230, box.y + 130, { steps: 4 });
   await page.mouse.up();
-  // (Intermediate previews may land while dragging: wait for the final one as a whole.)
-  await expect.poll(async () => [await at(190, 110), await at(120, 110)]).toEqual([[255, 0, 0, 255], [255, 255, 255, 255]]);
+  await expect.poll(async () => [await at(30, 50), await at(70, 50)]).toEqual([[255, 255, 255, 255], [255, 0, 0, 255]]);
+});
+
+test("Image Size previews render in a worker, keeping the main thread free", async ({ page }) => {
+  await newDocument(page, 2400, 1800);
+  await rectOnLayer(page, 0, 0, 2400, 1800, "336699");
+  await page.keyboard.press("Alt+Control+i");
+  await expect.poll(() => page.getByTestId("image-size-preview").locator("canvas").evaluate((c: HTMLCanvasElement) => c.width)).toBeGreaterThan(0);
+  await page.evaluate(() => {
+    (window as unknown as { __long: number[] }).__long = [];
+    new PerformanceObserver((l) => l.getEntries().forEach((e) => (window as unknown as { __long: number[] }).__long.push(e.duration))).observe({ type: "longtask" });
+  });
+  for (const v of ["37", "61", "83", "150"]) {
+    await page.getByTestId("image-size-width-unit").selectOption("percent");
+    await page.getByTestId("image-size-width").fill(v);
+    await page.getByTestId("image-size-width").press("Tab");
+    await page.waitForTimeout(250);
+  }
+  await page.waitForTimeout(500);
+  const long = await page.evaluate(() => (window as unknown as { __long: number[] }).__long);
+  expect(Math.max(0, ...long)).toBeLessThan(100);
+});
+
+test("Image Size after its preview resizes the whole image, not the previewed part", async ({ page }) => {
+  await newDocument(page, 600, 400);
+  // A single pixel layer (the common photo case) with content in its corners, far from the middle.
+  await setForeground(page, "ff0000");
+  await page.keyboard.press("m");
+  await drag(page, [0, 0], [40, 40]);
+  await page.keyboard.press("Alt+Backspace");
+  await setForeground(page, "0000ff");
+  await page.keyboard.press("m");
+  await drag(page, [560, 360], [600, 400]);
+  await page.keyboard.press("Alt+Backspace");
+  await page.keyboard.press("Control+d");
+  await page.keyboard.press("Alt+Control+i");
+  await page.getByTestId("image-size-width-unit").selectOption("percent");
+  await page.getByTestId("image-size-width").fill("150");
+  await page.getByTestId("image-size-width").press("Tab");
+  // Let a preview of the new size render first.
+  await page.waitForTimeout(600);
+  await page.getByTestId("image-size-ok").click();
+  await expectHistory(page, "Image Size");
+  expect(await cpuPixel(page, 10, 10)).toEqual([255, 0, 0, 255]);
+  expect(await cpuPixel(page, 890, 590)).toEqual([0, 0, 255, 255]);
 });

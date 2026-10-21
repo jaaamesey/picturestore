@@ -1,7 +1,7 @@
 import { createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
 import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
-import { imageSize, imageSizeWindow, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
+import { imageSize, resizeCanvas, setResolution, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -55,6 +55,7 @@ import { EMPTY_TILES, contentBounds, tilesFromImage, type TileMap } from "../cor
 import type { TransformMode, TransformState } from "../core/transform";
 import { mappingBounds, type Mapping } from "../core/warp";
 import type { FloatingLayer, Renderer, View } from "../gpu/renderer";
+import { createPreviewWorker } from "../preview/client";
 import { SHAPE_TOOLS, createTools } from "./tools";
 import { shapeGeometry, shapeStyle } from "./tools/shape";
 import type { TransformCommand } from "./tools/transform";
@@ -231,6 +232,7 @@ export function createEditor() {
     let gpu: GpuRaster | null = null;
     let reportError: (message: string) => void = (m) => console.error(m);
     let gpuReset: () => void = () => {};
+    let previews: ReturnType<typeof createPreviewWorker> | null = null;
     let askConfirm: (message: string) => Promise<boolean> = async () => false;
     let mergeKey: string | null = null;
     let switching = false;
@@ -266,11 +268,13 @@ export function createEditor() {
 
     const raster: Rasterizers = { resample, shape: rasterizeShape };
 
-    /** Asks to rasterize a smart object or shape (Photoshop's prompt), then does so as its own step. */
-    async function offerRasterize(s: SessionInternals, layer: Layer) {
+    /** Asks to rasterize a smart object or shape (Photoshop's prompt), does so as its own step, then carries on with `proceed`. */
+    async function offerRasterize(s: SessionInternals, layer: Layer, proceed?: (ctx: ToolContext) => void) {
       if (layer.content.kind === "pixels") return;
       if (!(await askConfirm(RASTERIZE_PROMPTS[layer.content.kind]))) return;
-      if (pending === 0 && sessions().includes(s)) commitTo(s, "Rasterize Layer", rasterizeLayer(s.doc(), layer.id));
+      if (pending !== 0 || !sessions().includes(s)) return;
+      commitTo(s, "Rasterize Layer", rasterizeLayer(s.doc(), layer.id));
+      if (proceed && active() === s) guard(() => proceed(context(s)))();
     }
 
     function context(s: SessionInternals): ToolContext {
@@ -287,9 +291,9 @@ export function createEditor() {
         commit: (label, doc) => commitTo(s, label, doc),
         commitAsync: (label, doc) => commitAsync(s, label, doc),
         raster,
-        requireEditable(layer) {
+        requireEditable(layer, proceed) {
           if (layer.content.kind === "pixels") return true;
-          void offerRasterize(s, layer);
+          void offerRasterize(s, layer, proceed);
           return false;
         },
         overlay: s.setOverlay,
@@ -518,7 +522,7 @@ export function createEditor() {
     function pixelEdit(label: string, fn: (d: Doc, l: Layer) => Doc) {
       const s = active();
       const l = s && activeLayer(s.doc());
-      if (s && l && context(s).requireEditable(l)) layerEdit(label, fn);
+      if (s && l && context(s).requireEditable(l, () => pixelEdit(label, fn))) layerEdit(label, fn);
     }
 
     // --- Clipboard -------------------------------------------------------------
@@ -543,6 +547,16 @@ export function createEditor() {
       const a = screenToDoc(s.view(), { x: 0, y: 0 });
       const b = screenToDoc(s.view(), { x: width, y: height });
       return rect(a.x, a.y, b.x - a.x, b.y - a.y);
+    }
+
+    /** Cut: copies, then clears the selection (after rasterizing, if the user agrees). */
+    function cut(): Floating | null {
+      const s = active();
+      const l = s && activeLayer(s.doc());
+      if (pending > 0 || !s || !l || !context(s).requireEditable(l, () => void cut())) return null;
+      const f = copy(false);
+      if (f) pixelEdit("Cut", (d, x) => updateLayer(d, x.id, { tiles: clearTiles(x.tiles, d.selection) }));
+      return f;
     }
 
     function paste(f: Floating, inPlace: boolean) {
@@ -800,14 +814,7 @@ export function createEditor() {
 
       // Clipboard. `copy`/`cut` return the pixels for the system clipboard.
       copy: (merged = false) => (pending === 0 ? copy(merged) : null),
-      cut(): Floating | null {
-        const s = active();
-        const l = s && activeLayer(s.doc());
-        if (pending > 0 || !s || !l || !context(s).requireEditable(l)) return null;
-        const f = copy(false);
-        if (f) pixelEdit("Cut", (d, x) => updateLayer(d, x.id, { tiles: clearTiles(x.tiles, d.selection) }));
-        return f;
-      },
+      cut,
       /** Pastes the internal clipboard (our own copy). False when it's empty. */
       paste: (inPlace = false): boolean => {
         if (pending > 0 || !clipboard || !active()) return false;
@@ -838,16 +845,18 @@ export function createEditor() {
       }),
       /**
        * Image Size's preview: what it would produce within `window` (a
-       * rectangle of the new image), at 100%. Without resampling (or at the
-       * same size) the pixels don't change, so it's just that part of the image.
+       * rectangle of the new image), drawn at `scale` — rendered in a worker,
+       * off the main thread. `endImageSizePreview` frees it.
        */
-      async imageSizePreview(o: ImageSizeOptions & { resample: boolean }, window: Rect): Promise<ImageData | null> {
+      imageSizePreview(o: ImageSizeOptions & { resample: boolean }, window: Rect, scale: number): Promise<ImageData | null> {
         const s = active();
-        if (!s || window.w < 1 || window.h < 1) return null;
-        const d = s.doc();
-        const same = !o.resample || (o.width === d.width && o.height === d.height);
-        const pixels = same ? flatten(d, window) : flatten(await imageSizeWindow(d, o, window, raster));
-        return new ImageData(pixels as Uint8ClampedArray<ArrayBuffer>, window.w, window.h);
+        if (!s || window.w < 1 || window.h < 1) return Promise.resolve(null);
+        previews ??= createPreviewWorker();
+        return previews.render(s.doc(), o, window, scale);
+      },
+      endImageSizePreview() {
+        previews?.dispose();
+        previews = null;
       },
       /** Image ▸ Canvas Size. */
       canvasSize: whenIdle((width: number, height: number, anchor: Anchor) => {

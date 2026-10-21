@@ -1,10 +1,13 @@
 import { For, Show, createEffect, createSignal, onSettled, untrack } from "solid-js";
-import { rect, type Rect } from "../core/geometry";
+import type { Rect } from "../core/geometry";
 import { createLatest } from "./latest";
 import { Popover, dismissable } from "./Popover";
 import type { Filter } from "../core/rasterize";
 import {
   FIT_PRESETS,
+  PREVIEW_ZOOMS,
+  previewView,
+  type PreviewView,
   LENGTH_UNITS,
   RESAMPLE_METHODS,
   display,
@@ -35,7 +38,8 @@ export interface ImageSizeResult {
   readonly scaleStyles: boolean;
 }
 
-const PREVIEW = 220;
+/** The preview area, in CSS pixels. */
+const PREVIEW = 260;
 
 type MethodId = (typeof RESAMPLE_METHODS)[number]["id"];
 
@@ -46,8 +50,8 @@ type MethodId = (typeof RESAMPLE_METHODS)[number]["id"];
  */
 export function ImageSizeDialog(props: {
   original: Original;
-  /** The result within a window of the new image, at 100% (see `Editor.imageSizePreview`). */
-  renderPreview: (r: ImageSizeResult, window: Rect) => Promise<ImageData | null>;
+  /** The result within a window of the new image, drawn at `scale` (see `Editor.imageSizePreview`). */
+  renderPreview: (r: ImageSizeResult, window: Rect, scale: number) => Promise<ImageData | null>;
   onApply: (r: ImageSizeResult) => void;
   onClose: () => void;
 }) {
@@ -70,10 +74,12 @@ export function ImageSizeDialog(props: {
   let gearButton!: HTMLButtonElement;
   const [preset, setPreset] = createSignal<string>("original");
   let canvas!: HTMLCanvasElement;
+  let previewArea!: HTMLDivElement;
 
-  // --- Preview: the result at 100%, like Photoshop's; drag inside it to look around. ---
-  /** Which part of the new image is shown, as fractions of it (kept as sizes change). */
-  const [centre, setCentre] = createSignal({ x: 0.5, y: 0.5 });
+  // --- Preview -----------------------------------------------------------------
+  // The whole result, fitted to the preview area; zoom (relative to that fit)
+  // and pan to look closer. Rendered in a worker, at no more than the area's
+  // device pixels, at most every 200 ms with the latest settings winning.
   const resultOf = (st: SizeState): ImageSizeResult => ({
     width: st.width,
     height: st.height,
@@ -84,40 +90,44 @@ export function ImageSizeDialog(props: {
     scaleStyles: scaleStyles() && st.constrain,
   });
   const result = () => resultOf(state());
-  const windowFor = (r: ImageSizeResult, c: { x: number; y: number }): Rect => {
-    const w = Math.min(PREVIEW, r.width), h = Math.min(PREVIEW, r.height);
-    const x = Math.min(r.width - w, Math.max(0, Math.round(c.x * r.width - w / 2)));
-    const y = Math.min(r.height - h, Math.max(0, Math.round(c.y * r.height - h / 2)));
-    return rect(x, y, w, h);
+  const [zoom, setZoom] = createSignal<number>(1);
+  /** The point of the image at the centre of the view, as fractions of it (kept as sizes change). */
+  const [centre, setCentre] = createSignal({ x: 0.5, y: 0.5 });
+  const [area, setArea] = createSignal({ w: PREVIEW, h: PREVIEW, dpr: 1 });
+  const view = () => {
+    const r = result();
+    const a = area();
+    return previewView(r.width, r.height, a.w, a.h, a.dpr, zoom(), centre());
   };
-  // Resampling is the expensive part: at most one preview every 200 ms, latest settings winning.
+  /** What's on screen: an image and where its view put it (a newer view replaces both together). */
+  const [shown, setShown] = createSignal<{ css: PreviewView["css"]; magnified: boolean } | null>(null);
   const previews = createLatest(
-    ({ r, w }: { r: ImageSizeResult; w: Rect }) => props.renderPreview(r, w),
-    (img) => {
+    ({ r, v }: { r: ImageSizeResult; v: PreviewView }) => props.renderPreview(r, v.window, v.scale).then((img) => ({ img, v })),
+    ({ img, v }) => {
       if (!img || !canvas) return;
       canvas.width = img.width;
       canvas.height = img.height;
       canvas.getContext("2d")!.putImageData(img, 0, 0);
+      setShown({ css: v.css, magnified: img.width < v.css.w * area().dpr - 0.5 });
     },
     200,
   );
   createEffect(
-    () => {
-      const r = result();
-      return { r, w: windowFor(r, centre()) };
-    },
+    () => ({ r: result(), v: view() }),
     (args) => previews.request(args),
   );
   const pan = (e: PointerEvent) => {
+    if (!view().pannable) return;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     const start = { x: e.clientX, y: e.clientY, c: centre() };
     const move = (m: PointerEvent) => {
-      const r = result();
-      // Dragging moves the image under the pointer, 1:1.
+      const v = view(), r = result();
+      // Dragging moves the image under the pointer.
+      const k = v.css.w / v.window.w;
       setCentre({
-        x: Math.min(1, Math.max(0, start.c.x - (m.clientX - start.x) / r.width)),
-        y: Math.min(1, Math.max(0, start.c.y - (m.clientY - start.y) / r.height)),
+        x: Math.min(1, Math.max(0, start.c.x - (m.clientX - start.x) / k / r.width)),
+        y: Math.min(1, Math.max(0, start.c.y - (m.clientY - start.y) / k / r.height)),
       });
     };
     const up = () => {
@@ -146,9 +156,14 @@ export function ImageSizeDialog(props: {
     };
     window.addEventListener("keydown", onKey, { capture: true });
     const remove = dismissable(() => props.onClose());
+    const measure = () => setArea({ w: previewArea.clientWidth, h: previewArea.clientHeight, dpr: window.devicePixelRatio || 1 });
+    const resize = new ResizeObserver(measure);
+    resize.observe(previewArea);
+    measure();
     return () => {
       remove();
       window.removeEventListener("keydown", onKey, { capture: true });
+      resize.disconnect();
       previews.dispose();
     };
   });
@@ -182,14 +197,36 @@ export function ImageSizeDialog(props: {
   return (
     <div class="fixed inset-0 z-50 grid place-items-center bg-black/50">
       <div class="flex gap-4 rounded-sm border border-line bg-panel p-4 shadow-2xl" role="dialog" aria-label="Image Size" data-testid="image-size">
-        <div
-          class="checkerboard grid shrink-0 cursor-grab place-items-center overflow-hidden border border-line active:cursor-grabbing"
-          style={{ width: `${PREVIEW}px`, height: `${PREVIEW}px` }}
-          title="Preview at 100% (drag to look around)"
-          data-testid="image-size-preview"
-          onPointerDown={pan}
-        >
-          <canvas ref={canvas} style={{ "image-rendering": "pixelated" }} />
+        <div class="flex shrink-0 flex-col gap-1.5">
+          <div
+            ref={previewArea}
+            class={["relative box-content overflow-hidden border border-line bg-app", { "cursor-grab active:cursor-grabbing": view().pannable }]}
+            style={{ width: `${PREVIEW}px`, height: `${PREVIEW}px` }}
+            data-testid="image-size-preview"
+            onPointerDown={pan}
+          >
+            <canvas
+              ref={canvas}
+              class="checkerboard absolute"
+              style={{
+                left: `${shown()?.css.x ?? 0}px`,
+                top: `${shown()?.css.y ?? 0}px`,
+                width: `${shown()?.css.w ?? 0}px`,
+                height: `${shown()?.css.h ?? 0}px`,
+                // Past the image's own pixels, show them as pixels.
+                "image-rendering": shown()?.magnified ? "pixelated" : "auto",
+              }}
+            />
+          </div>
+          <select
+            class="self-center"
+            title="Preview zoom"
+            data-testid="image-size-zoom"
+            value={zoom()}
+            onChange={(e) => setZoom(Number(e.currentTarget.value))}
+          >
+            <For each={PREVIEW_ZOOMS}>{(z) => <option value={z}>{z * 100}%</option>}</For>
+          </select>
         </div>
         <div class="flex w-80 flex-col gap-2.5">
           <div class="relative flex items-center justify-between">

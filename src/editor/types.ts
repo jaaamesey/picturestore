@@ -114,9 +114,11 @@ export interface ToolContext {
   /**
    * Pixel tools call this before editing a layer. Pixel layers pass; smart
    * objects and shapes don't — the user is asked to rasterize them first, as
-   * in Photoshop, and the tool action is abandoned.
+   * in Photoshop. If they agree, the layer is rasterized and then, as in
+   * Photoshop, the action goes ahead: `proceed` runs it again (with a fresh
+   * context). Actions that can't be repeated (a brush stroke) omit it.
    */
-  requireEditable(layer: Layer): boolean;
+  requireEditable(layer: Layer, proceed?: (ctx: ToolContext) => void): boolean;
   overlay(o: Overlay | null): void;
   /** Redraws after in-place changes to previewed tiles. */
   requestRender(): void;

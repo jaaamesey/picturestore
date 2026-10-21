@@ -1,5 +1,5 @@
 import { withContent, type Rasterizers } from "./content";
-import type { Doc, Layer, LayerContent, Placement } from "./document";
+import { flatten, type Doc, type Layer, type LayerContent, type Placement } from "./document";
 import { apply, integerTranslation, intersect, invert, multiply, rect, roundOut, scaling, transformRect, translation, type Mat, type Rect } from "./geometry";
 import type { Filter } from "./rasterize";
 import { transformMask, translateMask } from "./selection";
@@ -149,10 +149,7 @@ export interface ImageSizeOptions {
  * {@link setResolution}).
  */
 export function imageSize(doc: Doc, o: ImageSizeOptions, r: Rasterizers): Promise<Doc> {
-  const sx = o.width / doc.width, sy = o.height / doc.height;
-  // Rounding to whole pixels makes a constrained resize very slightly non-uniform.
-  const proportional = Math.abs(sx - sy) <= 1.01 / Math.min(doc.width, doc.height);
-  const lengthScale = o.scaleStyles && proportional ? Math.sqrt(sx * sy) : 1;
+  const { sx, sy, lengthScale } = imageSizeScales(doc, o);
   return transformDocument(
     doc,
     { matrix: scaling(sx, sy), width: o.width, height: o.height, lengthScale, filter: o.filter, resolution: o.resolution },
@@ -160,22 +157,47 @@ export function imageSize(doc: Doc, o: ImageSizeOptions, r: Rasterizers): Promis
   );
 }
 
+/** The scale factors of an Image Size, and how lengths in content follow (Scale Styles; proportional resizes only). */
+function imageSizeScales(doc: Doc, o: Pick<ImageSizeOptions, "width" | "height" | "scaleStyles">) {
+  const sx = o.width / doc.width, sy = o.height / doc.height;
+  // Rounding to whole pixels makes a constrained resize very slightly non-uniform.
+  const proportional = Math.abs(sx - sy) <= 1.01 / Math.min(doc.width, doc.height);
+  return { sx, sy, lengthScale: o.scaleStyles && proportional ? Math.sqrt(sx * sy) : 1 };
+}
+
 /**
  * What Image Size would produce within `window` (a rectangle of the new
- * image), as its own small document: the real transform, so shapes and
+ * image), as its own small document, drawn at `scale` (≤ 1: a preview needs
+ * no more pixels than its screen area). The real transform, so shapes and
  * smart objects re-render as they will, restricted to the window so the
- * cost depends on its size, not the document's.
+ * cost depends on the output, not the document.
  */
-export function imageSizeWindow(doc: Doc, o: ImageSizeOptions, window: Rect, r: Rasterizers): Promise<Doc> {
-  const sx = o.width / doc.width, sy = o.height / doc.height;
-  const proportional = Math.abs(sx - sy) <= 1.01 / Math.min(doc.width, doc.height);
-  const lengthScale = o.scaleStyles && proportional ? Math.sqrt(sx * sy) : 1;
-  const matrix = multiply(translation(-window.x, -window.y), scaling(sx, sy));
+export function imageSizeWindow(doc: Doc, o: ImageSizeOptions, window: Rect, r: Rasterizers, scale = 1): Promise<Doc> {
+  const { sx, sy, lengthScale } = imageSizeScales(doc, o);
+  const matrix = multiply(scaling(scale), multiply(translation(-window.x, -window.y), scaling(sx, sy)));
+  const width = Math.max(1, Math.round(window.w * scale)), height = Math.max(1, Math.round(window.h * scale));
   return transformDocument(
     { ...doc, selection: null },
-    { matrix, width: window.w, height: window.h, lengthScale, filter: o.filter, clipToCanvas: true },
+    { matrix, width, height, lengthScale: lengthScale * scale, filter: o.filter, clipToCanvas: true },
     r,
   );
+}
+
+/** A preview of Image Size: `window` of the result, at `scale`, composited (straight RGBA). */
+export async function imageSizePreview(
+  doc: Doc,
+  o: ImageSizeOptions & { readonly resample: boolean },
+  window: Rect,
+  scale: number,
+  r: Rasterizers,
+): Promise<{ width: number; height: number; pixels: Uint8ClampedArray }> {
+  // Without resampling the pixels stay as they are: the preview shows the document itself.
+  const size = o.resample ? o : { ...o, width: doc.width, height: doc.height };
+  if (scale === 1 && size.width === doc.width && size.height === doc.height) {
+    return { width: window.w, height: window.h, pixels: flatten(doc, window) };
+  }
+  const part = await imageSizeWindow(doc, size, window, r, scale);
+  return { width: part.width, height: part.height, pixels: flatten(part) };
 }
 
 /** Image Size without Resample: same pixels, different physical size. */

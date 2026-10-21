@@ -57,7 +57,8 @@ export const bucketTool: Tool = {
   down(ctx, e) {
     const { doc, settings } = ctx;
     const layer = activeLayer(doc);
-    if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
+    // A single click: after rasterizing, it fills (as Photoshop does).
+    if (!layer || !layer.visible || !ctx.requireEditable(layer, (c) => bucketTool.down!(c, e))) return;
     const region = combine(
       doc.selection,
       magicWand(layer.tiles, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
