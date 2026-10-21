@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeLayer, addLayer, clearPixels, createDocument, createLayer, duplicateLayer, fillPixels, flatten, mergeDown, moveLayer,
+  activeLayer, addLayer, clearPixels, createDocument, createLayer, duplicateLayer, fillPixels, moveLayer,
   moveLayerRelative,
   removeLayer, updateLayer,
 } from "./document";
+import { flatten, mergeDown } from "./composite";
 import { rect } from "./geometry";
 import { rectMask } from "./selection";
 import { NO_PIXELS, getPixel } from "./pixels";

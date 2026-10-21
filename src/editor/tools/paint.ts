@@ -1,32 +1,36 @@
 import { beginStroke, type Stroke, type StrokePoint } from "../../core/brush";
-import { activeLayer, docRect, fillPixels, updateLayer } from "../../core/document";
+import { docRect, fillPixels, maskTone, withTargetPixels, type EditTarget } from "../../core/document";
 import { combine, magicWand } from "../../core/selection";
 import type { Tool, ToolEvent } from "../types";
 
 const point = (e: ToolEvent): StrokePoint => ({ x: e.x, y: e.y, pressure: e.pressure });
 
-/** Brush and Eraser: one stroke per press, previewed live, committed on release. */
+/**
+ * Brush and Eraser: one stroke per press, previewed live, committed on
+ * release. On a layer mask they paint in grey: the brush with the
+ * foreground colour's, the eraser with the background colour's.
+ */
 export function createPaintTool(id: "brush" | "eraser"): Tool {
   let stroke: Stroke | null = null;
-  let layerId = "";
+  let target: EditTarget | null = null;
   let last: StrokePoint | null = null; // end of the previous stroke, for shift-click lines
 
   return {
     id,
     cursor: () => "none", // the viewport draws a brush outline instead
     down(ctx, e) {
-      const layer = activeLayer(ctx.doc);
-      if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
-      const erase = id === "eraser";
-      layerId = layer.id;
-      stroke = beginStroke(layer.pixels, {
-        brush: erase ? ctx.settings.eraser : ctx.settings.brush,
-        color: ctx.foreground,
-        erase,
+      const t = ctx.editTarget();
+      if (!t || !t.layer.visible) return;
+      const eraser = id === "eraser";
+      target = t;
+      stroke = beginStroke(t.pixels, {
+        brush: eraser ? ctx.settings.eraser : ctx.settings.brush,
+        color: !t.mask ? ctx.foreground : maskTone(eraser ? ctx.background : ctx.foreground),
+        erase: eraser && !t.mask,
         selection: ctx.doc.selection,
         clip: docRect(ctx.doc),
       });
-      ctx.preview(updateLayer(ctx.doc, layerId, { pixels: stroke.pixels }));
+      ctx.preview(withTargetPixels(ctx.doc, t, stroke.pixels));
       if (e.shift && last) stroke.add(last);
       stroke.add(point(e));
       ctx.requestRender();
@@ -41,7 +45,7 @@ export function createPaintTool(id: "brush" | "eraser"): Tool {
       const pixels = stroke.finish();
       stroke = null;
       last = point(e);
-      ctx.commit(id === "eraser" ? "Eraser" : "Brush Tool", updateLayer(ctx.doc, layerId, { pixels }));
+      ctx.commit(id === "eraser" ? "Eraser" : "Brush Tool", withTargetPixels(ctx.doc, target!, pixels));
     },
     cancel(ctx) {
       if (!stroke) return;
@@ -51,20 +55,21 @@ export function createPaintTool(id: "brush" | "eraser"): Tool {
   };
 }
 
-/** Paint Bucket: fills similar contiguous pixels of the active layer with the foreground colour. */
+/** Paint Bucket: fills similar contiguous pixels of the edit target with the foreground colour (its grey, on a mask). */
 export const bucketTool: Tool = {
   id: "bucket",
   down(ctx, e) {
     const { doc, settings } = ctx;
-    const layer = activeLayer(doc);
     // A single click: after rasterizing, it fills (as Photoshop does).
-    if (!layer || !layer.visible || !ctx.requireEditable(layer, (c) => bucketTool.down!(c, e))) return;
+    const t = ctx.editTarget((c) => bucketTool.down!(c, e));
+    if (!t || !t.layer.visible) return;
     const region = combine(
       doc.selection,
-      magicWand(layer.pixels, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
+      magicWand(t.pixels, doc.width, doc.height, e, settings.tolerance, settings.contiguous),
       doc.selection ? "intersect" : "replace",
     );
     if (!region) return;
-    ctx.commit("Paint Bucket", updateLayer(doc, layer.id, { pixels: fillPixels(layer.pixels, region.bounds, ctx.foreground, region) }));
+    const color = t.mask ? maskTone(ctx.foreground) : ctx.foreground;
+    ctx.commit("Paint Bucket", withTargetPixels(doc, t, fillPixels(t.pixels, region.bounds, color, region)));
   },
 };

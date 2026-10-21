@@ -1,4 +1,5 @@
 import type { Doc, Layer } from "./document";
+import { walk } from "./layers";
 import type { Pixels } from "./pixels";
 
 export interface HistoryEntry {
@@ -48,12 +49,13 @@ function contentBytes(l: Layer, prev: Layer | undefined): number {
 /** Memory `doc` holds that `prev` doesn't, by object identity (O(layers + changed tiles)). */
 export function retainedBytes(doc: Doc, prev: Doc | null): number {
   if (doc === prev) return 0;
-  const before = new Map(prev?.layers.map((l) => [l.id, l]));
+  const before = new Map(prev ? [...walk(prev.layers)].map((l) => [l.id, l]) : []);
   let bytes = 0;
-  for (const l of doc.layers) {
+  for (const l of walk(doc.layers)) {
     const p = before.get(l.id);
     if (p === l) continue;
     bytes += newTileBytes(l.pixels, p?.pixels) + contentBytes(l, p);
+    if (l.mask) bytes += newTileBytes(l.mask.pixels, p?.mask?.pixels);
   }
   if (doc.selection && doc.selection !== prev?.selection) bytes += doc.selection.data.length;
   return bytes;

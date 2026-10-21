@@ -1,4 +1,4 @@
-import { flatten } from "../../core/document";
+import { flatten } from "../../core/composite";
 import { rect, vec, type Vec2 } from "../../core/geometry";
 import type { View } from "../../gpu/renderer";
 import { nextZoomStep, prevZoomStep, zoomAt } from "../view";

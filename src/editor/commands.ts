@@ -1,3 +1,6 @@
+import { ADJUSTMENTS, type AdjustmentKind } from "../core/adjustments";
+import { activeLayer } from "../core/document";
+import { hasPixels, isClipped, isGroup, locate } from "../core/layers";
 import { TOOLBAR } from "./tools";
 import type { Editor } from "./editor";
 import type { ToolId } from "./types";
@@ -24,6 +27,10 @@ export interface Shell {
   editContents(): void;
   /** View ▸ Guides ▸ New Guide dialog. */
   newGuide(): void;
+  /** Image ▸ Adjustments: the adjustment's dialog (with Preview), applied to the layer. */
+  adjust(kind: AdjustmentKind): void;
+  /** Delete Layer; for a group, asks whether to delete its contents too, as Photoshop does. */
+  deleteLayer(): void;
   /** Copy/Cut also put a PNG on the system clipboard; Paste reads it (or our own copy). */
   copy(merged: boolean): void;
   cut(): void;
@@ -32,6 +39,8 @@ export interface Shell {
 
 export interface CommandSpec {
   readonly label: string;
+  /** A label that depends on the state (Merge Down is Merge Group on a group). */
+  readonly title?: (ed: Editor) => string;
   /** First is shown in menus. "Mod" is Ctrl, or Cmd on macOS. */
   readonly shortcuts?: readonly string[];
   readonly run: (ed: Editor, shell: Shell) => void;
@@ -56,11 +65,62 @@ const snapToToggle = (label: string, key: keyof SnapToOptions): CommandSpec => (
 });
 const hasSelection = (ed: Editor) => !!ed.active()?.doc().selection;
 const cropping = (ed: Editor) => ed.tool() === "crop" || ed.tool() === "perspective-crop";
-const layerCount = (ed: Editor) => ed.active()?.doc().layers.length ?? 0;
-const layerKind = (ed: Editor) => {
+const current = (ed: Editor) => {
   const d = ed.active()?.doc();
-  return d?.layers.find((l) => l.id === d.activeLayerId)?.content.kind;
+  return d && activeLayer(d);
 };
+const layerKind = (ed: Editor) => current(ed)?.content.kind;
+/** Where the active layer is in its container. */
+const place = (ed: Editor) => {
+  const d = ed.active()?.doc();
+  return d ? locate(d.layers, d.activeLayerId) : null;
+};
+const canDelete = (ed: Editor) => {
+  const p = place(ed);
+  return !!p && (!!p.parent || p.siblings.length > 1);
+};
+/** What Merge Down (Ctrl+E) can do here: Merge Group, Merge Clipping Mask, or into a layer with pixels below. */
+const canMerge = (ed: Editor) => {
+  const p = place(ed);
+  if (!p) return false;
+  const l = p.siblings[p.index];
+  if (isGroup(l)) return true;
+  if (!isClipped(p.siblings, p.index) && p.siblings[p.index + 1]?.clipped) return hasPixels(l);
+  const below = p.siblings[p.index - 1];
+  return !!below && hasPixels(below);
+};
+const hasMask = (ed: Editor) => !!current(ed)?.mask;
+const canAddMask = (ed: Editor) => !!current(ed) && !current(ed)!.mask;
+
+type AdjustmentCommands<P extends string> = { readonly [K in AdjustmentKind as `${P}.${K}`]: CommandSpec };
+
+/** Layer ▸ New Adjustment Layer ▸ … */
+const newAdjustmentLayers = Object.fromEntries(
+  ADJUSTMENTS.map(({ kind, label }) => [`layer.adjustment.${kind}`, { label: `${label}…`, run: (ed: Editor) => ed.newAdjustmentLayer(kind), enabled: hasDoc }]),
+) as unknown as AdjustmentCommands<"layer.adjustment">;
+
+/** Photoshop's shortcuts for Image ▸ Adjustments. */
+const ADJUST_SHORTCUTS: Partial<Record<AdjustmentKind, string[]>> = {
+  levels: ["Mod+L"],
+  curves: ["Mod+M"],
+  "hue-saturation": ["Mod+U"],
+  "color-balance": ["Mod+B"],
+  "black-white": ["Alt+Shift+Mod+B"],
+  invert: ["Mod+I"],
+};
+
+/** Image ▸ Adjustments ▸ …: a dialog for each (Invert just applies). */
+const imageAdjustments = Object.fromEntries(
+  ADJUSTMENTS.map(({ kind, label }) => [
+    `image.adjust.${kind}`,
+    {
+      label: kind === "invert" ? label : `${label}…`,
+      shortcuts: ADJUST_SHORTCUTS[kind],
+      run: (ed: Editor, s: Shell) => (kind === "invert" ? ed.applyAdjustment({ kind: "invert" }) : s.adjust(kind)),
+      enabled: hasDoc,
+    },
+  ]),
+) as unknown as AdjustmentCommands<"image.adjust">;
 
 /**
  * Every command, keyed by a stable id. Ids are typed (see {@link CommandId}),
@@ -135,6 +195,9 @@ export const COMMANDS = {
   "image.imageSize": { label: "Image Size…", shortcuts: ["Alt+Mod+I"], run: (_, s) => s.imageSize(), enabled: hasDoc },
   "image.canvasSize": { label: "Canvas Size…", shortcuts: ["Alt+Mod+C"], run: (_, s) => s.canvasSize(), enabled: hasDoc },
   "image.crop": { label: "Crop", run: (ed) => ed.cropToSelection(), enabled: hasSelection },
+  ...imageAdjustments,
+  "image.desaturate": { label: "Desaturate", shortcuts: ["Shift+Mod+U"], run: (ed) => ed.desaturate(), enabled: hasDoc },
+  "image.equalize": { label: "Equalize", run: (ed) => ed.equalize(), enabled: hasDoc },
   "crop.commit": { label: "Crop", run: (ed) => ed.commitTool(), enabled: cropping },
   "crop.reset": { label: "Reset Crop", run: (ed) => ed.cancelTool(), enabled: cropping },
   "crop.rotateBox": { label: "Rotate Crop Box", run: (ed) => ed.rotateCropBox(), enabled: (ed) => ed.tool() === "crop" },
@@ -142,16 +205,34 @@ export const COMMANDS = {
   // Layer
   "layer.new": { label: "New Layer", shortcuts: ["Mod+Shift+N"], run: (ed) => ed.newLayer(), enabled: hasDoc },
   "layer.duplicate": { label: "Duplicate Layer", run: (ed) => ed.duplicateLayer(), enabled: hasDoc },
-  "layer.delete": { label: "Delete Layer", run: (ed) => ed.deleteLayer(), enabled: (ed) => layerCount(ed) > 1 },
-  "layer.mergeDown": {
-    label: "Merge Down",
-    shortcuts: ["Mod+E"],
-    run: (ed) => ed.mergeDown(),
-    enabled: (ed) => {
-      const d = ed.active()?.doc();
-      return !!d && d.layers.findIndex((l) => l.id === d.activeLayerId) > 0;
-    },
+  "layer.delete": { label: "Delete Layer", run: (_, s) => s.deleteLayer(), enabled: canDelete },
+  "layer.mergeDown": { label: "Merge Down", title: (ed) => ed.mergeLabel() ?? "Merge Down", shortcuts: ["Mod+E"], run: (ed) => ed.mergeDown(), enabled: canMerge },
+  "layer.newGroup": { label: "Group…", run: (ed) => ed.newGroup(), enabled: hasDoc },
+  "layer.group": { label: "Group Layers", shortcuts: ["Mod+G"], run: (ed) => ed.groupLayers(), enabled: hasDoc },
+  "layer.ungroup": { label: "Ungroup Layers", shortcuts: ["Shift+Mod+G"], run: (ed) => ed.ungroup(), enabled: (ed) => layerKind(ed) === "group" },
+  "layer.clippingMask": {
+    label: "Create Clipping Mask",
+    shortcuts: ["Alt+Mod+G"],
+    run: (ed) => ed.toggleClippingMask(),
+    enabled: (ed) => (place(ed)?.index ?? 0) > 0,
   },
+  "layer.releaseClippingMask": { label: "Release Clipping Mask", run: (ed) => ed.toggleClippingMask(), enabled: (ed) => !!current(ed)?.clipped && (place(ed)?.index ?? 0) > 0 },
+  "layer.mask.revealAll": { label: "Reveal All", run: (ed) => ed.addMask(false), enabled: (ed) => canAddMask(ed) && !hasSelection(ed) },
+  "layer.mask.hideAll": { label: "Hide All", run: (ed) => ed.addMask(true), enabled: (ed) => canAddMask(ed) && !hasSelection(ed) },
+  "layer.mask.revealSelection": { label: "Reveal Selection", run: (ed) => ed.addMask(false), enabled: (ed) => canAddMask(ed) && hasSelection(ed) },
+  "layer.mask.hideSelection": { label: "Hide Selection", run: (ed) => ed.addMask(true), enabled: (ed) => canAddMask(ed) && hasSelection(ed) },
+  "layer.mask.delete": { label: "Delete", run: (ed) => ed.deleteMask(), enabled: hasMask },
+  "layer.mask.apply": { label: "Apply", run: (ed) => ed.applyMask(), enabled: (ed) => hasMask(ed) && layerKind(ed) === "pixels" },
+  "layer.mask.disable": {
+    label: "Disable",
+    run: (ed) => {
+      const l = current(ed)!;
+      ed.setMaskProps(l.id, { enabled: !l.mask!.enabled });
+    },
+    enabled: hasMask,
+    checked: (ed) => current(ed)?.mask?.enabled === false,
+  },
+  ...newAdjustmentLayers,
 
   "layer.bringToFront": { label: "Bring to Front", shortcuts: ["Mod+Shift+]"], run: (ed) => ed.arrange("front"), enabled: hasDoc },
   "layer.bringForward": { label: "Bring Forward", shortcuts: ["Mod+]"], run: (ed) => ed.arrange("forward"), enabled: hasDoc },
@@ -162,13 +243,13 @@ export const COMMANDS = {
   "layer.convertToSmart": {
     label: "Convert to Smart Object",
     run: (ed) => ed.convertToSmartObject(),
-    enabled: (ed) => !!layerKind(ed) && layerKind(ed) !== "smart",
+    enabled: (ed) => layerKind(ed) === "pixels" || layerKind(ed) === "shape",
   },
   "layer.editContents": { label: "Edit Contents", run: (_, s) => s.editContents(), enabled: (ed) => layerKind(ed) === "smart" },
   "layer.rasterize": {
     label: "Rasterize Layer",
     run: (ed) => ed.rasterizeLayer(),
-    enabled: (ed) => !!layerKind(ed) && layerKind(ed) !== "pixels",
+    enabled: (ed) => layerKind(ed) === "smart" || layerKind(ed) === "shape",
   },
 
   // Select

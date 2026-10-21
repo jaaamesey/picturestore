@@ -28,7 +28,16 @@ export const BLEND_MODES = [
 
 export type BlendMode = (typeof BLEND_MODES)[number];
 
+/**
+ * A layer's blend mode. Groups may also pass through: their contents blend
+ * straight into what's below, as if ungrouped (Photoshop's default for groups).
+ */
+export type LayerBlendMode = BlendMode | "pass through";
+
 export const isBlendMode = (s: string): s is BlendMode => (BLEND_MODES as readonly string[]).includes(s);
+
+/** The mode things are blended with: pass-through (only meaningful for groups) blends normally. */
+export const effectiveMode = (m: LayerBlendMode): BlendMode => (m === "pass through" ? "normal" : m);
 
 /** Index used by the GPU compositor's `mode` uniform. */
 export const blendModeIndex = (m: BlendMode) => BLEND_MODES.indexOf(m);
@@ -101,27 +110,6 @@ export function blendColor(mode: BlendMode, b: readonly number[], s: readonly nu
 }
 
 /**
- * Composites `n` straight-alpha RGBA8 source pixels onto a premultiplied
- * float accumulator: dst[di…] ← src[si…] ⊕ dst[di…] with layer `opacity`.
- */
-export type RowKernel = (dst: Float32Array, di: number, src: Uint8ClampedArray, si: number, n: number, opacity: number) => void;
-
-const INV255 = 1 / 255;
-
-const normalKernel: RowKernel = (dst, di, src, si, n, opacity) => {
-  const k = opacity * INV255;
-  for (let end = si + n * 4; si < end; si += 4, di += 4) {
-    const sa = src[si + 3] * k;
-    if (sa <= 0) continue;
-    const t = 1 - sa;
-    dst[di] = src[si] * INV255 * sa + dst[di] * t;
-    dst[di + 1] = src[si + 1] * INV255 * sa + dst[di + 1] * t;
-    dst[di + 2] = src[si + 2] * INV255 * sa + dst[di + 2] * t;
-    dst[di + 3] = sa + dst[di + 3] * t;
-  }
-};
-
-/**
  * B(b, s) for separable mode index `m`. A switch on a small integer: within a
  * row the branch is perfectly predictable, and the function is small enough
  * for V8 to inline into the kernel loop.
@@ -165,40 +153,57 @@ function nonSeparable(m: number, br: number, bg: number, bb: number, sr: number,
   }
 }
 
-function modeKernel(m: number): RowKernel {
+/**
+ * Composites `n` premultiplied source pixels onto premultiplied backdrop
+ * pixels (both float RGBA, from pixel `di` of `dst` and `si` of `src`),
+ * per the W3C compositing model: the source's alpha is scaled by `opacity`
+ * and, if given, per-pixel `coverage` (from index `ci`).
+ *
+ * `atop` composites source-atop: the backdrop keeps its alpha and the
+ * source shows only where it's opaque (how layers clipped to a base blend).
+ */
+export function blendSpan(
+  mode: BlendMode,
+  dst: Float32Array,
+  di: number,
+  src: Float32Array,
+  si: number,
+  n: number,
+  opacity: number,
+  coverage: Float32Array | null = null,
+  ci = 0,
+  atop = false,
+): void {
+  const m = blendModeIndex(mode);
   const separable = m < FIRST_NON_SEPARABLE;
-  return (dst, di, src, si, n, opacity) => {
-    const k = opacity * INV255;
-    for (let end = si + n * 4; si < end; si += 4, di += 4) {
-      const sa = src[si + 3] * k;
-      if (sa <= 0) continue;
-      const da = dst[di + 3];
-      const sr = src[si] * INV255, sg = src[si + 1] * INV255, sb = src[si + 2] * INV255;
-      const t = 1 - sa;
-      if (da <= 0) {
-        dst[di] = sr * sa;
-        dst[di + 1] = sg * sa;
-        dst[di + 2] = sb * sa;
-        dst[di + 3] = sa;
-        continue;
-      }
-      const inv = 1 / da, both = sa * da, only = sa * (1 - da);
-      const br = dst[di] * inv, bg = dst[di + 1] * inv, bb = dst[di + 2] * inv;
+  di *= 4;
+  si *= 4;
+  for (let k = 0; k < n; k++, di += 4, si += 4) {
+    const a0 = src[si + 3];
+    if (a0 <= 0) continue;
+    const scale = coverage ? opacity * coverage[ci + k] : opacity;
+    if (scale <= 0) continue;
+    const sa = a0 * scale, t = 1 - sa, da = dst[di + 3];
+    const inv = 1 / a0;
+    const sr = src[si] * inv, sg = src[si + 1] * inv, sb = src[si + 2] * inv;
+    if (m === 0) {
+      OR = sr;
+      OG = sg;
+      OB = sb;
+    } else if (da > 0) {
+      const dinv = 1 / da;
+      const br = dst[di] * dinv, bg = dst[di + 1] * dinv, bb = dst[di + 2] * dinv;
       if (separable) {
         OR = channel(m, br, sr);
         OG = channel(m, bg, sg);
         OB = channel(m, bb, sb);
-      } else {
-        nonSeparable(m, br, bg, bb, sr, sg, sb);
-      }
-      dst[di] = sr * only + OR * both + dst[di] * t;
-      dst[di + 1] = sg * only + OG * both + dst[di + 1] * t;
-      dst[di + 2] = sb * only + OB * both + dst[di + 2] * t;
-      dst[di + 3] = sa + da * t;
+      } else nonSeparable(m, br, bg, bb, sr, sg, sb);
     }
-  };
+    // Where there's no backdrop the source shows as is; where both are, their blend.
+    const only = atop ? 0 : sa * (1 - da), both = sa * da;
+    dst[di] = sr * only + OR * both + dst[di] * t;
+    dst[di + 1] = sg * only + OG * both + dst[di + 1] * t;
+    dst[di + 2] = sb * only + OB * both + dst[di + 2] * t;
+    if (!atop) dst[di + 3] = sa + da * t;
+  }
 }
-
-export const KERNELS: Readonly<Record<BlendMode, RowKernel>> = Object.fromEntries(
-  BLEND_MODES.map((mode, i) => [mode, mode === "normal" ? normalKernel : modeKernel(i)]),
-) as Record<BlendMode, RowKernel>;

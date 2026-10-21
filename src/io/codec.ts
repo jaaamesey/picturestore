@@ -1,5 +1,7 @@
-import { createLayer, docRect, flatten, type Doc } from "../core/document";
+import { createLayer, docRect, type Doc } from "../core/document";
+import { flatten } from "../core/composite";
 import { pixelsFromImage } from "../core/pixels";
+import { walk } from "../core/layers";
 import type { SaveFormat } from "./formats";
 import { readPsdDocument, writePsdDocument } from "./psd";
 
@@ -42,4 +44,4 @@ export async function encode(doc: Doc, format: SaveFormat, quality = 0.92): Prom
 
 /** Every tile buffer in a document, for zero-copy transfer out of the worker. */
 export const transferables = (doc: Doc): ArrayBuffer[] =>
-  doc.layers.flatMap((l) => [...l.pixels.values()].map((t) => t.data.buffer as ArrayBuffer));
+  [...walk(doc.layers)].flatMap((l) => [...l.pixels.values(), ...(l.mask?.pixels.values() ?? [])].map((t) => t.data.buffer as ArrayBuffer));

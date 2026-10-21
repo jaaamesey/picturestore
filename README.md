@@ -86,6 +86,40 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   the others slide aside, the list auto-scrolls, Esc cancels — or with Layer ▸ Arrange (Ctrl+[ / Ctrl+],
   with Shift for back/front). Every reorder animates, whatever caused it (`ui/sortable.ts`: FLIP transforms
   over the real layout, so motion can't leave anything misplaced; respects reduced motion).
+- **Groups** (layer folders), as in Photoshop: Ctrl+G groups the active layer (Shift+Ctrl+G ungroups), Layer ▸
+  New ▸ Group, nested to any depth, collapsible, drag layers in and out (drop one on an open group's row to put
+  it inside). Groups default to **Pass Through** — their layers blend straight into what's below, and the
+  group's opacity and mask fade between before and after — or take any blend mode, which composites their
+  contents on their own first (adjustment layers inside then only affect the group). Deleting a group asks
+  "Group and Contents" or "Group Only". Moving or transforming a group moves everything in it (Warp needs a
+  smart object, as in Photoshop). Ctrl+E on a group is Merge Group.
+- **Clipping masks**: Alt+Ctrl+G or Alt-click a layer clips it to the layer below; on a clipped layer it
+  releases it and the clipped layers above it. A clipping group (a base and the clipped layers above it) shows
+  only where the base is: the clipped layers blend onto the base alone (Photoshop's default "Blend Clipped
+  Layers as Group"), with their own modes, opacities and masks, and the result blends in with the base's mode
+  and opacity. A hidden base hides its clipped layers; the bottom layer of a group can't be clipped; a layer
+  dropped inside a clipping group joins it, one moved out leaves it. Groups and adjustment layers can be bases
+  (a group's contents, or an adjustment layer's mask, is the shape). Ctrl+E on a base is Merge Clipping Mask.
+  The panel indents clipped layers with ↳ and underlines bases.
+- **Layer masks**: Add Layer Mask (Reveal All, or Reveal Selection with a selection; Alt for Hide All / Hide
+  Selection), on any layer, group or adjustment layer. Click the mask thumbnail to target it: painting, fills,
+  the paint bucket, Delete (fills with the background colour), pixel shapes, the Move tool and Free Transform
+  then work on the mask, in grey (the foreground's luminosity; the eraser paints the background colour; D gives
+  white on black). Masks are linked by default (the chain icon) and move and transform with their layer.
+  Shift-click (or Layer Mask ▸ Disable) disables one; Apply and Delete. Image ▸ Adjustments work on a targeted
+  mask too.
+- **Adjustment layers**, all 16 of Photoshop's (Layer ▸ New Adjustment Layer, or the panel's ◐ button):
+  Brightness/Contrast (and Use Legacy), Levels, Curves, Exposure, Vibrance, Hue/Saturation (ranges and
+  Colorize), Color Balance, Black & White (and Tint), Photo Filter (Photoshop's 20 presets), Channel Mixer
+  (and Monochrome), Color Lookup (.cube 3D LUTs), Invert, Posterize, Threshold, Gradient Map and Selective
+  Color (relative/absolute). Each gets a mask (from the selection, if there is one), and edits in the
+  **Properties** panel with Photoshop's controls: Levels' histogram and sliders, a Curves graph (click to add
+  points, drag off to remove, Alt-click for a corner), per-range Hue/Saturation, and so on. They recolour
+  everything below them in their group (only the base when clipped), keeping its transparency, through their
+  opacity, blend mode and mask, and are rendered by the GPU compositor in WGSL. Merging one down applies it.
+- **Image ▸ Adjustments**: the same 16 as destructive dialogs with live Preview (Ctrl+L Levels, Ctrl+M Curves,
+  Ctrl+U Hue/Saturation, Ctrl+B Color Balance, Alt+Shift+Ctrl+B Black & White, Ctrl+I Invert), plus Desaturate
+  (Shift+Ctrl+U) and Equalize; applied within the selection, on the GPU.
 - **History**: undo/redo with a clickable History panel, limited by History States (default 50) and Memory Usage.
 - **Preferences** (Ctrl+K, Edit ▸ Preferences), organised as Photoshop's: General (reset), File Handling (recovery
   interval) and Performance (Memory Usage, History States, display quality). Kept in the browser.
@@ -100,8 +134,10 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   - A status-bar warning shows what's been given up, with "Retry full quality".
   - *Recovery*: unsaved documents are written to browser storage (OPFS) every 10 minutes by default and offered
     back on the next start, so a crashed or killed tab loses at most that long.
-- **PSD**: smart objects round-trip as placed layers with their embedded files (and custom warps); solid-colour
-  shape layers round-trip as vector masks with fill and stroke.
+- **PSD**: groups (nested, pass-through, open/closed), clipping, layer masks (with their default colour and
+  enabled state) and all 16 adjustment layers round-trip with Photoshop's own settings records; smart objects
+  round-trip as placed layers with their embedded files (and custom warps); solid-colour shape layers
+  round-trip as vector masks with fill and stroke.
 - **View**: zoom (Ctrl +/−/0/1, Ctrl/Alt+wheel about the cursor), pan (wheel, Space-drag, Hand tool).
 - **Snapping, guides and grid**, following Photoshop's manual (and Photopea's behaviour for what it leaves
   open): with View ▸ Snap (Shift+Ctrl+;) on, dragged points and moving boxes are pulled, within 8 screen pixels,
@@ -145,6 +181,21 @@ input until they land, and a result is discarded rather than applied if its base
 exactly); non-raster content says how it follows the map in one table — placements compose the map onto
 their quad, which is exact even for perspective and warps — and lengths that belong to content (stroke
 widths, later effect sizes and type) scale by Scale Styles' factor.
+
+**The layer tree** (`core/layers.ts`): a document's layers, and each group's, are stored bottom to top, with
+groups nesting. Tree edits are pure functions sharing untouched branches. Clipping is a flag on the clipped
+layer, so a clipping group is simply its base and the run of clipped layers above it. Layer masks are pixels
+too: grey over a background value, so painting a mask is painting a layer, and the GPU draws them into a
+coverage texture with the same tile pipeline.
+
+**Compositing** (`core/composite.ts` is the reference, `gpu/renderer.ts` the GPU): the tree is walked once;
+groups and clipping groups render into intermediate surfaces (one per nesting depth in use), pass-through
+groups snapshot the backdrop and fade to the result, clipped layers composite source-atop, and adjustment
+layers are a full-surface pass. Adjustments compile (`core/adjustments.ts`) to a few program kinds — per-channel
+curves (most of them), a hue map, YUV vibrance, selective-colour tables, black & white weights, a 3×4 mixer
+matrix, a 3D LUT — evaluated by one WGSL shader that mirrors the CPU code; their formulas follow Photopea's
+reverse-engineering of Photoshop's. The CPU reference works in bounded bands. E2E tests compare the two on
+scenes with every adjustment type, nested groups and clipping.
 
 **Layer content** is pixels, a smart object (an embedded source plus a placement: quad, orientation, warp) or a
 shape (vector geometry plus fill/stroke, also placed). A layer's `pixels` are always its rendered pixels, so the
@@ -198,8 +249,8 @@ readback presentation path, enabled with `?present=readback`.
 
 ## Roadmap
 
-Roughly in Photopea's order: layer groups and masks (also needed for lossless PSD round-trips of documents
-that use them), adjustment layers and filters (GPU), text, custom shapes and path editing, warp grids
+Roughly in Photopea's order: filters (GPU: blurs, sharpen, noise…, and Smart Filters), fill layers, multiple
+layer selection, mask density/feather, Blend If and Fill opacity, text, custom shapes and path editing, warp grids
 beyond the single patch (splits, 3×3–5×5) and warp presets, snapping while transforming, more selection tools
 (polygonal lasso, quick select, feather/modify), brush presets and smoothing, and GPU painting for very large
 brushes.

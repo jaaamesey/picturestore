@@ -2,7 +2,7 @@ import type { BrushSettings } from "../core/brush";
 import type { CropBox, CropConstraint, CropOverlay, Length } from "../core/crop";
 import type { RGB } from "../core/color";
 import type { Rasterizers } from "../core/content";
-import type { Doc, Layer } from "../core/document";
+import type { Doc, EditTarget } from "../core/document";
 import type { StrokeAlign } from "../core/shape";
 import type { Rect, Vec2 } from "../core/geometry";
 import type { SelectionMode } from "../core/selection";
@@ -160,6 +160,7 @@ export interface ToolContext {
   readonly view: View;
   readonly settings: ToolSettings;
   readonly foreground: RGB;
+  readonly background: RGB;
   /** Shows a provisional document (and optional floating pixels) without recording history. */
   preview(doc: Doc | null, floating?: FloatingLayer | null): void;
   /** Records a history state and clears any preview. */
@@ -177,13 +178,15 @@ export interface ToolContext {
   /** Commit-quality resampling and shape rasterization (on the GPU in the app). */
   readonly raster: Rasterizers;
   /**
-   * Pixel tools call this before editing a layer. Pixel layers pass; smart
-   * objects and shapes don't — the user is asked to rasterize them first, as
-   * in Photoshop. If they agree, the layer is rasterized and then, as in
-   * Photoshop, the action goes ahead: `proceed` runs it again (with a fresh
-   * context). Actions that can't be repeated (a brush stroke) omit it.
+   * What a pixel tool edits (see `editTarget` in core/document): the active
+   * layer's pixels, or its mask. Smart objects and shapes must be rasterized
+   * first: the user is asked, and if they agree the layer is rasterized and
+   * then, as in Photoshop, the action goes ahead (`proceed` runs it again
+   * with a fresh context; actions that can't be repeated, like a brush
+   * stroke, omit it). Null when there's nothing editable (a group without a
+   * mask: the user is told why).
    */
-  requireEditable(layer: Layer, proceed?: (ctx: ToolContext) => void): boolean;
+  editTarget(proceed?: (ctx: ToolContext) => void): EditTarget | null;
   overlay(o: Overlay | null): void;
   /** Snapping (View ▸ Snap): where dragged points and moving boxes land. */
   readonly snap: Snapper;

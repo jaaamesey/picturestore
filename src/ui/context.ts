@@ -8,7 +8,8 @@ export interface App {
   readonly shell: Shell;
   readonly notify: (message: string) => void;
   /** Opens a context menu at viewport coordinates (one at a time; Escape or clicking elsewhere closes it). */
-  readonly openMenu: (x: number, y: number, items: readonly MenuItem[]) => void;
+  /** Opens a context menu at (x, y): below and right of it, or above it with `up`. */
+  readonly openMenu: (x: number, y: number, items: readonly MenuItem[], up?: "up") => void;
 }
 
 /** Default-less: using it outside <AppContext> throws. */

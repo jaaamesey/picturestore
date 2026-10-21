@@ -1,3 +1,4 @@
+import { hasPixels, isShown, walk } from "./layers";
 import type { Doc, Guide } from "./document";
 import { isEmpty, type Rect, type Vec2 } from "./geometry";
 import { contentBounds } from "./pixels";
@@ -67,8 +68,8 @@ export function snapTargets(doc: Doc, to: SnapTo, exclude: readonly string[] = [
   if (to.guides) for (const g of doc.guides ?? []) (g.orientation === "vertical" ? x : y).push({ at: g.position, kind: "guide" });
   if (to.bounds) box({ x: 0, y: 0, w: doc.width, h: doc.height }, "document");
   if (to.layers) {
-    for (const l of doc.layers) {
-      if (!l.visible || exclude.includes(l.id)) continue;
+    for (const l of walk(doc.layers)) {
+      if (!hasPixels(l) || exclude.includes(l.id) || !isShown(doc.layers, l.id)) continue;
       const b = contentBounds(l.pixels);
       if (!isEmpty(b)) box(b, "layer");
     }

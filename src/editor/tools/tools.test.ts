@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BRUSH } from "../../core/brush";
-import { addLayer, createDocument, fillPixels, updateLayer, type Doc } from "../../core/document";
+import { addLayer, createDocument, editTarget, fillPixels, groupLayers, updateLayer, type Doc } from "../../core/document";
+import { childrenOf } from "../../core/layers";
 import { rect } from "../../core/geometry";
 import { rectMask } from "../../core/selection";
 import { NO_PIXELS, contentBounds, getPixel } from "../../core/pixels";
@@ -49,6 +50,7 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     view: s.view,
     settings: structuredClone(s.settings),
     foreground: s.fg,
+    background: { r: 255, g: 255, b: 255 },
     preview: (d, f = null) => ((s.preview = d), (s.floating = f)),
     commit: (label, d) => (s.history.push(label), (s.doc = d), (s.preview = null), (s.floating = null)),
     commitAsync(label, pending, landed) {
@@ -61,10 +63,11 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
       });
     },
     raster: CPU_RASTERIZERS,
-    requireEditable(layer) {
-      if (layer.content.kind === "pixels") return true;
-      s.prompts.push(layer.content.kind);
-      return false;
+    editTarget() {
+      const t = editTarget(s.doc);
+      if (!t || t.mask || t.layer.content.kind === "pixels") return t;
+      s.prompts.push(t.layer.content.kind);
+      return null;
     },
     overlay: (o) => (s.overlay = o),
     requestRender: () => {},
@@ -226,11 +229,11 @@ describe("move and transform", () => {
     const t = h.tools.transform;
     expect(t.begin(h.ctx(), { returnTo: "brush" })).toBe(true);
     h.s.tool = "transform";
-    expect(h.s.floating!.bounds).toEqual(rect(10, 10, 10, 10));
+    expect(h.s.floating!.pixels!.bounds).toEqual(rect(10, 10, 10, 10));
     t.down!(h.ctx(), h.ev(20, 20));
     t.move!(h.ctx(), h.ev(30, 30));
     t.up!(h.ctx(), h.ev(30, 30));
-    expect(h.s.floating!.mapping.quad[2]).toEqual({ x: 30, y: 30 });
+    expect(h.s.floating!.pixels!.mapping.quad[2]).toEqual({ x: 30, y: 30 });
     t.commit!(h.ctx());
     await h.s.pending;
     expect(h.s.history).toEqual(["Free Transform"]);
@@ -482,7 +485,7 @@ describe("rasterize prompts", () => {
     const shape = createLayer({ name: "s", content: { kind: "shape", geometry: { kind: "ellipse" }, style: { fill: { r: 0, g: 0, b: 0 }, stroke: null }, placement: { source: rect(0, 0, 10, 10), quad: quadOf(rect(0, 0, 10, 10)), angle: 0, patch: null } } });
     const h = harness(addLayer(d, shape));
     let proceed: ((c: ToolContext) => void) | undefined;
-    const ctx = { ...h.ctx(), requireEditable: (_: unknown, p?: (c: ToolContext) => void) => ((proceed = p), false) };
+    const ctx = { ...h.ctx(), editTarget: (p?: (c: ToolContext) => void) => ((proceed = p), null) };
     h.tools.byId.bucket.down!(ctx, h.ev(50, 50));
     expect(proceed).toBeDefined();
     // Once rasterized, carrying on fills.
@@ -755,5 +758,57 @@ describe("snapping", () => {
     h.s.lockGuides = true;
     await h.drag("move", [50, 5], [28, 5]);
     expect(h.s.doc.guides).toEqual([{ orientation: "vertical", position: 50 }]);
+  });
+});
+
+describe("masks and groups", () => {
+  const squareWithMask = () => {
+    const d = blank();
+    const mask = { pixels: fillPixels(NO_PIXELS, rect(10, 10, 5, 5), { r: 0, g: 0, b: 0 }), background: 255 as const, enabled: true, linked: true };
+    return updateLayer(d, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(10, 10, 10, 10), { r: 0, g: 0, b: 0 }), mask });
+  };
+
+  it("a linked mask moves with its layer", async () => {
+    const h = harness(squareWithMask());
+    await h.drag("move", [15, 15], [45, 25]);
+    await h.s.pending;
+    const l = layerOf(h.s.doc);
+    expect(contentBounds(l.pixels)).toEqual(rect(40, 20, 10, 10));
+    expect(contentBounds(l.mask!.pixels)).toEqual(rect(40, 20, 5, 5));
+  });
+
+  it("an unlinked mask stays put", async () => {
+    const d = squareWithMask();
+    const h = harness(updateLayer(d, d.activeLayerId, { mask: { ...layerOf(d).mask!, linked: false } }));
+    await h.drag("move", [15, 15], [45, 25]);
+    await h.s.pending;
+    expect(contentBounds(layerOf(h.s.doc).mask!.pixels)).toEqual(rect(10, 10, 5, 5));
+  });
+
+  it("a targeted mask moves on its own, and the brush paints its grey", async () => {
+    const h = harness({ ...squareWithMask(), maskTargeted: true });
+    await h.drag("move", [12, 12], [32, 12]);
+    await h.s.pending;
+    const l = layerOf(h.s.doc);
+    expect(contentBounds(l.pixels)).toEqual(rect(10, 10, 10, 10));
+    expect(contentBounds(l.mask!.pixels)).toEqual(rect(30, 10, 5, 5));
+    await h.drag("brush", [80, 80], [80, 80]);
+    // Red foreground → its luminosity's grey.
+    expect(getPixel(layerOf(h.s.doc).mask!.pixels, 80, 80)).toEqual([77, 77, 77, 255]);
+    expect(getPixel(layerOf(h.s.doc).pixels, 80, 80)[3]).toBe(0);
+  });
+
+  it("a group moves all its layers; painting on a group without a mask is refused", async () => {
+    const d = squareWithMask();
+    const grouped = groupLayers(d, [d.activeLayerId]);
+    const h = harness(grouped);
+    await h.drag("move", [15, 15], [25, 15]);
+    await h.s.pending;
+    const inner = childrenOf(h.s.doc.layers[1])[0];
+    expect(contentBounds(inner.pixels)).toEqual(rect(20, 10, 10, 10));
+    expect(contentBounds(inner.mask!.pixels)).toEqual(rect(20, 10, 5, 5));
+    await h.drag("brush", [50, 50], [50, 50]);
+    expect(h.s.history).toEqual(["Move"]);
+    expect(editTarget(h.s.doc)!.layer.content.kind).toBe("group");
   });
 });

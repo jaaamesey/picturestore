@@ -1,6 +1,10 @@
 import { readPsd } from "ag-psd";
 import { describe, expect, it } from "vitest";
-import { addLayer, createDocument, createLayer, fillPixels, flatten, type Doc } from "../core/document";
+import { addLayer, createDocument, createLayer, fillPixels, type Doc } from "../core/document";
+import { flatten } from "../core/composite";
+import { ADJUSTMENTS, defaultAdjustment, type Adjustment } from "../core/adjustments";
+import { HIDE_ALL, REVEAL_ALL, createGroup } from "../core/document";
+import { childrenOf } from "../core/layers";
 import { rect } from "../core/geometry";
 import { NO_PIXELS } from "../core/pixels";
 import { CPU_RASTERIZERS, smartObjectLayer, smartSource } from "../core/content";
@@ -50,7 +54,7 @@ describe("PSD", () => {
     expect(maxDiff).toBeLessThanOrEqual(1); // opacity is quantised to 8 bits in PSD
   });
 
-  it("flattens groups, inheriting visibility", async () => {
+  it("keeps groups, nesting, clipping and pass-through", async () => {
     const { writePsd } = await import("ag-psd");
     const px = { width: 1, height: 1, data: new Uint8ClampedArray([255, 0, 0, 255]) };
     const buf = writePsd(
@@ -62,7 +66,47 @@ describe("PSD", () => {
       { generateThumbnail: false },
     );
     const doc = await readPsdDocument(buf);
-    expect(doc.layers.map((l) => [l.name, l.visible])).toEqual([["child", false]]);
+    const [g] = doc.layers;
+    expect([g.name, g.visible, g.content.kind]).toEqual(["G", false, "group"]);
+    expect(childrenOf(g).map((l) => l.name)).toEqual(["child"]);
+  });
+
+  it("round-trips groups, clipping masks, layer masks and adjustment layers", async () => {
+    const d = createDocument({ width: 4, height: 2, background: { r: 0, g: 0, b: 255 } });
+    const red = createLayer({ name: "red", pixels: fillPixels(NO_PIXELS, rect(0, 0, 2, 2), { r: 255, g: 0, b: 0 }) });
+    const green = createLayer({
+      name: "green",
+      clipped: true,
+      pixels: fillPixels(NO_PIXELS, rect(0, 0, 4, 2), { r: 0, g: 255, b: 0 }),
+      mask: { ...REVEAL_ALL, pixels: fillPixels(NO_PIXELS, rect(1, 0, 1, 2), { r: 0, g: 0, b: 0 }) },
+    });
+    const levels = defaultAdjustment("levels") as Extract<Adjustment, { kind: "levels" }>;
+    const adj = createLayer({
+      name: "Levels 1",
+      opacity: 0.5,
+      content: { kind: "adjustment", adjustment: { ...levels, channels: { ...levels.channels, rgb: { ...levels.channels.rgb, inWhite: 200, gamma: 1.5 } } } },
+      mask: HIDE_ALL,
+    });
+    const group = { ...createGroup("G", [red, green]), blendMode: "normal" as const };
+    const doc = { ...d, layers: [...d.layers, group, adj, createLayer({ name: "inv", content: { kind: "adjustment", adjustment: { kind: "invert" } }, mask: REVEAL_ALL })] };
+    const back = await readPsdDocument(new Uint8Array(writePsdDocument(doc)));
+    const [, g2, a2, i2] = back.layers;
+    expect(g2.blendMode).toBe("normal");
+    const [r2, gr2] = childrenOf(g2);
+    expect([r2.clipped, gr2.clipped]).toEqual([false, true]);
+    expect(gr2.mask?.background).toBe(255);
+    expect(a2.content).toEqual(adj.content);
+    expect(a2.mask?.background).toBe(0);
+    expect(i2.content).toEqual({ kind: "adjustment", adjustment: { kind: "invert" } });
+    const a = flatten(doc), b = flatten(back);
+    for (let i = 0; i < a.length; i++) expect(Math.abs(a[i] - b[i])).toBeLessThanOrEqual(1);
+  });
+
+  it.each(ADJUSTMENTS.map((a) => a.kind))("round-trips %s adjustment layers", (kind) => {
+    const adjustment = defaultAdjustment(kind);
+    const d = createDocument({ width: 2, height: 2 });
+    const doc = addLayer(d, createLayer({ name: "a", content: { kind: "adjustment", adjustment }, mask: REVEAL_ALL }));
+    return readPsdDocument(new Uint8Array(writePsdDocument(doc))).then((back) => expect(back.layers[1].content).toEqual({ kind: "adjustment", adjustment }));
   });
 
   it("keeps smart objects live: placement, warp and embedded contents", async () => {

@@ -272,6 +272,19 @@ export function mappingBounds(m: Mapping, segments = 16): Rect {
   return rect(b.x, b.y, b.w, b.h);
 }
 
+/**
+ * The same mapping restricted (or extended) to another source rectangle:
+ * what lands where when content within `r` moves with content framed by
+ * `m.source`. Exact, warps included.
+ */
+export function subMapping(m: Mapping, r: Rect): Mapping {
+  const { source: s } = m;
+  const s0 = (r.x - s.x) / s.w, s1 = (r.x + r.w - s.x) / s.w, t0 = (r.y - s.y) / s.h, t1 = (r.y + r.h - s.y) / s.h;
+  if (m.patch) return { source: r, quad: m.quad, patch: reparameterizePatch(m.patch, s0, s1, t0, t1) };
+  const H = squareToQuad(m.quad)!;
+  return { source: r, quad: [project(H, s0, t0), project(H, s1, t0), project(H, s1, t1), project(H, s0, t1)], patch: null };
+}
+
 /** Maps a normalised source point to the document. */
 export function mapPoint(m: Mapping, s: number, t: number): Vec2 {
   const H = squareToQuad(m.quad)!;

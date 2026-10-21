@@ -1,4 +1,5 @@
 import { For, createSignal, useContext } from "solid-js";
+import { ADJUSTMENTS } from "../core/adjustments";
 import { command, formatShortcut, isEnabled, runCommand, type CommandId } from "../editor/commands";
 import { AppContext, isMac } from "./context";
 import { Popover } from "./Popover";
@@ -21,14 +22,50 @@ export const TRANSFORM_MENU: readonly MenuItem[] = [
   "edit.transform.flipVertical",
 ];
 
+/** Layer ▸ New Adjustment Layer, in Photoshop's order and grouping. */
+export const ADJUSTMENT_LAYER_MENU: readonly MenuItem[] = ADJUSTMENTS.flatMap(({ kind }) => [
+  ...(kind === "levels" || kind === "vibrance" || kind === "invert" ? (["-"] as const) : []),
+  `layer.adjustment.${kind}` as const,
+]);
+
+/** Image ▸ Adjustments, in Photoshop's order and grouping. */
+const IMAGE_ADJUSTMENTS_MENU: readonly MenuItem[] = [
+  ...ADJUSTMENTS.flatMap(({ kind }) => [...(kind === "vibrance" || kind === "invert" ? (["-"] as const) : []), `image.adjust.${kind}` as const]),
+  "-",
+  "image.desaturate",
+  "image.equalize",
+];
+
+const LAYER_MASK_MENU: readonly MenuItem[] = [
+  "layer.mask.revealAll",
+  "layer.mask.hideAll",
+  "layer.mask.revealSelection",
+  "layer.mask.hideSelection",
+  "-",
+  "layer.mask.delete",
+  "layer.mask.apply",
+  "-",
+  "layer.mask.disable",
+];
+
 /** Right-click on a layer (and on the canvas, outside selection tools). */
 export const LAYER_MENU: readonly MenuItem[] = [
   "layer.duplicate",
   "layer.delete",
   "-",
+  "layer.group",
+  "layer.ungroup",
+  "-",
   "layer.convertToSmart",
   "layer.editContents",
   "layer.rasterize",
+  "-",
+  "layer.mask.delete",
+  "layer.mask.apply",
+  "layer.mask.disable",
+  "-",
+  "layer.clippingMask",
+  "layer.releaseClippingMask",
   "-",
   "layer.mergeDown",
 ];
@@ -74,20 +111,27 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       { submenu: "Preferences", items: ["edit.preferences", "edit.preferences.fileHandling", "edit.preferences.performance"] },
     ],
   },
-  { title: "Image", items: ["image.imageSize", "image.canvasSize", "-", "image.crop"] },
+  { title: "Image", items: [{ submenu: "Adjustments", items: IMAGE_ADJUSTMENTS_MENU }, "-", "image.imageSize", "image.canvasSize", "-", "image.crop"] },
   {
     title: "Layer",
     items: [
-      "layer.new",
+      { submenu: "New", items: ["layer.new", "layer.newGroup", "-", "layer.viaCopy", "layer.viaCut"] },
       "layer.duplicate",
       "layer.delete",
       "-",
-      "layer.viaCopy",
-      "layer.viaCut",
+      { submenu: "New Adjustment Layer", items: ADJUSTMENT_LAYER_MENU },
       "-",
-      { submenu: "Arrange", items: ["layer.bringToFront", "layer.bringForward", "layer.sendBackward", "layer.sendToBack"] },
+      { submenu: "Layer Mask", items: LAYER_MASK_MENU },
+      "layer.clippingMask",
+      "layer.releaseClippingMask",
+      "-",
       { submenu: "Smart Objects", items: ["layer.convertToSmart", "layer.editContents"] },
       "layer.rasterize",
+      "-",
+      "layer.group",
+      "layer.ungroup",
+      "-",
+      { submenu: "Arrange", items: ["layer.bringToFront", "layer.bringForward", "layer.sendBackward", "layer.sendToBack"] },
       "-",
       "layer.mergeDown",
     ],
@@ -152,7 +196,7 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
             >
               <span class="flex items-center gap-1.5">
                 <span class="w-3 text-center">{command(item).checked?.(editor) ? "✓" : ""}</span>
-                {command(item).label}
+                {command(item).title?.(editor) ?? command(item).label}
               </span>
               <span class="text-dim">{command(item).shortcuts ? formatShortcut(command(item).shortcuts![0], isMac) : ""}</span>
             </button>

@@ -13,16 +13,25 @@ import {
   createLayer,
   docRect,
   duplicateLayer,
+  editTarget,
   fillPixels,
-  flatten,
-  mergeDown,
-  layerIndex,
+  groupLayers,
+  layerById,
+  maskTone,
   moveLayer as moveLayerTo,
   moveLayerRelative,
   nextLayerName,
+  numberedName,
   rasterizeLayer,
   removeLayer,
+  ungroup,
   updateLayer,
+  withTargetPixels,
+  createGroup,
+  HIDE_ALL,
+  REVEAL_ALL,
+  type EditTarget,
+  type LayerMask,
   type Doc,
   type Guide,
   type Layer,
@@ -31,6 +40,10 @@ import {
   resolutionOf,
   type SmartSource,
 } from "../core/document";
+import { adjustPixels, applyMask, flatten, histogram, mergeDown } from "../core/composite";
+import { adjustmentLabel, compile, defaultAdjustment, equalizeCurve, type Adjustment, type AdjustmentKind, type Program } from "../core/adjustments";
+import type { LayerBlendMode } from "../core/blend";
+import { hasPixels, isClipped, isGroup, locate, walk, type Placement as LayerPlacement } from "../core/layers";
 import {
   amend,
   canRedo,
@@ -52,6 +65,7 @@ import { intersect, isEmpty, rect, roundOut, translation, type Rect, type Vec2 }
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
 import { renderShape, type ShapeGeometry, type ShapeStyle } from "../core/shape";
+import { isPlaced } from "../core/content";
 import { NO_PIXELS, contentBounds, pixelsFromImage, type Pixels } from "../core/pixels";
 import type { TransformMode, TransformState } from "../core/transform";
 import { mappingBounds, type Mapping } from "../core/warp";
@@ -201,7 +215,13 @@ export const RASTERIZE_PROMPTS = {
 } as const;
 
 /** What the editor uses the GPU renderer for, besides display. */
-type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape">;
+type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape" | "adjust">;
+
+/** Photoshop's messages when a pixel edit has nothing to edit. */
+export const NOT_EDITABLE = {
+  group: "Could not complete your request because the target layer is a group.",
+  adjustment: "Could not complete your request because the content of the layer is not directly editable.",
+} as const;
 
 /**
  * Application state and actions. Documents are immutable values held in
@@ -300,11 +320,21 @@ export function createEditor() {
 
     /** Asks to rasterize a smart object or shape (Photoshop's prompt), does so as its own step, then carries on with `proceed`. */
     async function offerRasterize(s: SessionInternals, layer: Layer, proceed?: (ctx: ToolContext) => void) {
-      if (layer.content.kind === "pixels") return;
+      if (!isPlaced(layer.content)) return;
       if (!(await askConfirm(RASTERIZE_PROMPTS[layer.content.kind]))) return;
       if (pending !== 0 || !sessions().includes(s)) return;
       commitTo(s, "Rasterize Layer", rasterizeLayer(s.doc(), layer.id));
       if (proceed && active() === s) guard(() => proceed(context(s)))();
+    }
+
+    /** The session's edit target, if it can be edited directly (see ToolContext.editTarget). */
+    function editableTarget(s: SessionInternals, proceed?: (ctx: ToolContext) => void): EditTarget | null {
+      const t = editTarget(s.doc());
+      if (!t || t.mask || t.layer.content.kind === "pixels") return t;
+      const c = t.layer.content;
+      if (c.kind === "group" || c.kind === "adjustment") reportError(NOT_EDITABLE[c.kind]);
+      else void offerRasterize(s, t.layer, proceed);
+      return null;
     }
 
     function context(s: SessionInternals): ToolContext {
@@ -313,6 +343,7 @@ export function createEditor() {
         view: s.view(),
         settings: snapshot(settings),
         foreground: foreground(),
+        background: background(),
         preview(doc, floating = null) {
           s.setPreview(doc);
           s.setFloating(floating);
@@ -323,11 +354,7 @@ export function createEditor() {
         viewport: viewportSize(),
         updateSettings: (fn) => setSettings(fn),
         raster,
-        requireEditable(layer, proceed) {
-          if (layer.content.kind === "pixels") return true;
-          void offerRasterize(s, layer, proceed);
-          return false;
-        },
+        editTarget: (proceed) => editableTarget(s, proceed),
         overlay: s.setOverlay,
         snap: snapperFor(s),
         viewOptions: viewNow,
@@ -579,11 +606,14 @@ export function createEditor() {
         return l ? fn(d, l) : d;
       });
 
-    /** A pixel edit of the active layer; smart objects and shapes must be rasterized first. */
-    function pixelEdit(label: string, fn: (d: Doc, l: Layer) => Doc) {
+    /** A pixel edit of the edit target (the active layer, or its mask); smart objects and shapes must be rasterized first. */
+    function pixelEdit(label: string, fn: (d: Doc, t: EditTarget) => Doc) {
       const s = active();
-      const l = s && activeLayer(s.doc());
-      if (s && l && context(s).requireEditable(l, () => pixelEdit(label, fn))) layerEdit(label, fn);
+      if (!s || !editableTarget(s, () => pixelEdit(label, fn))) return;
+      edit(label, (d) => {
+        const t = editTarget(d);
+        return t ? fn(d, t) : d;
+      });
     }
 
     // --- Clipboard -------------------------------------------------------------
@@ -595,7 +625,7 @@ export function createEditor() {
       const s = active();
       const d = s?.doc();
       const l = d && activeLayer(d);
-      if (!d || !l) return null;
+      if (!d || !l || (!merged && !hasPixels(l))) return null;
       const f = merged ? copyMerged(d) : copyPixels(d, l);
       if (f) clipboard = f;
       else reportError(`Could not complete the ${merged ? "Copy Merged" : "Copy"} command because the selected area is empty.`);
@@ -614,9 +644,10 @@ export function createEditor() {
     function cut(): Floating | null {
       const s = active();
       const l = s && activeLayer(s.doc());
-      if (pending > 0 || !s || !l || !context(s).requireEditable(l, () => void cut())) return null;
+      if (pending > 0 || !s || !l || !hasPixels(l)) return null;
+      if (l.content.kind !== "pixels") return void offerRasterize(s, l, () => void cut()), null;
       const f = copy(false);
-      if (f) pixelEdit("Cut", (d, x) => updateLayer(d, x.id, { pixels: clearPixels(x.pixels, d.selection) }));
+      if (f) edit("Cut", (d) => updateLayer(d, l.id, { pixels: clearPixels(l.pixels, d.selection) }));
       return f;
     }
 
@@ -661,7 +692,7 @@ export function createEditor() {
       }
       const cd = child.doc();
       const pd = parent.doc();
-      const old = pd.layers.find((l) => l.content.kind === "smart" && l.content.source.id === link.sourceId);
+      const old = [...walk(pd.layers)].find((l) => l.content.kind === "smart" && l.content.source.id === link.sourceId);
       if (!old || old.content.kind !== "smart") {
         reportError("The Smart Object no longer exists in its document.");
         return true;
@@ -676,7 +707,7 @@ export function createEditor() {
       const clip = docRect(pd);
       const update = async () => {
         let d = pd;
-        for (const l of pd.layers) {
+        for (const l of walk(pd.layers)) {
           if (l.content.kind !== "smart" || l.content.source.id !== link.sourceId) continue;
           // As in Photoshop: same transform, centred where the old contents were.
           const placement = resizedPlacement(l.content.placement, cd.width, cd.height);
@@ -754,7 +785,7 @@ export function createEditor() {
       shapeEdit = null;
       if (!e || !sessions().includes(e.s)) return;
       const d = e.s.doc();
-      const l = d.layers.find((x) => x.id === e.id);
+      const l = layerById(d, e.id);
       if (!l || l.content.kind !== "shape") return;
       const { content } = e;
       const shown = updateLayer(d, e.id, { content });
@@ -763,7 +794,40 @@ export function createEditor() {
       commitAsync(e.s, "Shape Properties", pixels.then((rendered) => updateLayer(d, e.id, { content, pixels: rendered })), `shape:${e.id}`);
     }
 
-    return {
+    /** Applies an adjustment program to the edit target, within the selection, as one step (computed on the GPU). */
+    function applyProgram(label: string, program: (t: EditTarget, d: Doc) => Program) {
+      const s = active();
+      const t = s && editableTarget(s, () => applyProgram(label, program));
+      if (!s || !t) return;
+      cancelTool();
+      const d = s.doc();
+      commitAsync(s, label, adjust(t.pixels, program(t, d), d.selection).then((pixels) => withTargetPixels(d, t, pixels)));
+    }
+
+    /** Adjusts pixels on the GPU (the CPU reference without one). */
+    async function adjust(pixels: Pixels, p: Program, selection: Doc["selection"]): Promise<Pixels> {
+      return gpu ? gpu.adjust(pixels, p, selection) : adjustPixels(pixels, p, selection);
+    }
+
+    /** A new mask: from the selection (Reveal/Hide Selection), else Reveal All / Hide All. */
+    function maskFor(d: Doc, hide: boolean): LayerMask {
+      const base = hide ? REVEAL_ALL : HIDE_ALL;
+      if (!d.selection) return hide ? HIDE_ALL : REVEAL_ALL;
+      const shade = hide ? 0 : 255;
+      return { ...base, pixels: fillPixels(NO_PIXELS, d.selection.bounds, { r: shade, g: shade, b: shade }, d.selection) };
+    }
+
+    /** What Ctrl+E does to the active layer, as the Layer menu names it. */
+    function mergeLabel(d: Doc): string | null {
+      const p = locate(d.layers, d.activeLayerId);
+      if (!p) return null;
+      const l = p.siblings[p.index];
+      if (isGroup(l)) return "Merge Group";
+      if (!isClipped(p.siblings, p.index) && p.siblings[p.index + 1]?.clipped) return "Merge Clipping Mask";
+      return "Merge Down";
+    }
+
+    const editor = {
       tools,
       sessions: sessions as Accessor<readonly DocumentSession[]>,
       active: active as Accessor<DocumentSession | null>,
@@ -795,9 +859,12 @@ export function createEditor() {
         setForeground(background());
         setBackground(f);
       },
+      /** Default Colors (D): black on white, or white on black while a mask is the target, as in Photoshop. */
       resetColors() {
-        setForeground(BLACK);
-        setBackground(WHITE);
+        const d = active()?.doc();
+        const mask = !!d && !!editTarget(d)?.mask;
+        setForeground(mask ? WHITE : BLACK);
+        setBackground(mask ? BLACK : WHITE);
       },
 
       // Pointer input, already converted to document space by the viewport.
@@ -941,9 +1008,14 @@ export function createEditor() {
       setTransform: (state: TransformState) => withTool((ctx) => tools.transform.setState(ctx, state)),
       setTransformMode: (mode: TransformMode) => withTool((ctx) => tools.transform.setMode(ctx, mode)),
       fill: whenIdle((color: RGB) =>
-        pixelEdit("Fill", (d, l) => updateLayer(d, l.id, { pixels: fillPixels(l.pixels, docRect(d), color, d.selection) })),
+        pixelEdit("Fill", (d, t) => withTargetPixels(d, t, fillPixels(t.pixels, docRect(d), t.mask ? maskTone(color) : color, d.selection))),
       ),
-      clear: whenIdle(() => pixelEdit("Clear", (d, l) => updateLayer(d, l.id, { pixels: clearPixels(l.pixels, d.selection) }))),
+      /** Delete: erases the selection; on a mask, fills it with the background colour (as Photoshop does). */
+      clear: whenIdle(() =>
+        pixelEdit("Clear", (d, t) =>
+          withTargetPixels(d, t, t.mask ? fillPixels(t.pixels, docRect(d), maskTone(background()), d.selection) : clearPixels(t.pixels, d.selection)),
+        ),
+      ),
 
       // Clipboard. `copy`/`cut` return the pixels for the system clipboard.
       copy: (merged = false) => (pending === 0 ? copy(merged) : null),
@@ -1021,44 +1093,52 @@ export function createEditor() {
       /** Layer via Copy (Ctrl+J): the selected pixels as a new layer, or a duplicate with no selection. */
       layerViaCopy: whenIdle(() =>
         layerEdit("Layer Via Copy", (d, l) => {
-          if (!d.selection) return duplicateLayer(d, l.id);
+          if (!d.selection || !hasPixels(l)) return duplicateLayer(d, l.id);
           const f = copyPixels(d, l);
-          return f ? addLayer(d, createLayer({ name: nextLayerName(d), pixels: f.pixels })) : d;
+          return f ? addLayer(d, createLayer({ name: nextLayerName(d), pixels: f.pixels }), l.id, "above") : d;
         }),
       ),
       layerViaCut: whenIdle(() =>
-        pixelEdit("Layer Via Cut", (d, l) => {
-          const f = d.selection && copyPixels(d, l);
+        pixelEdit("Layer Via Cut", (d, t) => {
+          const f = !t.mask && d.selection && copyPixels(d, t.layer);
           if (!f) return d;
-          const cut = updateLayer(d, l.id, { pixels: clearPixels(l.pixels, d.selection) });
-          return addLayer(cut, createLayer({ name: nextLayerName(d), pixels: f.pixels }));
+          const cut = updateLayer(d, t.layer.id, { pixels: clearPixels(t.pixels, d.selection) });
+          return addLayer(cut, createLayer({ name: nextLayerName(d), pixels: f.pixels }), t.layer.id, "above");
         }),
       ),
-      deleteLayer: whenIdle((id?: string) => edit("Delete Layer", (d) => removeLayer(d, id ?? d.activeLayerId))),
-      mergeDown: whenIdle(() => layerEdit("Merge Down", (d, l) => mergeDown(d, l.id))),
+      /** Deletes a layer; a group with its contents, or (`groupOnly`) just the group, its layers staying where they were. */
+      deleteLayer: whenIdle((id?: string, groupOnly: boolean = false) =>
+        edit(groupOnly ? "Delete Group" : "Delete Layer", (d) => (groupOnly ? ungroup(d, id ?? d.activeLayerId) : removeLayer(d, id ?? d.activeLayerId))),
+      ),
+      /**
+       * Merge Down (Ctrl+E), which on a group is Merge Group and on a
+       * clipping group's base Merge Clipping Mask.
+       */
+      mergeDown: whenIdle(() => layerEdit(mergeLabel(active()!.doc()) ?? "Merge Down", (d, l) => mergeDown(d, l.id))),
       convertToSmartObject: whenIdle(() => layerEdit("Convert to Smart Object", (d, l) => convertToSmartObject(d, l.id))),
       rasterizeLayer: whenIdle(() => layerEdit("Rasterize Layer", (d, l) => rasterizeLayer(d, l.id))),
-      /** Layer ▸ Arrange: up/down one step in the stack, or to the top/bottom. */
+      /** Layer ▸ Arrange: up/down one step within its group (or the document), or to its top/bottom. */
       arrange: whenIdle((to: "forward" | "backward" | "front" | "back") => {
         const labels = { forward: "Bring Forward", backward: "Send Backward", front: "Bring to Front", back: "Send to Back" };
         layerEdit(labels[to], (d, l) => {
-          const i = layerIndex(d, l.id);
-          const target = { forward: i + 1, backward: i - 1, front: d.layers.length - 1, back: 0 }[to];
-          return target === i || target < 0 || target >= d.layers.length ? d : moveLayerTo(d, l.id, target);
+          const p = locate(d.layers, l.id)!;
+          const target = { forward: p.index + 1, backward: p.index - 1, front: p.siblings.length - 1, back: 0 }[to];
+          return target === p.index || target < 0 || target >= p.siblings.length ? d : moveLayerTo(d, l.id, target);
         });
       }),
-      /** Drops a layer directly above or below another (Layers panel drag and drop). */
-      moveLayer: whenIdle((id: string, targetId: string, placement: "above" | "below") =>
+      /** Drops a layer above or below another, or into a group (Layers panel drag and drop). */
+      moveLayer: whenIdle((id: string, targetId: string, placement: LayerPlacement) =>
         edit("Layer Order", (d) => moveLayerRelative(d, id, targetId, placement)),
       ),
-      selectLayer: whenIdle((id: string) => {
+      /** Selects a layer, targeting its pixels or (`mask`) its mask. Not a history step, as in Photoshop. */
+      selectLayer: whenIdle((id: string, mask: boolean = false) => {
         cancelTool();
         const s = active();
-        // Selecting a layer isn't a history step in Photoshop; update the current entry in place.
-        if (!s || s.doc().activeLayerId === id) return;
-        s.setHistory((h) => replaceCurrent(h, { ...currentDoc(h), activeLayerId: id }));
+        const d = s?.doc();
+        if (!s || !d || (d.activeLayerId === id && !!d.maskTargeted === mask)) return;
+        s.setHistory((h) => replaceCurrent(h, { ...currentDoc(h), activeLayerId: id, maskTargeted: mask }));
       }),
-      setLayerProps: whenIdle((id: string, patch: Partial<Pick<Layer, "name" | "visible" | "opacity" | "blendMode">>) => {
+      setLayerProps: whenIdle((id: string, patch: Partial<Pick<Layer, "name" | "visible" | "opacity" | "blendMode">> & { blendMode?: LayerBlendMode }) => {
         const [label, key] =
           "opacity" in patch ? ["Opacity Change", `opacity:${id}`]
           : "blendMode" in patch ? ["Blending Change", null]
@@ -1066,6 +1146,130 @@ export function createEditor() {
           : ["Rename Layer", null];
         edit(label, (d) => updateLayer(d, id, patch), key);
       }),
+      /** Expands or collapses a group in the Layers panel (not a history step). */
+      setGroupOpen(id: string, open: boolean) {
+        const s = active();
+        const g = s && layerById(s.doc(), id);
+        if (!s || !g || !isGroup(g) || g.content.open === open) return;
+        s.setHistory((h) => replaceCurrent(h, updateLayer(currentDoc(h), id, { content: { ...g.content, open } })));
+      },
+
+      // Groups
+      /** New Group: an empty group above the active layer. */
+      newGroup: whenIdle(() => edit("New Group", (d) => addLayer(d, createGroup(numberedName(d, "Group")), d.activeLayerId, "above"))),
+      /** Group Layers (Ctrl+G). */
+      groupLayers: whenIdle((ids?: readonly string[]) => edit("Group Layers", (d) => groupLayers(d, ids ?? [d.activeLayerId]))),
+      /** Ungroup Layers (Shift+Ctrl+G). */
+      ungroup: whenIdle(() =>
+        edit("Ungroup Layers", (d) => {
+          const l = activeLayer(d);
+          return l && isGroup(l) ? ungroup(d, l.id) : d;
+        }),
+      ),
+
+      // Clipping masks
+      /**
+       * Create/Release Clipping Mask (Alt+Ctrl+G), or Alt-clicking between
+       * layers: clips a layer to the one below; on a clipped layer, releases
+       * it and the clipped layers above it, as Photoshop does.
+       */
+      toggleClippingMask: whenIdle((id?: string) =>
+        edit("Clipping Mask", (d) => {
+          const p = locate(d.layers, id ?? d.activeLayerId);
+          if (!p || p.index === 0) return d;
+          const l = p.siblings[p.index];
+          if (!l.clipped) return updateLayer(d, l.id, { clipped: true });
+          let out = d;
+          for (let i = p.index; i < p.siblings.length && p.siblings[i].clipped; i++) out = updateLayer(out, p.siblings[i].id, { clipped: false });
+          return out;
+        }),
+      ),
+
+      // Layer masks
+      /**
+       * Add Layer Mask: Reveal All, or from the selection (Reveal Selection).
+       * `hide` (Alt-click) gives Hide All / Hide Selection. The mask becomes
+       * the target, and the selection is dropped, as in Photoshop.
+       */
+      addMask: whenIdle((hide: boolean = false) =>
+        edit("Add Layer Mask", (d) => {
+          const l = activeLayer(d);
+          if (!l || l.mask) return d;
+          return { ...updateLayer(d, l.id, { mask: maskFor(d, hide) }), maskTargeted: true, selection: null };
+        }),
+      ),
+      deleteMask: whenIdle(() =>
+        edit("Delete Layer Mask", (d) => {
+          const l = activeLayer(d);
+          return l?.mask ? { ...updateLayer(d, l.id, { mask: null }), maskTargeted: false } : d;
+        }),
+      ),
+      /** Apply Layer Mask: into a pixel layer's transparency. */
+      applyMask: whenIdle(() =>
+        edit("Apply Layer Mask", (d) => {
+          const l = activeLayer(d);
+          if (!l?.mask || l.content.kind !== "pixels") return d;
+          return { ...updateLayer(d, l.id, { pixels: l.mask.enabled ? applyMask(l.pixels, l.mask) : l.pixels, mask: null }), maskTargeted: false };
+        }),
+      ),
+      /** Disable/Enable Layer Mask (Shift-click its thumbnail), and linking it to the layer. */
+      setMaskProps: whenIdle((id: string, patch: Partial<Pick<LayerMask, "enabled" | "linked">>) =>
+        edit("enabled" in patch ? (patch.enabled ? "Enable Layer Mask" : "Disable Layer Mask") : patch.linked ? "Link" : "Unlink", (d) => {
+          const l = layerById(d, id);
+          return l?.mask ? updateLayer(d, id, { mask: { ...l.mask, ...patch } }) : d;
+        }),
+      ),
+
+      // Adjustments
+      /**
+       * New adjustment layer above the active layer, with Photoshop's
+       * defaults; its mask is the selection (else Reveal All).
+       */
+      newAdjustmentLayer: whenIdle((kind: AdjustmentKind) =>
+        edit(`New ${adjustmentLabel(kind)} Layer`, (d) => {
+          const layer = createLayer({
+            name: numberedName(d, adjustmentLabel(kind)),
+            content: { kind: "adjustment", adjustment: defaultAdjustment(kind, foreground(), background()) },
+            mask: maskFor(d, false),
+          });
+          return { ...addLayer(d, layer, d.activeLayerId, "above"), maskTargeted: false };
+        }),
+      ),
+      /** Changes an adjustment layer's settings (the Properties panel); consecutive changes coalesce. */
+      setAdjustment: whenIdle((id: string, adjustment: Adjustment) =>
+        edit(adjustmentLabel(adjustment.kind), (d) => (layerById(d, id)?.content.kind === "adjustment" ? updateLayer(d, id, { content: { kind: "adjustment", adjustment } }) : d), `adjust:${id}`),
+      ),
+      /**
+       * Image ▸ Adjustments' live preview: the adjustment over the active
+       * layer only (within the selection), drawn by the compositor. Null ends it.
+       */
+      previewAdjustment(adjustment: Adjustment | null) {
+        const s = active();
+        if (!s || pending > 0) return;
+        const d = s.doc();
+        const t = editTarget(d);
+        if (!adjustment || !t || t.mask || t.layer.content.kind !== "pixels") return s.setPreview(null), renderRequested();
+        const probe = createLayer({ name: "", content: { kind: "adjustment", adjustment }, clipped: true, mask: d.selection ? maskFor(d, false) : null });
+        s.setPreview(addLayer(d, probe, t.layer.id, "above"));
+        renderRequested();
+      },
+      /**
+       * Image ▸ Adjustments: applies an adjustment to the edit target's
+       * pixels (or its mask), within the selection. Computed on the GPU.
+       */
+      applyAdjustment: whenIdle((adjustment: Adjustment) => applyProgram(adjustmentLabel(adjustment.kind), () => compile(adjustment))),
+      /** Image ▸ Adjustments ▸ Desaturate: each pixel to its HSL lightness, as Photoshop does. */
+      desaturate: whenIdle(() => {
+        const hs = defaultAdjustment("hue-saturation") as Extract<Adjustment, { kind: "hue-saturation" }>;
+        applyProgram("Desaturate", () => compile({ ...hs, master: { ...hs.master, saturation: -100 } }));
+      }),
+      /** Image ▸ Adjustments ▸ Equalize: spreads the target's values (within the selection) evenly over the range. */
+      equalize: whenIdle(() => applyProgram("Equalize", (t, d) => {
+        const c = equalizeCurve(histogram(t.pixels, d.selection));
+        return { kind: "curves", r: c, g: c, b: c, luma: false, preserveLuminosity: false };
+      })),
+          mergeLabel: () => (active() ? mergeLabel(active()!.doc()) : null),
     };
+    return editor;
   });
 }

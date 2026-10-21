@@ -80,10 +80,16 @@ export const toPlacement = (s: TransformState): Placement => ({ source: s.source
 
 export const sourceFloating = (s: SmartSource): Floating => ({ pixels: s.pixels, bounds: rect(0, 0, s.width, s.height) });
 
-/** Renders non-pixel content through its placement, clipped to the canvas. */
+/** Content rendered through a placement: smart objects and shapes. */
+export type PlacedContent = Extract<LayerContent, { kind: "smart" | "shape" }>;
+export const isPlaced = (c: LayerContent): c is PlacedContent => c.kind === "smart" || c.kind === "shape";
+
+/** Renders placed content through its placement, clipped to the canvas (null for anything else). */
 export async function renderContent(content: LayerContent, clip: Rect, r: Rasterizers, filter: Filter = "bicubic"): Promise<Pixels | null> {
   switch (content.kind) {
     case "pixels":
+    case "group":
+    case "adjustment":
       return null;
     case "shape":
       return r.shape(content.geometry, content.style, placementMapping(content.placement), clip);

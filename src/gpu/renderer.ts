@@ -1,24 +1,37 @@
-import { blendModeIndex, type BlendMode } from "../core/blend";
+import { lookup, type Program } from "../core/adjustments";
+import { blendModeIndex, effectiveMode } from "../core/blend";
+import { programOf } from "../core/composite";
 import { placementMapping, wholePixelMove } from "../core/content";
 import type { Layer, LayerContent } from "../core/document";
+import { hasPixels, isClipped, isGroup, walk } from "../core/layers";
 import { shapeSegments, type ShapeGeometry, type ShapeStyle } from "../core/shape";
 import { createVectorRasterizer } from "./vector";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect, type Vec2 } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
-import { NO_PIXELS, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, tileKey, tileRect, pixelsFromImage, tilesIn, type Tile, type TileKey, type Pixels } from "../core/pixels";
+import { NO_PIXELS, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, storedBounds, tileKey, tileRect, tileWriter, pixelsFromImage, tilesIn, writeRect, type Tile, type TileKey, type Pixels } from "../core/pixels";
 import { tessellate, type Mapping } from "../core/warp";
-import { ATLAS_PAGE, CLEAR_WGSL, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, tilesWgsl } from "./shaders";
+import { ADJUST_KINDS, ATLAS_PAGE, ATOP, COMPOSE_WGSL, MASK_A, MASK_B, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, fillWgsl, tilesWgsl } from "./shaders";
 
-/** Pixels drawn through a mapping above a given layer (Free Transform / Move preview). */
-export interface FloatingLayer {
+/** Pixels drawn through a mapping. */
+export interface FloatingPixels {
   readonly pixels: Pixels;
-  /** Bounds of `tiles`' content; also the mapping's source rectangle. */
+  /** Bounds of the pixels' content; also the mapping's source rectangle. */
   readonly bounds: Rect;
   readonly mapping: Mapping;
-  readonly aboveLayerId: string;
-  readonly opacity: number;
-  readonly blendMode: BlendMode;
+}
+
+/**
+ * Pixels being transformed as part of a layer (Free Transform / Move
+ * preview): drawn over the layer's own pixels, so with its blend mode,
+ * opacity, mask and clipping, and likewise over its mask's.
+ */
+export interface FloatingLayer {
+  readonly layerId: string;
+  readonly pixels: FloatingPixels | null;
+  readonly mask: FloatingPixels | null;
+  /** Layers drawn moved by whole document pixels, with their linked masks (a group being moved). */
+  readonly shift?: { readonly ids: ReadonlySet<string>; readonly by: Vec2 };
 }
 
 export interface Scene {
@@ -52,6 +65,11 @@ export interface Renderer {
    * tiles, clipped to `clip` (a committed shape layer's pixels).
    */
   rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<Pixels>;
+  /**
+   * Applies an adjustment program to pixels (Image ▸ Adjustments) within
+   * the selection's coverage, on the GPU: the same shader as adjustment layers.
+   */
+  adjust(pixels: Pixels, program: Program, selection: Mask | null): Promise<Pixels>;
   /** Reads back the composite as straight RGBA8 (for tests and debugging). */
   readComposite(): Promise<Uint8ClampedArray>;
   /** Resolves once the most recently rendered frame is on screen. */
@@ -99,6 +117,10 @@ const ACCUM_FORMAT: GPUTextureFormat = "rgba16float";
 const UNIFORM_SLOT = 256; // minUniformBufferOffsetAlignment
 const TILE_UNIFORM_SIZE = 32; // sizeof(Draw), rounded up
 const MESH_UNIFORM_SIZE = 48; // sizeof(Mesh)
+const MASK_FORMAT: GPUTextureFormat = "r8unorm";
+const LUT_FORMAT: GPUTextureFormat = "rgba32float";
+/** The atlas key of a layer's mask tiles. */
+const maskKey = (id: string) => `${id}#mask`;
 const WORKSPACE = [0.16, 0.16, 0.17, 1];
 /** The workspace around the canvas, for overlays that match it (the crop shield). */
 export const WORKSPACE_CSS = `rgb(${WORKSPACE.slice(0, 3).map((v) => Math.round(v * 255)).join(" ")})`;
@@ -121,6 +143,24 @@ const PREMULTIPLIED_OVER: GPUBlendState = {
   color: { srcFactor: "one", dstFactor: "one-minus-src-alpha" },
   alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" },
 };
+/** Source-atop: the destination keeps its alpha (Normal-mode clipped layers). */
+const PREMULTIPLIED_ATOP: GPUBlendState = {
+  color: { srcFactor: "dst-alpha", dstFactor: "one-minus-src-alpha" },
+  alpha: { srcFactor: "zero", dstFactor: "one" },
+};
+/** Destination-in by the source's alpha: multiplies the target by mask coverage. */
+const DESTINATION_IN: GPUBlendState = {
+  color: { srcFactor: "zero", dstFactor: "src-alpha" },
+  alpha: { srcFactor: "zero", dstFactor: "src-alpha" },
+};
+
+/** An adjustment program on the GPU: its kind, parameters and lookup textures. */
+interface AdjustResources {
+  readonly kind: number;
+  readonly params: Float32Array;
+  readonly lut: GPUTexture | null;
+  readonly lut3: GPUTexture | null;
+}
 
 interface LayerEntry {
   /** What's in the atlas for each on-canvas tile (tile is null for tiles the GPU rasterized). */
@@ -135,7 +175,6 @@ interface LayerEntry {
   instances: GPUBuffer | null;
   instanceCount: number;
   instancesDirty: boolean;
-  props: string;
 }
 
 interface FloatingTexture {
@@ -165,6 +204,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
     ],
   });
   // Quality reduction under GPU memory pressure: tiles are stored at
@@ -174,7 +215,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   let slotsPerSide = ATLAS_PAGE / slotSize;
   let slotsPerPage = slotsPerSide * slotsPerSide;
   let tilesModule = module(tilesWgsl(slotSize));
-  const tilePipeline = (entryPoint: string, blend?: GPUBlendState) =>
+  const tilePipeline = (entryPoint: string, blend?: GPUBlendState, format = ACCUM_FORMAT) =>
     device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [tileLayout] }),
       vertex: {
@@ -182,10 +223,15 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         entryPoint: "vs",
         buffers: [{ arrayStride: 12, stepMode: "instance", attributes: [{ shaderLocation: 0, offset: 0, format: "sint32x3" }] }],
       },
-      fragment: { module: tilesModule, entryPoint, targets: [{ format: ACCUM_FORMAT, blend }] },
+      fragment: { module: tilesModule, entryPoint, targets: [{ format, blend }] },
     });
-  let tileNormal = tilePipeline("fs_normal", PREMULTIPLIED_OVER);
-  let tileMode = tilePipeline("fs_mode");
+  const tilePipelines = () => ({
+    normal: tilePipeline("fs_normal", PREMULTIPLIED_OVER),
+    atop: tilePipeline("fs_normal", PREMULTIPLIED_ATOP),
+    mode: tilePipeline("fs_mode"),
+    mask: tilePipeline("fs_mask", PREMULTIPLIED_OVER, MASK_FORMAT),
+  });
+  let tile = tilePipelines();
 
   const meshLayout = device.createBindGroupLayout({
     entries: [
@@ -193,6 +239,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
     ],
   });
   const meshModule = module(MESH_WGSL);
@@ -210,7 +258,38 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       fragment: { module: meshModule, entryPoint, targets: [{ format, blend }] },
     });
   const meshPreview = meshPipeline("fs_preview", ACCUM_FORMAT, PREMULTIPLIED_OVER);
+  const meshPreviewAtop = meshPipeline("fs_preview", ACCUM_FORMAT, PREMULTIPLIED_ATOP);
   const meshPreviewMode = meshPipeline("fs_preview_mode", ACCUM_FORMAT);
+  const meshMask = meshPipeline("fs_preview", MASK_FORMAT, PREMULTIPLIED_OVER);
+
+  const composeLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
+      ...[1, 2, 3, 4].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+    ],
+  });
+  const composeModule = module(COMPOSE_WGSL);
+  const composePipeline = (entryPoint: string, blend?: GPUBlendState) =>
+    device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [composeLayout] }),
+      vertex: { module: composeModule, entryPoint: "vs" },
+      fragment: { module: composeModule, entryPoint, targets: [{ format: ACCUM_FORMAT, blend }] },
+    });
+  const adjustPixelsPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [composeLayout] }),
+    vertex: { module: composeModule, entryPoint: "vs" },
+    fragment: { module: composeModule, entryPoint: "fs_adjust_pixels", targets: [{ format: "rgba8unorm" }] },
+  });
+  const compose = {
+    over: composePipeline("fs_layer_src", PREMULTIPLIED_OVER),
+    atop: composePipeline("fs_layer_src", PREMULTIPLIED_ATOP),
+    mode: composePipeline("fs_layer"),
+    lerp: composePipeline("fs_lerp"),
+    applyMask: composePipeline("fs_apply_mask", DESTINATION_IN),
+    adjust: composePipeline("fs_adjust"),
+  };
   const meshCommit = meshPipeline("fs_commit", "rgba8unorm");
 
   const fullscreen = (code: string, format: GPUTextureFormat) => {
@@ -221,7 +300,12 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       fragment: { module: m, entryPoint: "fs", targets: [{ format }] },
     });
   };
-  const clearPipeline = fullscreen(CLEAR_WGSL, ACCUM_FORMAT);
+  const clearPipeline = fullscreen(fillWgsl(0), ACCUM_FORMAT);
+  const maskFill = [fullscreen(fillWgsl(0), MASK_FORMAT), fullscreen(fillWgsl(1), MASK_FORMAT)];
+  const texture = (format: GPUTextureFormat, size: number[], dimension: GPUTextureDimension = "2d") =>
+    device.createTexture({ size, format, dimension, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  // Stand-ins for bindings a draw doesn't use.
+  const dummy = { color: texture(ACCUM_FORMAT, [1, 1]), mask: texture(MASK_FORMAT, [1, 1]), lut: texture(LUT_FORMAT, [1, 1]), lut3: texture(LUT_FORMAT, [1, 1, 1], "3d") };
   const premultiplyPipeline = fullscreen(PREMULTIPLY_WGSL, ACCUM_FORMAT);
   const mipPipeline = fullscreen(MIP_WGSL, ACCUM_FORMAT);
   const presentPipeline = fullscreen(PRESENT_WGSL, output.format);
@@ -307,34 +391,54 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   };
   let accum: GPUTexture | null = null;
   let scratch: GPUTexture | null = null;
+  /** Layer mask coverage at composite resolution: a layer's own (A) and its clipping base's (B). */
+  let masks: [GPUTexture, GPUTexture] | null = null;
+  /** Intermediate surfaces for groups and clipping groups, one per nesting depth in use (allocated as needed). */
+  const surfaces: GPUTexture[] = [];
   let selectionTexture: GPUTexture | null = null;
   let mipCount = 1;
   let mipsDirty = EMPTY_RECT;
   let tileBindGroup: GPUBindGroup | null = null;
+  /** For drawing mask tiles: the mask textures themselves are render targets then. */
+  let maskTileBindGroup: GPUBindGroup | null = null;
   let presentBindGroup: GPUBindGroup | null = null;
   const layers = new Map<string, LayerEntry>();
-  let floating: FloatingTexture | null = null;
-  let floatingBindGroup: GPUBindGroup | null = null;
-  let mesh: MeshBuffers | null = null;
-  let lastOrder = "";
+  /** Floating pixels' textures and meshes, cached by identity: a layer's, and its mask's. */
+  interface Float {
+    texture: FloatingTexture | null;
+    mesh: MeshBuffers | null;
+    bindGroup: GPUBindGroup | null;
+  }
+  const floats: Record<"pixels" | "mask", Float> = {
+    pixels: { texture: null, mesh: null, bindGroup: null },
+    mask: { texture: null, mesh: null, bindGroup: null },
+  };
   let lastFloating: FloatingLayer | null = null;
   let lastSelection: Mask | null | undefined = undefined;
   let selectionBounds = EMPTY_RECT;
 
   function rebuildBindGroups() {
     if (!accum) return;
-    tileBindGroup = device.createBindGroup({
-      layout: tileLayout,
-      entries: [
-        { binding: 0, resource: { buffer: drawUniforms, size: TILE_UNIFORM_SIZE } },
-        { binding: 1, resource: atlas.createView({ dimension: "2d-array" }) },
-        { binding: 2, resource: scratch!.createView() },
-      ],
-    });
-    floatingBindGroup = floating ? meshBindGroup(floating.texture, drawUniforms) : null;
+    const tiles = (a: GPUTexture, b: GPUTexture) =>
+      device.createBindGroup({
+        layout: tileLayout,
+        entries: [
+          { binding: 0, resource: { buffer: drawUniforms, size: TILE_UNIFORM_SIZE } },
+          { binding: 1, resource: atlas.createView({ dimension: "2d-array" }) },
+          { binding: 2, resource: scratch!.createView() },
+          { binding: 3, resource: a.createView() },
+          { binding: 4, resource: b.createView() },
+        ],
+      });
+    tileBindGroup = tiles(...masks!);
+    maskTileBindGroup = tiles(dummy.mask, dummy.mask);
+    for (const [k, f] of Object.entries(floats)) f.bindGroup = f.texture && floatBindGroup(k === "mask", f.texture.texture);
   }
 
-  const meshBindGroup = (texture: GPUTexture, uniforms: GPUBuffer) =>
+  /** A floating texture's bind group; a mask's has no mask textures bound, as it draws into one. */
+  const floatBindGroup = (mask: boolean, texture: GPUTexture) => meshBindGroup(texture, drawUniforms, mask);
+
+  const meshBindGroup = (texture: GPUTexture, uniforms: GPUBuffer, forMask = false) =>
     device.createBindGroup({
       layout: meshLayout,
       entries: [
@@ -342,6 +446,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         { binding: 1, resource: texture.createView() },
         { binding: 2, resource: trilinear },
         { binding: 3, resource: scratch!.createView() },
+        { binding: 4, resource: (forMask ? dummy.mask : masks![0]).createView() },
+        { binding: 5, resource: (forMask ? dummy.mask : masks![1]).createView() },
       ],
     });
 
@@ -367,6 +473,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     accum?.destroy();
     scratch?.destroy();
     selectionTexture?.destroy();
+    masks?.forEach((t) => t.destroy());
+    for (const t of surfaces.splice(0)) t.destroy();
     size = { width, height };
     // A document beyond the device's texture size can only be shown reduced.
     const maxDim = device.limits.maxTextureDimension2D;
@@ -375,7 +483,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     mipCount = Math.floor(Math.log2(Math.max(px.width, px.height))) + 1;
     allocating(() => createDocumentTextures(width, height));
     rebuildBindGroups();
-    lastOrder = "";
+    lastStructure = "";
     lastFloating = null;
     lastSelection = undefined;
     selectionBounds = EMPTY_RECT;
@@ -393,6 +501,9 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       format: ACCUM_FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    const mask = () =>
+      device.createTexture({ size: [px.width, px.height], format: MASK_FORMAT, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
+    masks = [mask(), mask()];
     selectionTexture = device.createTexture({
       size: [width, height],
       format: "r8unorm",
@@ -416,8 +527,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     slotsPerSide = ATLAS_PAGE / slotSize;
     slotsPerPage = slotsPerSide * slotsPerSide;
     tilesModule = module(tilesWgsl(slotSize));
-    tileNormal = tilePipeline("fs_normal", PREMULTIPLIED_OVER);
-    tileMode = tilePipeline("fs_mode");
+    tile = tilePipelines();
     for (const entry of layers.values()) freeLayer(entry);
     layers.clear();
     freeSlots.length = 0;
@@ -425,8 +535,10 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     atlas.destroy();
     pages = 1;
     atlas = createAtlas(pages);
-    floating?.texture.destroy();
-    floating = null;
+    for (const f of Object.values(floats)) {
+      f.texture?.texture.destroy();
+      f.texture = null;
+    }
     lastFloating = null;
     options.onLevelChange?.(level);
   }
@@ -565,41 +677,56 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return dirty;
   }
 
+  const entryFor = (key: string): LayerEntry => {
+    let entry = layers.get(key);
+    if (!entry) {
+      entry = { slots: new Map(), instances: null, instanceCount: 0, instancesDirty: true, shape: null, shapeBounds: EMPTY_RECT, shapeExtent: EMPTY_RECT, offset: ZERO };
+      layers.set(key, entry);
+    }
+    return entry;
+  };
+
+  /** Everything about the layer tree that changes the composite beyond its pixels (any change redraws it all). */
+  let lastStructure = "";
+  const adjustmentIds = new WeakMap<object, number>();
+  let nextAdjustmentId = 0;
+  const structureOf = (ls: readonly Layer[]): string =>
+    ls
+      .map((l) => {
+        const m = l.mask;
+        const c = l.content;
+        let s = `${l.id}|${l.visible}|${l.opacity}|${l.blendMode}|${l.clipped}|${m ? `${m.enabled}${m.background}` : ""}`;
+        if (c.kind === "adjustment") {
+          let n = adjustmentIds.get(c.adjustment);
+          if (n === undefined) adjustmentIds.set(c.adjustment, (n = nextAdjustmentId++));
+          s += `|a${n}`;
+        }
+        return c.kind === "group" ? `${s}[${structureOf(c.layers)}]` : s;
+      })
+      .join(",");
+
+  /** Uploads what changed of every layer's pixels and mask; returns the area that changed. */
   function syncLayers(scene: Scene): Rect {
     const full = rect(0, 0, size.width, size.height);
     let dirty = EMPTY_RECT;
     const seen = new Set<string>();
-
-    for (const layer of scene.layers) {
-      seen.add(layer.id);
-      let entry = layers.get(layer.id);
-      if (!entry) {
-        entry = {
-          slots: new Map(),
-          instances: null,
-          instanceCount: 0,
-          instancesDirty: true,
-          props: "",
-          shape: null,
-          shapeBounds: EMPTY_RECT,
-          shapeExtent: EMPTY_RECT,
-          offset: ZERO,
-        };
-        layers.set(layer.id, entry);
+    const programs = new Set<Program>();
+    for (const layer of walk(scene.layers)) {
+      if (hasPixels(layer)) {
+        seen.add(layer.id);
+        const entry = entryFor(layer.id);
+        // Hidden layers keep no GPU copy; showing one uploads it again.
+        if (!layer.visible) releaseSlots(entry);
+        else dirty = union(dirty, layer.content.kind === "shape" ? syncShape(entry, layer.content) : syncLayer(entry, layer.pixels));
       }
-      // Hidden layers keep no GPU copy; showing one uploads it again.
-      if (!layer.visible) releaseSlots(entry);
-      const content = layer.content;
-      const changed = !layer.visible ? EMPTY_RECT
-        : content.kind === "shape" ? syncShape(entry, content)
-        : syncLayer(entry, layer.pixels);
-      const props = `${layer.visible}|${layer.opacity}|${layer.blendMode}`;
-      if (props !== entry.props) {
-        entry.props = props;
-        dirty = full;
-      } else {
-        dirty = union(dirty, changed);
+      if (layer.mask) {
+        const key = maskKey(layer.id);
+        seen.add(key);
+        const entry = entryFor(key);
+        if (!layer.visible || !layer.mask.enabled) releaseSlots(entry);
+        else dirty = union(dirty, syncLayer(entry, layer.mask.pixels));
       }
+      if (layer.content.kind === "adjustment") programs.add(programOf(layer));
     }
     for (const [id, entry] of layers) {
       if (seen.has(id)) continue;
@@ -607,28 +734,91 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       layers.delete(id);
       dirty = full;
     }
+    for (const [p, r] of adjustments) {
+      if (programs.has(p)) continue;
+      r.lut?.destroy();
+      r.lut3?.destroy();
+      adjustments.delete(p);
+    }
     flushShapes();
-    const order = scene.layers.map((l) => l.id).join("/");
-    if (order !== lastOrder) {
-      lastOrder = order;
+    const structure = structureOf(scene.layers);
+    if (structure !== lastStructure) {
+      lastStructure = structure;
       dirty = full;
     }
     return dirty;
   }
 
-  /** The preview's premultiplied, mipmapped texture of floating pixels, at the display's quality (cached by tile-map identity). */
-  function floatingTexture(source: Pixels, bounds: Rect): FloatingTexture {
-    // Keyed by what was uploaded: the same tiles over a different region (a preview window, then the whole layer) are a different texture.
-    const b = floating?.bounds;
-    if (floating && floating.source === source && floating.level === level && b!.x === bounds.x && b!.y === bounds.y && b!.w === bounds.w && b!.h === bounds.h) {
-      return floating;
+  const adjustments = new Map<Program, AdjustResources>();
+
+  /** An adjustment program's GPU form, cached while adjustment layers use it. */
+  function adjustResources(p: Program): AdjustResources {
+    let r = adjustments.get(p);
+    if (!r) adjustments.set(p, (r = buildAdjust(p)));
+    return r;
+  }
+
+  /** An adjustment program's GPU form: parameters, and curves or a 3D LUT as textures. */
+  function buildAdjust(p: Program): AdjustResources {
+    const kind = ADJUST_KINDS.indexOf(p.kind);
+    let params: number[] = [];
+    let lut: GPUTexture | null = null, lut3: GPUTexture | null = null;
+    const lutTexture = (rgba: Float32Array, n: number) => {
+      const t = texture(LUT_FORMAT, [n, 1]);
+      device.queue.writeTexture({ texture: t }, rgba as Float32Array<ArrayBuffer>, { bytesPerRow: n * 16 }, [n, 1]);
+      return t;
+    };
+    switch (p.kind) {
+      case "curves": {
+        const n = Math.max(p.r.length, p.g.length, p.b.length);
+        const at = (c: Float32Array, i: number) => (c.length === n ? c[i] : lookup(c, i / (n - 1)));
+        const rgba = new Float32Array(n * 4);
+        for (let i = 0; i < n; i++) rgba.set([at(p.r, i), at(p.g, i), at(p.b, i)], i * 4);
+        lut = lutTexture(rgba, n);
+        params = [+p.luma, +p.preserveLuminosity, n];
+        break;
+      }
+      case "hue-saturation":
+        lut = lutTexture(p.map, p.map.length / 4);
+        params = [p.lift, p.keep, +p.colorize, p.map.length / 4];
+        break;
+      case "vibrance":
+        params = [p.luma, p.chroma];
+        break;
+      case "selective-color":
+        params = [...p.table];
+        break;
+      case "black-white":
+        params = [...p.weights, +p.tint, p.hue, p.hueLuma, p.chroma, p.low, p.high];
+        break;
+      case "channel-mixer":
+        params = [...p.matrix];
+        break;
+      case "lut3d": {
+        const n = p.size;
+        const rgba = new Float32Array(n * n * n * 4);
+        for (let i = 0; i < n * n * n; i++) rgba.set(p.data.subarray(i * 3, i * 3 + 3), i * 4);
+        lut3 = texture(LUT_FORMAT, [n, n, n], "3d");
+        device.queue.writeTexture({ texture: lut3 }, rgba, { bytesPerRow: n * 16, rowsPerImage: n }, [n, n, n]);
+        params = [n];
+        break;
+      }
     }
-    floating?.texture.destroy();
-    floating = null;
-    const f = allocating(() => buildFloating(source, bounds, level));
-    floating = f;
-    floatingBindGroup = accum ? meshBindGroup(f.texture, drawUniforms) : null;
-    return f;
+    return { kind, params: Float32Array.from(params), lut, lut3 };
+  }
+
+  /** The preview's premultiplied, mipmapped texture of floating pixels, at the display's quality (cached by tile-map identity). */
+  function floatingTexture(slot: "pixels" | "mask", source: Pixels, bounds: Rect): FloatingTexture {
+    const f = floats[slot];
+    // Keyed by what was uploaded: the same tiles over a different region (a preview window, then the whole layer) are a different texture.
+    const t = f.texture;
+    if (t && t.source === source && t.level === level && t.bounds.x === bounds.x && t.bounds.y === bounds.y && t.bounds.w === bounds.w && t.bounds.h === bounds.h) return t;
+    t?.texture.destroy();
+    f.texture = null;
+    const built = allocating(() => buildFloating(source, bounds, level));
+    f.texture = built;
+    f.bindGroup = accum ? floatBindGroup(slot === "mask", built.texture) : null;
+    return built;
   }
 
   /**
@@ -696,33 +886,40 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     pass.end();
   }
 
-  function meshBuffers(mapping: Mapping): MeshBuffers {
-    if (mesh && mesh.mapping === mapping) return mesh;
-    mesh?.positions.destroy();
-    mesh?.uvs.destroy();
-    mesh?.indices.destroy();
+  function createMesh(mapping: Mapping): MeshBuffers {
     const m = tessellate(mapping);
     const buffer = (data: Float32Array | Uint32Array, usage: number) => {
       const b = device.createBuffer({ size: Math.max(16, data.byteLength), usage: usage | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(b, 0, data as Float32Array<ArrayBuffer>);
       return b;
     };
-    mesh = {
+    return {
       mapping,
       positions: buffer(m.positions, GPUBufferUsage.VERTEX),
       uvs: buffer(m.uvs, GPUBufferUsage.VERTEX),
       indices: buffer(m.indices, GPUBufferUsage.INDEX),
       count: m.indices.length,
     };
-    return mesh;
   }
+
+  const destroyMesh = (m: MeshBuffers | null) => {
+    m?.positions.destroy();
+    m?.uvs.destroy();
+    m?.indices.destroy();
+  };
 
   function syncFloating(f: FloatingLayer | null): Rect {
     if (f === lastFloating) return EMPTY_RECT;
     lastFloating = f;
-    if (f && !isEmpty(f.bounds)) {
-      floatingTexture(f.pixels, f.bounds);
-      meshBuffers(f.mapping);
+    for (const slot of ["pixels", "mask"] as const) {
+      const p = f?.[slot];
+      if (!p || isEmpty(p.bounds)) continue;
+      floatingTexture(slot, p.pixels, p.bounds);
+      const fl = floats[slot];
+      if (fl.mesh?.mapping !== p.mapping) {
+        destroyMesh(fl.mesh);
+        fl.mesh = createMesh(p.mapping);
+      }
     }
     return rect(0, 0, size.width, size.height);
   }
@@ -742,87 +939,252 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
   // --- Compositing -----------------------------------------------------------
 
-  function writeMeshUniform(target: ArrayBuffer, offset: number, viewport: Rect, f: FloatingTexture, opacity: number, mode: number, filter: number) {
+  function writeMeshUniform(target: ArrayBuffer, offset: number, viewport: Rect, f: FloatingTexture, opacity: number, mode: number, filter: number, flags = 0) {
     new Float32Array(target, offset, 7).set([viewport.x, viewport.y, viewport.w, viewport.h, f.bounds.w, f.bounds.h, opacity]);
     new Uint32Array(target, offset + 28, 2).set([mode, filter]);
     new Float32Array(target, offset + 36, 1)[0] = f.mipCount - 1;
+    new Uint32Array(target, offset + 40, 1)[0] = flags;
   }
 
+  /** One GPU step of a composite, in order. Draws into `target` (a surface, or the composite's level 0). */
+  type Op =
+    | { kind: "fill"; target: GPUTexture; pipeline: GPURenderPipeline }
+    | { kind: "copy"; from: GPUTexture; to: GPUTexture }
+    | { kind: "tiles"; target: GPUTexture; pipeline: GPURenderPipeline; bindGroup: GPUBindGroup; entry: LayerEntry; slot: number }
+    | { kind: "mesh"; target: GPUTexture; pipeline: GPURenderPipeline; slot: number; float: Float }
+    | { kind: "step"; target: GPUTexture; pipeline: GPURenderPipeline; slot: number; src: GPUTexture; lut: GPUTexture | null; lut3: GPUTexture | null };
+
+  const surface = (depth: number): GPUTexture =>
+    (surfaces[depth] ??= allocating(() =>
+      device.createTexture({
+        size: [px.width, px.height],
+        format: ACCUM_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+      }),
+    ));
+
+  /**
+   * Composites the layer tree over `area`, as `core/composite.ts` does on
+   * the CPU (see there for the rules): planned as a list of GPU steps, then
+   * encoded. Groups and clipping groups render into intermediate surfaces;
+   * layer masks are drawn into coverage textures just before the draw that
+   * uses them; blend modes other than Normal read a copy of the target.
+   */
   function composite(scene: Scene, area: Rect) {
-    type Op =
-      | { kind: "tiles"; entry: LayerEntry; opacity: number; mode: number }
-      | { kind: "mesh"; opacity: number; mode: number };
     const ops: Op[] = [];
+    const uniforms: ((data: ArrayBuffer, at: number) => void)[] = [];
+    const slot = (write: (data: ArrayBuffer, at: number) => void) => uniforms.push(write) - 1;
     const f = scene.floating;
-    const hasFloating = !!(f && floating && mesh && !isEmpty(f.bounds));
-    for (const layer of scene.layers) {
-      const entry = layers.get(layer.id)!;
-      if (layer.visible && layer.opacity > 0 && entry.instanceCount > 0) {
-        ops.push({ kind: "tiles", entry, opacity: layer.opacity, mode: blendModeIndex(layer.blendMode) });
-      }
-      if (hasFloating && f!.aboveLayerId === layer.id) ops.push({ kind: "mesh", opacity: f!.opacity, mode: blendModeIndex(f!.blendMode) });
+    /** The floating layer or mask pixels drawn as part of layer `id`, if any. */
+    const floatOf = (id: string, which: "pixels" | "mask") => {
+      const p = f?.layerId === id ? f[which] : null;
+      const fl = floats[which];
+      return p && !isEmpty(p.bounds) && fl.texture && fl.mesh && fl.bindGroup ? fl : null;
+    };
+    const viewport = rect(0, 0, size.width, size.height);
+    const meshOp = (target: GPUTexture, pipeline: GPURenderPipeline, fl: Float, opacity: number, mode: number, flags: number) =>
+      ops.push({ kind: "mesh", target, pipeline, float: fl, slot: slot((data, at) => writeMeshUniform(data, at, viewport, fl.texture!, opacity, mode, 0, flags)) });
+    const [maskA, maskB] = masks!;
+    let depth = 0;
+
+    const shiftOf = (id: string) => (f?.shift?.ids.has(id) ? f.shift.by : ZERO);
+    const tileSlot = (entry: LayerEntry, opacity: number, mode: number, flags: number, shift = ZERO) =>
+      slot((data, at) => {
+        new Float32Array(data, at, 1)[0] = opacity;
+        new Uint32Array(data, at + 4, 1)[0] = mode;
+        new Float32Array(data, at + 8, 2).set([px.width, px.height]);
+        new Int32Array(data, at + 16, 2).set([(entry.offset.x + shift.x) >> level, (entry.offset.y + shift.y) >> level]);
+        new Uint32Array(data, at + 24, 1)[0] = flags;
+      });
+    const stepSlot = (opacity: number, mode: number, flags: number, kind = 0, params?: Float32Array) =>
+      slot((data, at) => {
+        new Float32Array(data, at, 1)[0] = opacity;
+        new Uint32Array(data, at + 4, 3).set([mode, flags, kind]);
+        if (params) new Float32Array(data, at + 16, params.length).set(params);
+      });
+    const step = (target: GPUTexture, pipeline: GPURenderPipeline, slotIndex: number, src = dummy.color, r?: AdjustResources) =>
+      ops.push({ kind: "step", target, pipeline, slot: slotIndex, src, lut: r?.lut ?? null, lut3: r?.lut3 ?? null });
+    const copyToScratch = (target: GPUTexture) => ops.push({ kind: "copy", from: target, to: scratch! });
+
+    /** Draws a layer's mask into coverage texture A (its own) or B (its clipping base's). */
+    function drawMask(l: Layer, which: 0 | 1) {
+      const target = which ? maskB : maskA;
+      ops.push({ kind: "fill", target, pipeline: maskFill[l.mask!.background ? 1 : 0] });
+      const entry = layers.get(maskKey(l.id));
+      const shift = l.mask!.linked ? shiftOf(l.id) : ZERO;
+      if (entry?.instanceCount) ops.push({ kind: "tiles", target, pipeline: tile.mask, bindGroup: maskTileBindGroup!, entry, slot: tileSlot(entry, 1, 0, 0, shift) });
+      const fl = floatOf(l.id, "mask");
+      if (fl) meshOp(target, meshMask, fl, 1, 0, 0);
     }
 
-    if (drawUniforms.size < ops.length * UNIFORM_SLOT) {
+    function stack(ls: readonly Layer[], target: GPUTexture) {
+      for (let i = 0; i < ls.length; i++) {
+        if (isClipped(ls, i)) continue;
+        let j = i + 1;
+        while (j < ls.length && ls[j].clipped) j++;
+        const base = ls[i];
+        if (!base.visible) continue;
+        const clipped = ls.slice(i + 1, j).filter((l) => l.visible);
+        if (clipped.length) clipGroup(base, clipped, target);
+        else layer(base, target);
+      }
+    }
+
+    function clipGroup(base: Layer, clipped: readonly Layer[], target: GPUTexture) {
+      const masked = !!base.mask?.enabled;
+      if (base.content.kind === "adjustment") {
+        layer(base, target);
+        for (const c of clipped) layer(c, target, masked ? base : null);
+        return;
+      }
+      const s = surface(depth++);
+      ops.push({ kind: "fill", target: s, pipeline: clearPipeline });
+      if (isGroup(base)) stack(base.content.layers, s);
+      else pixels(base, s, 1, 0, 0);
+      if (masked) {
+        drawMask(base, 0);
+        step(s, compose.applyMask, stepSlot(1, 0, MASK_A));
+      }
+      for (const c of clipped) layer(c, s, null, true);
+      composeSurface(s, target, base.opacity, blendModeIndex(effectiveMode(base.blendMode)), 0);
+      depth--;
+    }
+
+    function layer(l: Layer, target: GPUTexture, limit: Layer | null = null, atop = false) {
+      const own = !!l.mask?.enabled;
+      const flags = (atop ? ATOP : 0) | (own ? MASK_A : 0) | (limit ? MASK_B : 0);
+      const masks = () => {
+        if (own) drawMask(l, 0);
+        if (limit) drawMask(limit, 1);
+      };
+      const mode = blendModeIndex(effectiveMode(l.blendMode));
+      const c = l.content;
+      if (c.kind === "adjustment") {
+        const r = adjustResources(programOf(l));
+        masks();
+        copyToScratch(target);
+        return step(target, compose.adjust, stepSlot(l.opacity, mode, flags, r.kind, r.params), dummy.color, r);
+      }
+      if (c.kind === "group") {
+        if (l.blendMode === "pass through" && !atop) {
+          if (l.opacity >= 1 && !own && !limit) return stack(c.layers, target);
+          // Render through, then fade between the backdrop before and after.
+          const before = surface(depth++);
+          ops.push({ kind: "copy", from: target, to: before });
+          stack(c.layers, target);
+          masks();
+          copyToScratch(target);
+          step(target, compose.lerp, stepSlot(l.opacity, 0, flags), before);
+          depth--;
+          return;
+        }
+        const s = surface(depth++);
+        ops.push({ kind: "fill", target: s, pipeline: clearPipeline });
+        stack(c.layers, s);
+        masks();
+        composeSurface(s, target, l.opacity, mode, flags);
+        depth--;
+        return;
+      }
+      masks();
+      pixels(l, target, l.opacity, mode, flags);
+    }
+
+    /** A layer's own pixels (and the floating pixels being transformed as part of it). */
+    function pixels(l: Layer, target: GPUTexture, opacity: number, mode: number, flags: number) {
+      const entry = layers.get(l.id);
+      const fast = mode === 0;
+      const atop = (flags & ATOP) !== 0;
+      if (entry?.instanceCount) {
+        if (!fast) copyToScratch(target);
+        const pipeline = fast ? (atop ? tile.atop : tile.normal) : tile.mode;
+        ops.push({ kind: "tiles", target, pipeline, bindGroup: tileBindGroup!, entry, slot: tileSlot(entry, opacity, mode, flags, shiftOf(l.id)) });
+      }
+      const fl = floatOf(l.id, "pixels");
+      if (fl) {
+        if (!fast) copyToScratch(target);
+        meshOp(target, fast ? (atop ? meshPreviewAtop : meshPreview) : meshPreviewMode, fl, opacity, mode, flags);
+      }
+    }
+
+    /** A rendered surface (group, clipping group) blended onto `target` like a layer. */
+    function composeSurface(s: GPUTexture, target: GPUTexture, opacity: number, mode: number, flags: number) {
+      if (mode !== 0) copyToScratch(target);
+      const pipeline = mode !== 0 ? compose.mode : flags & ATOP ? compose.atop : compose.over;
+      step(target, pipeline, stepSlot(opacity, mode, flags), s);
+    }
+
+    ops.push({ kind: "fill", target: accum!, pipeline: clearPipeline });
+    stack(scene.layers, accum!);
+
+    if (drawUniforms.size < uniforms.length * UNIFORM_SLOT) {
       drawUniforms.destroy();
-      drawUniforms = device.createBuffer({ size: Math.ceil(ops.length * 1.5) * UNIFORM_SLOT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      drawUniforms = device.createBuffer({ size: Math.ceil(uniforms.length * 1.5) * UNIFORM_SLOT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       rebuildBindGroups();
     }
-    const data = new ArrayBuffer(Math.max(1, ops.length) * UNIFORM_SLOT);
-    const docViewport = rect(0, 0, size.width, size.height);
-    ops.forEach((op, i) => {
-      if (op.kind === "tiles") {
-        new Float32Array(data, i * UNIFORM_SLOT, 1)[0] = op.opacity;
-        new Uint32Array(data, i * UNIFORM_SLOT + 4, 1)[0] = op.mode;
-        new Float32Array(data, i * UNIFORM_SLOT + 8, 2).set([px.width, px.height]);
-        new Int32Array(data, i * UNIFORM_SLOT + 16, 2).set([op.entry.offset.x >> level, op.entry.offset.y >> level]);
-      } else {
-        writeMeshUniform(data, i * UNIFORM_SLOT, docViewport, floating!, op.opacity, op.mode, 0);
-      }
-    });
+    const data = new ArrayBuffer(Math.max(1, uniforms.length) * UNIFORM_SLOT);
+    uniforms.forEach((write, i) => write(data, i * UNIFORM_SLOT));
     device.queue.writeBuffer(drawUniforms, 0, data);
 
     const encoder = device.createCommandEncoder();
-    const target = accum!.createView({ baseMipLevel: 0, mipLevelCount: 1 });
     const scissor = toPx(area);
-    let pass: GPURenderPassEncoder | null = null;
-    const open = () => {
-      if (pass) return pass;
-      pass = encoder.beginRenderPass({ colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }] });
+    const views = new Map<GPUTexture, GPUTextureView>();
+    const viewOf = (t: GPUTexture) => views.get(t) ?? (views.set(t, t.createView({ baseMipLevel: 0, mipLevelCount: 1 })), views.get(t)!);
+    let pass = null as GPURenderPassEncoder | null;
+    let passTarget = null as GPUTexture | null;
+    const open = (target: GPUTexture) => {
+      if (pass && passTarget === target) return pass;
+      pass?.end();
+      passTarget = target;
+      pass = encoder.beginRenderPass({ colorAttachments: [{ view: viewOf(target), loadOp: "load", storeOp: "store" }] });
       pass.setScissorRect(scissor.x, scissor.y, scissor.w, scissor.h);
       return pass;
     };
-    const close = () => {
-      pass?.end();
-      pass = null;
-    };
-    const p0 = open();
-    p0.setPipeline(clearPipeline);
-    p0.draw(3);
-
-    ops.forEach((op, i) => {
-      const normal = op.mode === 0;
-      if (!normal) {
-        // Blend modes read the destination: snapshot the area first.
-        close();
-        encoder.copyTextureToTexture({ texture: accum!, origin: [scissor.x, scissor.y] }, { texture: scratch!, origin: [scissor.x, scissor.y] }, [scissor.w, scissor.h]);
+    const stepGroup = (op: Extract<Op, { kind: "step" }>) =>
+      device.createBindGroup({
+        layout: composeLayout,
+        entries: [
+          { binding: 0, resource: { buffer: drawUniforms, size: UNIFORM_SLOT } },
+          { binding: 1, resource: viewOf(op.src) },
+          { binding: 2, resource: viewOf(scratch!) },
+          { binding: 3, resource: viewOf(maskA) },
+          { binding: 4, resource: viewOf(maskB) },
+          { binding: 5, resource: (op.lut ?? dummy.lut).createView() },
+          { binding: 6, resource: (op.lut3 ?? dummy.lut3).createView() },
+        ],
+      });
+    for (const op of ops) {
+      if (op.kind === "copy") {
+        pass?.end();
+        pass = passTarget = null;
+        encoder.copyTextureToTexture({ texture: op.from, origin: [scissor.x, scissor.y] }, { texture: op.to, origin: [scissor.x, scissor.y] }, [scissor.w, scissor.h]);
+        continue;
       }
-      const p = open();
-      if (op.kind === "tiles") {
-        p.setPipeline(normal ? tileNormal : tileMode);
-        p.setBindGroup(0, tileBindGroup!, [i * UNIFORM_SLOT]);
-        p.setVertexBuffer(0, op.entry.instances!);
-        p.draw(6, op.entry.instanceCount);
-      } else {
-        p.setPipeline(normal ? meshPreview : meshPreviewMode);
-        p.setBindGroup(0, floatingBindGroup!, [i * UNIFORM_SLOT]);
-        p.setVertexBuffer(0, mesh!.positions);
-        p.setVertexBuffer(1, mesh!.uvs);
-        p.setIndexBuffer(mesh!.indices, "uint32");
-        p.drawIndexed(mesh!.count);
+      const p = open(op.target);
+      p.setPipeline(op.pipeline);
+      switch (op.kind) {
+        case "fill":
+          p.draw(3);
+          break;
+        case "tiles":
+          p.setBindGroup(0, op.bindGroup, [op.slot * UNIFORM_SLOT]);
+          p.setVertexBuffer(0, op.entry.instances!);
+          p.draw(6, op.entry.instanceCount);
+          break;
+        case "mesh":
+          p.setBindGroup(0, op.float.bindGroup!, [op.slot * UNIFORM_SLOT]);
+          p.setVertexBuffer(0, op.float.mesh!.positions);
+          p.setVertexBuffer(1, op.float.mesh!.uvs);
+          p.setIndexBuffer(op.float.mesh!.indices, "uint32");
+          p.drawIndexed(op.float.mesh!.count);
+          break;
+        case "step":
+          p.setBindGroup(0, stepGroup(op), [op.slot * UNIFORM_SLOT]);
+          p.draw(3);
+          break;
       }
-    });
-    close();
+    }
+    pass?.end();
     device.queue.submit([encoder.finish()]);
     mipsDirty = union(mipsDirty, scissor);
   }
@@ -892,10 +1254,15 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     // source is uploaded again at full resolution, just for this.
     device.pushErrorScope("out-of-memory");
     let temporary: FloatingTexture | null = null;
+    let temporaryMesh: MeshBuffers | null = null;
     const uniforms = device.createBuffer({ size: MESH_UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     try {
-      const f = level === 0 ? floatingTexture(source.pixels, source.bounds) : (temporary = buildFloating(source.pixels, source.bounds, 0));
-      const m = meshBuffers(mapping);
+      // The preview's texture and mesh when they match (they usually do: this commits it).
+      const same = (t: FloatingTexture | null) =>
+        t && t.source === source.pixels && t.level === 0 && t.bounds.x === source.bounds.x && t.bounds.y === source.bounds.y && t.bounds.w === source.bounds.w && t.bounds.h === source.bounds.h;
+      const cached = Object.values(floats).find((x) => same(x.texture));
+      const f = cached?.texture ?? (temporary = buildFloating(source.pixels, source.bounds, 0));
+      const m = Object.values(floats).find((x) => x.mesh?.mapping === mapping)?.mesh ?? (temporaryMesh = createMesh(mapping));
       const bindGroup = meshBindGroup(f.texture, uniforms);
       const filterIndex = { nearest: 0, bilinear: 1, bicubic: 2 }[filter];
       for (let cy = dest.y; cy < dest.y + dest.h; cy += CHUNK) {
@@ -935,11 +1302,88 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     } finally {
       uniforms.destroy();
       temporary?.texture.destroy();
+      destroyMesh(temporaryMesh);
       // An allocation that failed leaves invalid objects whose output is garbage; the caller falls back to the CPU.
       const err = await device.popErrorScope();
       if (err) throw new Error(`GPU out of memory: ${err.message}`);
     }
     return out;
+  }
+
+  async function adjust(pixels: Pixels, program: Program, selection: Mask | null): Promise<Pixels> {
+    const area = selection ? intersect(storedBounds(pixels), selection.bounds) : storedBounds(pixels);
+    if (isEmpty(area)) return pixels;
+    const r = buildAdjust(program);
+    const uniforms = device.createBuffer({ size: UNIFORM_SLOT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const u = new ArrayBuffer(UNIFORM_SLOT);
+    new Float32Array(u, 0, 1)[0] = 1;
+    new Uint32Array(u, 4, 3).set([0, selection ? MASK_A : 0, r.kind]);
+    new Float32Array(u, 16, r.params.length).set(r.params);
+    device.queue.writeBuffer(uniforms, 0, u);
+    const out = tileWriter(pixels);
+    device.pushErrorScope("out-of-memory");
+    try {
+      for (let cy = area.y; cy < area.y + area.h; cy += CHUNK) {
+        for (let cx = area.x; cx < area.x + area.w; cx += CHUNK) {
+          const chunk = intersect(rect(cx, cy, CHUNK, CHUNK), area);
+          const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST;
+          const src = device.createTexture({ size: [chunk.w, chunk.h], format: "rgba8unorm", usage });
+          device.queue.writeTexture({ texture: src }, readRect(pixels, chunk) as Uint8ClampedArray<ArrayBuffer>, { bytesPerRow: chunk.w * 4 }, [chunk.w, chunk.h]);
+          let coverage = dummy.mask;
+          if (selection) {
+            const b = selection.bounds;
+            const rows = new Uint8Array(chunk.w * chunk.h);
+            for (let y = 0; y < chunk.h; y++) {
+              const from = (chunk.y + y - b.y) * b.w + (chunk.x - b.x);
+              rows.set(selection.data.subarray(from, from + chunk.w), y * chunk.w);
+            }
+            coverage = device.createTexture({ size: [chunk.w, chunk.h], format: MASK_FORMAT, usage });
+            device.queue.writeTexture({ texture: coverage }, rows, { bytesPerRow: chunk.w }, [chunk.w, chunk.h]);
+          }
+          const target = device.createTexture({ size: [chunk.w, chunk.h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+          const bytesPerRow = Math.ceil((chunk.w * 4) / 256) * 256;
+          const buffer = device.createBuffer({ size: bytesPerRow * chunk.h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store" }] });
+          pass.setPipeline(adjustPixelsPipeline);
+          pass.setBindGroup(
+            0,
+            device.createBindGroup({
+              layout: composeLayout,
+              entries: [
+                { binding: 0, resource: { buffer: uniforms, size: UNIFORM_SLOT } },
+                { binding: 1, resource: src.createView() },
+                { binding: 2, resource: dummy.color.createView() },
+                { binding: 3, resource: coverage.createView() },
+                { binding: 4, resource: dummy.mask.createView() },
+                { binding: 5, resource: (r.lut ?? dummy.lut).createView() },
+                { binding: 6, resource: (r.lut3 ?? dummy.lut3).createView({ dimension: "3d" }) },
+              ],
+            }),
+            [0],
+          );
+          pass.draw(3);
+          pass.end();
+          encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow }, [chunk.w, chunk.h]);
+          device.queue.submit([encoder.finish()]);
+          await buffer.mapAsync(GPUMapMode.READ);
+          const mapped = new Uint8Array(buffer.getMappedRange());
+          const result = new Uint8ClampedArray(chunk.w * chunk.h * 4);
+          for (let y = 0; y < chunk.h; y++) result.set(mapped.subarray(y * bytesPerRow, y * bytesPerRow + chunk.w * 4), y * chunk.w * 4);
+          buffer.unmap();
+          writeRect(out, chunk, result);
+          for (const t of [src, target, buffer]) t.destroy();
+          if (coverage !== dummy.mask) coverage.destroy();
+        }
+      }
+    } finally {
+      uniforms.destroy();
+      r.lut?.destroy();
+      r.lut3?.destroy();
+      const err = await device.popErrorScope();
+      if (err) throw new Error(`GPU out of memory: ${err.message}`);
+    }
+    return out.finish();
   }
 
   /** Bands read back per round trip, bounding the staging memory (≤ 64 MB at 16k px wide). */
@@ -1017,6 +1461,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
     resample,
     rasterizeShape,
+    adjust,
 
     async readComposite() {
       // At reduced quality the composite is smaller; it's scaled back up (nearest) to document size.
@@ -1050,13 +1495,20 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     destroy() {
       for (const entry of layers.values()) freeLayer(entry);
       layers.clear();
-      floating?.texture.destroy();
-      mesh?.positions.destroy();
-      mesh?.uvs.destroy();
-      mesh?.indices.destroy();
+      for (const f of Object.values(floats)) {
+        f.texture?.texture.destroy();
+        destroyMesh(f.mesh);
+      }
       accum?.destroy();
       scratch?.destroy();
       selectionTexture?.destroy();
+      masks?.forEach((t) => t.destroy());
+      for (const t of surfaces) t.destroy();
+      for (const r of adjustments.values()) {
+        r.lut?.destroy();
+        r.lut3?.destroy();
+      }
+      for (const t of Object.values(dummy)) t.destroy();
       atlas.destroy();
       vectors.destroy();
       drawUniforms.destroy();

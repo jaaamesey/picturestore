@@ -1,9 +1,10 @@
-import { withContent, type Rasterizers } from "./content";
-import { PIXELS, flatten, type Doc, type Layer, type LayerContent, type Placement } from "./document";
+import { isPlaced, withContent, type PlacedContent, type Rasterizers } from "./content";
+import { PIXELS, type Doc, type Layer, type Placement } from "./document";
+import { flatten } from "./composite";
 import { boundsOf, integerTranslation, intersect, multiply, rect, rectCorners, roundOut, scaling, translation, type Mat, type Rect, type Vec2 } from "./geometry";
 import type { Filter } from "./rasterize";
 import { transformMask, translateMask } from "./selection";
-import { NO_PIXELS, clipPixels, contentBounds, translatePixels } from "./pixels";
+import { NO_PIXELS, clipPixels, contentBounds, translatePixels, type Pixels } from "./pixels";
 import { transformGuides } from "./snap";
 import { invert3, isConvex, project, type Mat3, type Quad } from "./warp";
 
@@ -61,9 +62,9 @@ export function transformPlacement(p: Placement, m: Mat3): Placement {
   return { ...p, quad: [a, b, c, d], angle: Math.atan2(md.y - mo.y, md.x - mo.x) };
 }
 
-type NonRaster = Exclude<LayerContent, { kind: "pixels" }>;
+type NonRaster = PlacedContent;
 
-/** How each kind of non-raster content follows a document transform. */
+/** How each kind of placed content follows a document transform. */
 const CONTENT_TRANSFORMS: { readonly [K in NonRaster["kind"]]: (c: Extract<NonRaster, { kind: K }>, t: DocTransform) => Extract<NonRaster, { kind: K }> } = {
   smart: (c, t) => ({ ...c, placement: transformPlacement(c.placement, t.matrix) }),
   shape: (c, t) => ({
@@ -78,25 +79,33 @@ export function transformContent(c: NonRaster, t: DocTransform): NonRaster {
 }
 
 /**
- * One layer through a document transform. Pixel layers are resampled
- * (everything they hold, including what's off the canvas); non-raster
- * content is transformed exactly and re-rendered for the new canvas.
+ * One layer through a document transform. Pixels (a layer's and its mask's)
+ * are resampled, everything they hold including what's off the canvas;
+ * placed content is transformed exactly and re-rendered for the new canvas;
+ * groups transform their contents.
  */
 export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers): Promise<Layer> {
-  const clip = rect(0, 0, t.width, t.height);
-  if (l.content.kind !== "pixels") {
-    const content = transformContent(l.content, t);
+  const mask = l.mask && { ...l.mask, pixels: await transformPixels(l.mask.pixels, t, r) };
+  const c = l.content;
+  if (c.kind === "group") return { ...l, mask, content: { ...c, layers: await Promise.all(c.layers.map((x) => transformLayer(x, t, r))) } };
+  if (c.kind === "adjustment") return { ...l, mask };
+  if (isPlaced(c)) {
+    const content = transformContent(c, t);
     // Content crossing a perspective's horizon has no exact transform: it's rasterized, as it looks.
-    if (isConvex(content.placement.quad)) return withContent(l, content, clip, r, t.filter);
-    l = { ...l, content: PIXELS };
+    if (isConvex(content.placement.quad)) return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r, t.filter)), mask };
   }
+  return { ...l, mask, content: PIXELS, pixels: await transformPixels(l.pixels, t, r) };
+}
+
+async function transformPixels(pixels: Pixels, t: DocTransform, r: Rasterizers): Promise<Pixels> {
+  const clip = rect(0, 0, t.width, t.height);
   const affine = asAffine(t.matrix);
   const shift = affine && integerTranslation(affine);
   if (shift) {
-    const pixels = translatePixels(l.pixels, shift.x, shift.y);
-    return { ...l, pixels: t.clipToCanvas ? clipPixels(pixels, clip) : pixels };
+    const moved = translatePixels(pixels, shift.x, shift.y);
+    return t.clipToCanvas ? clipPixels(moved, clip) : moved;
   }
-  let bounds = contentBounds(l.pixels);
+  let bounds = contentBounds(pixels);
   if (t.clipToCanvas && affine) {
     // The source that lands on the canvas, with room for the filter's support (wider when reducing).
     const src = boundsOf(mapRect(invert3(t.matrix)!, clip));
@@ -104,11 +113,10 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
     const pad = Math.ceil(Math.max(3, 3 / k));
     bounds = intersect(bounds, roundOut(rect(src.x - pad, src.y - pad, src.w + pad * 2, src.h + pad * 2)));
   }
-  if (bounds.w <= 0 || bounds.h <= 0) return { ...l, pixels: NO_PIXELS };
+  if (bounds.w <= 0 || bounds.h <= 0) return NO_PIXELS;
   // Under perspective only the canvas is kept: content beyond the horizon has nowhere to go.
   const clipTo = t.clipToCanvas || !affine ? clip : undefined;
-  const pixels = await r.resample({ pixels: l.pixels, bounds }, { source: bounds, quad: mapRect(t.matrix, bounds), patch: null }, t.filter, clipTo);
-  return { ...l, pixels };
+  return r.resample({ pixels, bounds }, { source: bounds, quad: mapRect(t.matrix, bounds), patch: null }, t.filter, clipTo);
 }
 
 /** The whole document through a transform: every layer, the selection, the canvas and resolution. */

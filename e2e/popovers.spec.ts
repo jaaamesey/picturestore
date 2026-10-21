@@ -1,10 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { newDocument } from "./helpers";
 
-/** Presses somewhere neutral: the empty part of the Layers panel. */
+/** Presses somewhere neutral: the Layers panel's title (above any menu opened from a layer). */
 const pressOutside = async (page: Page) => {
-  const panel = (await page.getByTestId("layers-panel").boundingBox())!;
-  await page.mouse.click(panel.x + panel.width / 2, panel.y + panel.height - 60);
+  const header = (await page.getByTestId("layers-panel").locator("header").boundingBox())!;
+  await page.mouse.click(header.x + header.width - 20, header.y + header.height / 2);
 };
 
 /** Each popover closes on a press outside it, and on Escape. */

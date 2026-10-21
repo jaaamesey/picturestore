@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { BLEND_MODES, KERNELS, blendColor } from "./blend";
+import { BLEND_MODES, blendColor, blendSpan } from "./blend";
+
+const source = (...rgba: number[]) => Float32Array.from([rgba[0] * rgba[3], rgba[1] * rgba[3], rgba[2] * rgba[3], rgba[3]]);
 
 describe("blend modes", () => {
   it.each([
@@ -31,23 +33,35 @@ describe("blend modes", () => {
   it("every mode reduces to the source over a transparent backdrop", () => {
     for (const mode of BLEND_MODES) {
       const dst = new Float32Array(4);
-      KERNELS[mode](dst, 0, new Uint8ClampedArray([51, 102, 153, 255]), 0, 1, 0.5);
+      blendSpan(mode, dst, 0, source(0.2, 0.4, 0.6, 1), 0, 1, 0.5);
       expect([...dst].map((v) => +v.toFixed(6))).toEqual([0.1, 0.2, 0.3, 0.5]);
     }
   });
 
   it("normal source-over with partial alpha (premultiplied destination)", () => {
     const dst = new Float32Array([1, 1, 1, 1]);
-    KERNELS.normal(dst, 0, new Uint8ClampedArray([0, 0, 0, 255]), 0, 1, 0.25);
+    blendSpan("normal", dst, 0, source(0, 0, 0, 1), 0, 1, 0.25);
     expect([...dst]).toEqual([0.75, 0.75, 0.75, 1]);
   });
 
-  it("kernels match blendColor for every mode over an opaque backdrop", () => {
+  it("spans match blendColor for every mode over an opaque backdrop", () => {
     for (const mode of BLEND_MODES) {
       const dst = new Float32Array([0.2, 0.5, 0.8, 1]);
-      KERNELS[mode](dst, 0, new Uint8ClampedArray([204, 102, 51, 255]), 0, 1, 1);
+      blendSpan(mode, dst, 0, source(0.8, 0.4, 0.2, 1), 0, 1, 1);
       const expected = blendColor(mode, [0.2, 0.5, 0.8], [0.8, 0.4, 0.2]);
       expected.forEach((v, i) => expect(dst[i]).toBeCloseTo(v, 5));
     }
+  });
+
+  it("source-atop keeps the backdrop's alpha and shows the source only over it", () => {
+    const dst = new Float32Array([0, 0, 0.5, 0.5, 0, 0, 0, 0]);
+    blendSpan("normal", dst, 0, Float32Array.from([1, 0, 0, 1, 1, 0, 0, 1]), 0, 2, 1, null, 0, true);
+    expect([...dst]).toEqual([0.5, 0, 0, 0.5, 0, 0, 0, 0]);
+  });
+
+  it("scales the source by per-pixel coverage", () => {
+    const dst = new Float32Array(8);
+    blendSpan("normal", dst, 0, Float32Array.from([1, 1, 1, 1, 1, 1, 1, 1]), 0, 2, 0.5, Float32Array.from([1, 0.5]));
+    expect([...dst]).toEqual([0.5, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25]);
   });
 });

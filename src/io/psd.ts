@@ -3,16 +3,18 @@ import {
   readPsd,
   writePsd,
   type BezierPath,
-  type Color as PsdColor,
   type LinkedFile,
   type Layer as PsdLayer,
+  type LayerMaskData,
   type PixelData,
   type Psd,
 } from "ag-psd";
 import { isBlendMode } from "../core/blend";
 import type { RGB } from "../core/color";
 import { placementMapping } from "../core/content";
-import { PIXELS, resolutionOf, createLayer, docRect, flatten, type Doc, type Layer, type LayerContent, type SmartSource } from "../core/document";
+import { PIXELS, resolutionOf, createLayer, docRect, type Doc, type Layer, type LayerContent, type LayerMask, type SmartSource } from "../core/document";
+import { fromPsd, rgbOf, toPsd } from "./psdAdjustments";
+import { flatten } from "../core/composite";
 import { boundsOf, isEmpty, rect, vec, type Vec2 } from "../core/geometry";
 import { documentKnots, type Knot, type ShapeStyle } from "../core/shape";
 import { NO_PIXELS, contentBounds, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
@@ -36,22 +38,35 @@ function to8bit({ data }: PixelData): Uint8ClampedArray {
   return Uint8ClampedArray.from(data, (v) => v * 255);
 }
 
-/** Bakes an enabled layer mask into the layer's alpha. */
-function applyMask(pixels: Uint8ClampedArray, layer: PsdLayer): void {
-  const mask = layer.mask;
-  if (!mask?.imageData || mask.disabled) return;
-  const w = (layer.right ?? 0) - (layer.left ?? 0);
-  const m = to8bit(mask.imageData);
-  const mw = mask.imageData.width;
-  const mx = mask.left ?? 0;
-  const my = mask.top ?? 0;
-  for (let i = 0; i < pixels.length / 4; i++) {
-    const x = (layer.left ?? 0) + (i % w) - mx;
-    const y = (layer.top ?? 0) + Math.floor(i / w) - my;
-    const inside = x >= 0 && y >= 0 && x < mw && y < mask.imageData.height;
-    const v = inside ? m[(y * mw + x) * 4] : (mask.defaultColor ?? 255);
-    pixels[i * 4 + 3] = (pixels[i * 4 + 3] * v) / 255;
+/** A PSD layer mask as ours: grey pixels over its default colour. */
+function maskIn(c: PsdLayer): LayerMask | null {
+  const m = c.mask;
+  if (!m) return null;
+  const background = (m.defaultColor ?? 0) >= 128 ? 255 : 0;
+  const img = m.imageData;
+  const pixels = img && img.width > 0 && img.height > 0 ? pixelsFromImage(img.width, img.height, opaqueGrey(to8bit(img)), m.left ?? 0, m.top ?? 0) : NO_PIXELS;
+  return { pixels, background, enabled: !m.disabled, linked: true };
+}
+
+const opaqueGrey = (d: Uint8ClampedArray) => {
+  const out = new Uint8ClampedArray(d.length);
+  for (let i = 0; i < d.length; i += 4) out.set([d[i], d[i], d[i], 255], i);
+  return out;
+};
+
+/** Our mask as a PSD layer mask: its stored part as opaque grey, the rest its default colour. */
+function maskOut(m: LayerMask): LayerMaskData {
+  const base: LayerMaskData = { defaultColor: m.background, disabled: !m.enabled };
+  const b = contentBounds(m.pixels);
+  if (isEmpty(b)) return base;
+  const data = readRect(m.pixels, b);
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    const v = (data[i] * a + m.background * (255 - a)) / 255;
+    data[i] = data[i + 1] = data[i + 2] = v;
+    data[i + 3] = 255;
   }
+  return { ...base, left: b.x, top: b.y, right: b.x + b.w, bottom: b.y + b.h, imageData: { width: b.w, height: b.h, data } };
 }
 
 /** Decodes an embedded image file (PNG, JPEG…) to RGBA. Null when the format isn't supported. */
@@ -124,14 +139,6 @@ function smartContent(c: PsdLayer, sources: Map<string, SmartSource>): LayerCont
   return { kind: "smart", source, placement: { source: rect(0, 0, source.width, source.height), quad, angle, patch } };
 }
 
-function rgbOf(c: PsdColor | undefined): RGB | null {
-  if (!c || !("r" in c)) return null;
-  // ag-psd uses 0–255 for RGB(A) and 0–1 floats for FRGB.
-  const f = "fr" in c ? 255 : 1;
-  const v = c as { r: number; g: number; b: number };
-  return { r: Math.round(v.r * f), g: Math.round(v.g * f), b: Math.round(v.b * f) };
-}
-
 /** A solid-colour shape layer (vector mask + fill/stroke). Gradients, patterns and path booleans import as pixels. */
 function shapeContent(c: PsdLayer): LayerContent | null {
   const mask = c.vectorMask;
@@ -164,11 +171,11 @@ function shapeContent(c: PsdLayer): LayerContent | null {
 }
 
 /**
- * Reads a PSD into a document. Groups are flattened into the layer list (a
- * hidden or translucent group hides/fades its children); layer masks are
- * baked into alpha. Embedded smart objects (with custom warps) and
- * solid-colour shape layers stay live; text, adjustment layers and anything
- * else import as their rendered pixels.
+ * Reads a PSD into a document: groups (nested, pass-through or not),
+ * clipping masks, layer masks and adjustment layers stay as they are.
+ * Embedded smart objects (with custom warps) and solid-colour shape layers
+ * stay live; text, fill layers and anything else import as their rendered
+ * pixels.
  */
 export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: ImageDecoder = decodeImageBytes): Promise<Doc> {
   const psd = readPsd(buffer, { useImageData: true, skipThumbnail: true });
@@ -177,37 +184,32 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
     const src = await readSource(f, decode).catch(() => null);
     if (src) sources.set(f.id, src);
   }
-  const layers: Layer[] = [];
-  const walk = (children: PsdLayer[], visible: boolean, opacity: number) => {
-    for (const c of children) {
-      const v = visible && !c.hidden;
-      const o = opacity * (c.opacity ?? 1);
+  let count = 0;
+  const read = (children: PsdLayer[]): Layer[] =>
+    children.map((c) => {
+      const common = {
+        name: c.name ?? `Layer ${++count}`,
+        visible: !c.hidden,
+        opacity: c.opacity ?? 1,
+        blendMode: c.blendMode && isBlendMode(c.blendMode) ? c.blendMode : ("normal" as const),
+        clipped: !!c.clipping,
+        mask: maskIn(c),
+      };
       if (c.children) {
-        walk(c.children, v, o);
-        continue;
+        const blendMode = c.blendMode === "pass through" ? ("pass through" as const) : common.blendMode;
+        return createLayer({ ...common, blendMode, content: { kind: "group", layers: read(c.children), open: !!c.opened } });
       }
+      const adjustment = c.adjustment && fromPsd(c.adjustment);
+      if (adjustment) return createLayer({ ...common, content: { kind: "adjustment", adjustment } });
       let pixels = NO_PIXELS;
       if (c.imageData && c.imageData.width > 0 && c.imageData.height > 0) {
-        const data = new Uint8ClampedArray(to8bit(c.imageData));
-        applyMask(data, c);
-        pixels = pixelsFromImage(c.imageData.width, c.imageData.height, data, c.left ?? 0, c.top ?? 0);
+        pixels = pixelsFromImage(c.imageData.width, c.imageData.height, new Uint8ClampedArray(to8bit(c.imageData)), c.left ?? 0, c.top ?? 0);
       }
       // Photoshop's own rendering is kept as the layer's pixels; the content stays editable.
       const content = smartContent(c, sources) ?? shapeContent(c) ?? PIXELS;
-      layers.push(
-        createLayer({
-          name: c.name ?? `Layer ${layers.length + 1}`,
-          visible: v,
-          opacity: o,
-          blendMode: c.blendMode && isBlendMode(c.blendMode) ? c.blendMode : "normal",
-          pixels,
-          content,
-        }),
-      );
-    }
-  };
-  walk(psd.children ?? [], true, 1);
-
+      return createLayer({ ...common, pixels, content });
+    });
+  const layers = read(psd.children ?? []);
   if (layers.length === 0 && psd.imageData) {
     layers.push(createLayer({ name: "Background", pixels: pixelsFromImage(psd.width, psd.height, to8bit(psd.imageData)) }));
   }
@@ -250,6 +252,10 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
   switch (content.kind) {
     case "pixels":
       return {};
+    case "group":
+      return { opened: content.open, children: content.layers.map((l) => layerOut(l, linked)) };
+    case "adjustment":
+      return { adjustment: toPsd(content.adjustment) };
     case "smart": {
       const { source, placement } = content;
       if (!linked.has(source.id)) linked.set(source.id, linkedFile(source));
@@ -308,21 +314,24 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
   }
 }
 
+function layerOut(l: Layer, linked: Map<string, LinkedFile>): PsdLayer {
+  const base: PsdLayer = {
+    name: l.name,
+    opacity: l.opacity,
+    blendMode: l.blendMode,
+    hidden: !l.visible,
+    clipping: l.clipped,
+    ...(l.mask && { mask: maskOut(l.mask) }),
+    ...contentFields(l.content, linked),
+  };
+  const b = contentBounds(l.pixels);
+  if (isEmpty(b)) return { ...base, left: 0, top: 0, right: 0, bottom: 0 };
+  return { ...base, left: b.x, top: b.y, right: b.x + b.w, bottom: b.y + b.h, imageData: { width: b.w, height: b.h, data: readRect(l.pixels, b) } };
+}
+
 export function writePsdDocument(doc: Doc): ArrayBuffer {
   const linked = new Map<string, LinkedFile>();
-  const children: PsdLayer[] = doc.layers.map((l) => {
-    const b = contentBounds(l.pixels);
-    const base = { name: l.name, opacity: l.opacity, blendMode: l.blendMode, hidden: !l.visible, ...contentFields(l.content, linked) };
-    if (isEmpty(b)) return { ...base, left: 0, top: 0, right: 0, bottom: 0 };
-    return {
-      ...base,
-      left: b.x,
-      top: b.y,
-      right: b.x + b.w,
-      bottom: b.y + b.h,
-      imageData: { width: b.w, height: b.h, data: readRect(l.pixels, b) },
-    };
-  });
+  const children = doc.layers.map((l) => layerOut(l, linked));
   const psd: Psd = {
     width: doc.width,
     height: doc.height,

@@ -3,7 +3,7 @@ import type { Vec2 } from "../core/geometry";
 import type { transformFloatingCpu } from "../core/raster";
 import type { readRect } from "../core/pixels";
 import type { renderShape } from "../core/shape";
-import type { flatten } from "../core/document";
+import type { flatten } from "../core/composite";
 import type { placementMapping } from "../core/content";
 import { handles, warpPoints, type TransformMode, type TransformState } from "../core/transform";
 import { IDENTITY_PATCH, PATCH_ANCHORS, evalPatch, isConvex, project, squareToQuad, type Quad } from "../core/warp";
@@ -40,6 +40,8 @@ declare global {
       };
       /** Writes recovery information now, regardless of the interval. */
       saveRecovery?: () => Promise<void>;
+      /** Building blocks for test scenes. */
+      core?: typeof import("./testHooks").TEST_CORE;
     };
   }
 }

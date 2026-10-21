@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CPU_RASTERIZERS, placementMapping } from "./content";
-import { addLayer, createDocument, createLayer, fillPixels, flatten, resolutionOf, type Doc, type Placement } from "./document";
+import { addLayer, createDocument, createLayer, fillPixels, resolutionOf, type Doc, type Placement } from "./document";
+import { flatten } from "./composite";
 import { affine3, imageSize, imageSizeWindow, resizeCanvas, transformPlacement } from "./documentTransform";
 import { rect, scaling, type Vec2 } from "./geometry";
 import { rectMask } from "./selection";

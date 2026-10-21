@@ -1,4 +1,5 @@
-import { addLayer, createLayer, docRect, flatten, nextLayerName, type Doc, type Layer } from "./document";
+import { addLayer, createLayer, docRect, nextLayerName, type Doc, type Layer } from "./document";
+import { flatten } from "./composite";
 import { intersect, isEmpty, type Rect, type Vec2 } from "./geometry";
 import { extractFloating, type Floating } from "./raster";
 import { rectMask } from "./selection";

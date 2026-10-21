@@ -1,4 +1,4 @@
-import { addLayer, activeLayer, createLayer, docRect, numberedName, updateLayer, type Doc, type Placement } from "../../core/document";
+import { addLayer, activeLayer, createLayer, docRect, editTarget, maskTone, numberedName, updateLayer, withTargetPixels, type Doc, type Placement } from "../../core/document";
 import { rect, vec, type Rect, type Vec2 } from "../../core/geometry";
 import { compositeOver, extractFloating } from "../../core/raster";
 import type { ShapeGeometry, ShapeStyle } from "../../core/shape";
@@ -83,8 +83,9 @@ export function createShapeTool(id: ShapeToolId): Tool {
     const { doc, settings } = ctx;
     const geometry = shapeGeometry(id, settings.shape);
     const pixels = settings.shape.mode === "pixels";
-    if (pixels && !activeLayer(doc)) return null;
-    const style: ShapeStyle = pixels ? { fill: ctx.foreground, stroke: null } : shapeStyle(settings.shape, ctx.foreground);
+    const target = pixels ? editTarget(doc) : null;
+    if (pixels && !target) return null;
+    const style: ShapeStyle = pixels ? { fill: target!.mask ? maskTone(ctx.foreground) : ctx.foreground, stroke: null } : shapeStyle(settings.shape, ctx.foreground);
     return addLayer(doc, createLayer({ name: numberedName(doc, NAMES[id]), content: { kind: "shape", geometry, style, placement: p } }));
   };
 
@@ -96,9 +97,9 @@ export function createShapeTool(id: ShapeToolId): Tool {
     const { geometry, style, placement: p } = added.content;
     const pixels = await ctx.raster.shape(geometry, style, placementMapping(p), docRect(doc));
     if (ctx.settings.shape.mode !== "pixels") return updateLayer(shown, added.id, { pixels });
-    const layer = activeLayer(doc)!;
+    const t = editTarget(doc)!;
     const clipped = doc.selection ? extractFloating(pixels, doc.selection).floating.pixels : pixels;
-    return updateLayer(doc, layer.id, { pixels: compositeOver(layer.pixels, clipped) });
+    return withTargetPixels(doc, t, compositeOver(t.pixels, clipped));
   };
 
   return {
@@ -107,8 +108,8 @@ export function createShapeTool(id: ShapeToolId): Tool {
     cursor: () => "crosshair",
     down(ctx, e) {
       if (ctx.settings.shape.mode === "pixels") {
-        const layer = activeLayer(ctx.doc);
-        if (!layer || !layer.visible || !ctx.requireEditable(layer)) return;
+        const t = ctx.editTarget();
+        if (!t || !t.layer.visible) return;
       }
       start = ctx.snap.point(vec(e.x, e.y));
       downMods = { shift: e.shift, alt: e.alt };

@@ -121,8 +121,8 @@ test.describe("Free Transform", () => {
     await drag(page, [150, 170], [175, 230]);
     await page.evaluate(() => {
       const w = window as unknown as Record<string, unknown> & typeof window;
-      const ed = w.__ps!.editor as { active(): { floating(): { pixels: unknown; bounds: unknown; mapping: unknown } } };
-      const f = ed.active().floating();
+      const ed = w.__ps!.editor as { active(): { floating(): { pixels: { pixels: unknown; bounds: unknown; mapping: unknown } } } };
+      const f = ed.active().floating().pixels;
       w.__expected = w.__ps!.reference!.transformFloatingCpu(f as never, f.mapping as never, "bicubic");
     });
     await page.keyboard.press("Enter");

@@ -1,8 +1,8 @@
 import { Errored, For, Loading, Show, createMemo, createSignal, onSettled, useContext } from "solid-js";
-import { flatten } from "../core/document";
-import { rect } from "../core/geometry";
+import { flatten, sampleHistograms, type Histograms } from "../core/composite";
+import { intersect, isEmpty, rect } from "../core/geometry";
 import { transformFloatingCpu } from "../core/raster";
-import { readRect } from "../core/pixels";
+import { contentBounds, readRect, storedBounds } from "../core/pixels";
 import { renderShape } from "../core/shape";
 import { placementMapping } from "../core/content";
 import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
@@ -25,7 +25,7 @@ import {
   type ExportFormat,
   type OpenedFile,
 } from "../io/files";
-import { activeLayer, resolutionOf, type Doc } from "../core/document";
+import { activeLayer, editTarget, resolutionOf, type Doc } from "../core/document";
 import type { PreferencesPane } from "../editor/preferences";
 import { listRecovery, newRecoveryKey, removeRecovery, saveRecovery } from "../io/recovery";
 import { PreferencesDialog } from "./PreferencesDialog";
@@ -42,6 +42,10 @@ import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
 import { HistoryPanel } from "./panels/HistoryPanel";
 import { LayersPanel } from "./panels/LayersPanel";
+import { PropertiesPanel } from "./panels/PropertiesPanel";
+import { TEST_CORE } from "./testHooks";
+import { AdjustmentDialog } from "./AdjustmentDialog";
+import type { AdjustmentKind } from "../core/adjustments";
 import { Toolbar } from "./Toolbar";
 import { Viewport } from "./Viewport";
 
@@ -200,7 +204,10 @@ export function App() {
   /** Set by Ctrl+Shift+V so the paste event that follows pastes in place. */
   let pasteInPlace = false;
 
-  const [menu, setMenu] = createSignal<{ x: number; y: number; items: readonly MenuItem[] } | null>(null);
+  const [menu, setMenu] = createSignal<{ x: number; y: number; items: readonly MenuItem[]; up?: boolean } | null>(null);
+  const [adjusting, setAdjusting] = createSignal<{ session: DocumentSession; kind: AdjustmentKind; histogram: Histograms | null } | null>(null);
+  const [choice, setChoice] = createSignal<{ message: string; options: readonly string[]; resolve: (i: number | null) => void } | null>(null);
+  const choose = (message: string, options: readonly string[]) => new Promise<number | null>((resolve) => setChoice({ message, options, resolve }));
   const [confirmation, setConfirmation] = createSignal<{ message: string; resolve: (ok: boolean) => void } | null>(null);
   const confirmDialog = (message: string) => new Promise<boolean>((resolve) => setConfirmation({ message, resolve }));
   editor.onConfirm(confirmDialog);
@@ -288,8 +295,27 @@ export function App() {
     canvasSize: () => setCanvasSize(editor.active() as DocumentSession | null),
     imageSize: () => setImageSizeFor(editor.active() as DocumentSession | null),
     newGuide: () => setNewGuideFor(editor.active() as DocumentSession | null),
+    adjust(kind) {
+      const s = editor.active();
+      const d = s?.doc();
+      const t = d && editTarget(d);
+      if (!s || !d || !t) return;
+      // The histogram of what's adjusted: the target's pixels (within the selection).
+      const area = d.selection ? intersect(d.selection.bounds, storedBounds(t.pixels)) : contentBounds(t.pixels);
+      const histogram = isEmpty(area) ? null : sampleHistograms((r) => readRect(t.pixels, r), area);
+      setAdjusting({ session: s as DocumentSession, kind, histogram });
+    },
+    async deleteLayer() {
+      const d = editor.active()?.doc();
+      const l = d && activeLayer(d);
+      if (!l) return;
+      if (l.content.kind !== "group" || l.content.layers.length === 0) return editor.deleteLayer();
+      // Photoshop asks what to delete.
+      const i = await choose("Delete the group and its contents, or the group only?", ["Group and Contents", "Group Only"]);
+      if (i !== null) editor.deleteLayer(l.id, i === 1);
+    },
   };
-  const app: AppValue = { editor, shell, notify, openMenu: (x, y, items) => setMenu({ x, y, items }) };
+  const app: AppValue = { editor, shell, notify, openMenu: (x, y, items, up) => setMenu({ x, y, items, up: !!up }) };
 
   onSettled(() => {
     window.__ps = {
@@ -298,6 +324,7 @@ export function App() {
       pixel: (x, y) => [...flatten(editor.active()!.displayed(), rect(x, y, 1, 1))],
       reference: { transformFloatingCpu, readRect, renderShape, flatten, placementMapping },
       saveRecovery: () => recoveryTick(true),
+      core: TEST_CORE,
     };
     void offerRecovery();
     const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
@@ -411,6 +438,7 @@ export function App() {
           </main>
           <aside class="flex w-64 flex-col border-l border-line bg-panel">
             <HistoryPanel />
+            <PropertiesPanel />
             <LayersPanel />
           </aside>
         </div>
@@ -428,7 +456,7 @@ export function App() {
         open={menu() !== null}
         onClose={() => setMenu(null)}
         fixed
-        style={{ left: `${menu()?.x ?? 0}px`, top: `${menu()?.y ?? 0}px` }}
+        style={{ left: `${menu()?.x ?? 0}px`, top: `${menu()?.y ?? 0}px`, transform: menu()?.up ? "translateY(-100%)" : undefined }}
         testId="context-menu"
       >
         <div onContextMenu={(e) => e.preventDefault()}>
@@ -470,6 +498,31 @@ export function App() {
           />
         )}
       </Show>
+      <Show when={adjusting()} keyed>
+        {(a) => (
+          <AdjustmentDialog
+            kind={a.kind}
+            foreground={editor.foreground()}
+            background={editor.background()}
+            histogram={a.histogram}
+            onPreview={(adj) => editor.active() === a.session && editor.previewAdjustment(adj)}
+            onApply={(adj) => editor.active() === a.session && editor.applyAdjustment(adj)}
+            onClose={() => setAdjusting(null)}
+          />
+        )}
+      </Show>
+      <Show when={choice()}>
+        {(c) => (
+          <ChoiceDialog
+            message={c().message}
+            options={c().options}
+            onAnswer={(i) => {
+              c().resolve(i);
+              setChoice(null);
+            }}
+          />
+        )}
+      </Show>
       <Show when={confirmation()}>{(c) => <ConfirmDialog message={c().message} onAnswer={answer} />}</Show>
       <Show when={message()}>
         {(m) => (
@@ -479,6 +532,30 @@ export function App() {
         )}
       </Show>
     </AppContext>
+  );
+}
+
+/** A prompt with several answers and Cancel (Photoshop's Delete group prompt). Escape cancels. */
+function ChoiceDialog(props: { message: string; options: readonly string[]; onAnswer: (i: number | null) => void }) {
+  onSettled(() => dismissable(() => props.onAnswer(null)));
+  return (
+    <div class="fixed inset-0 z-50 grid place-items-center bg-black/40" data-testid="choice-dialog">
+      <div class="w-[28rem] rounded-sm border border-line bg-panel p-4 shadow-2xl" role="alertdialog" aria-modal="true">
+        <p class="mb-4 leading-relaxed">{props.message}</p>
+        <div class="flex justify-end gap-2">
+          <For each={props.options}>
+            {(o, i) => (
+              <Button primary={i() === 0} onClick={() => props.onAnswer(i())} testId={`choice-${i()}`}>
+                {o}
+              </Button>
+            )}
+          </For>
+          <Button onClick={() => props.onAnswer(null)} testId="choice-cancel">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

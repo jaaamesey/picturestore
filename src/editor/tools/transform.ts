@@ -1,12 +1,15 @@
-import { framedState, placementState, sourceFloating, toPlacement, withContent } from "../../core/content";
-import { activeLayer, docRect, updateLayer, type Doc, type Guide, type Layer, type LayerContent } from "../../core/document";
-import { boundsOf, intersect, isEmpty, vec, type Vec2 } from "../../core/geometry";
+import { renderLayers } from "../../core/composite";
+import { framedState, isPlaced, placementState, sourceFloating, toPlacement, withContent, type PlacedContent } from "../../core/content";
+import { PIXELS, docRect, editTarget, updateLayer, type Doc, type Guide, type Layer, type LayerContent } from "../../core/document";
+import { transformLayer } from "../../core/documentTransform";
+import { EMPTY_RECT, boundsOf, intersect, isEmpty, union, vec, type Rect, type Vec2 } from "../../core/geometry";
+import { allLayers, childrenOf, hasPixels, isGroup, updateIn } from "../../core/layers";
 import { guidePosition } from "../snapping";
 import { RULER_PX } from "../view";
-import { compositeOver, extractFloating } from "../../core/raster";
+import { compositeOver, extractFloating, type Floating } from "../../core/raster";
 import type { Filter } from "../../core/rasterize";
 import { transformMask, translateMask } from "../../core/selection";
-import { NO_PIXELS, contentBounds, translatePixels } from "../../core/pixels";
+import { NO_PIXELS, contentBounds, translatePixels, type Pixels } from "../../core/pixels";
 import {
   dragTransform,
   flip,
@@ -23,7 +26,8 @@ import {
   type TransformMode,
   type TransformState,
 } from "../../core/transform";
-import { IDENTITY_PATCH, isIdentityPatch } from "../../core/warp";
+import { IDENTITY_PATCH, invert3, invertPatch, isIdentityPatch, mapPoint, mul3, project, quadOf, squareToQuad, subMapping, type Mapping } from "../../core/warp";
+import type { FloatingPixels } from "../../gpu/renderer";
 import type { Tool, ToolContext, ToolEvent, ToolId } from "../types";
 
 export type TransformCommand = "rotate-180" | "rotate-90-cw" | "rotate-90-ccw" | "flip-horizontal" | "flip-vertical";
@@ -33,12 +37,17 @@ const HANDLE_PX = 7;
 const ROTATE_BAND_PX = 24;
 
 /**
- * What a transform session moves: pixels lifted off a pixel layer, or a smart
- * object's or shape's placement (re-rendered from its source, so repeated
- * transforms never degrade it). Each knows how to preview and apply a state.
+ * What a transform session moves: pixels lifted off a pixel layer or a
+ * mask, a smart object's or shape's placement (re-rendered from its source,
+ * so repeated transforms never degrade it), or a group's contents. Each
+ * knows how to preview and apply a state.
  */
 export interface Target {
   readonly layer: Layer;
+  /** Layers whose content moves (excluded from snapping). */
+  readonly moving: readonly string[];
+  /** Groups transform projectively, without Warp (as in Photoshop, which needs a smart object for that). */
+  readonly canWarp?: false;
   /** The untransformed state. */
   readonly initial: TransformState;
   /** Where the controls go: the content's frame, which can differ from `initial` (a warped placement as it is). */
@@ -48,90 +57,180 @@ export interface Target {
   place(ctx: ToolContext, s: TransformState, filter: Filter): Promise<Doc>;
 }
 
+/** Floating pixels moved through `m` at commit quality: exactly, when that's a whole-pixel move. */
+const land = (ctx: ToolContext, f: Floating, m: Mapping, filter: Filter, offset: Vec2 | null) =>
+  offset ? Promise.resolve(translatePixels(f.pixels, offset.x, offset.y)) : ctx.raster.resample(f, m, filter);
+
 /**
- * Lifts the selection (or the whole active layer) off a pixel layer. The
- * selection is hidden while its pixels float and reappears, transformed, on
- * commit. Whole-pixel moves are exact copies; anything else is resampled.
+ * Lifts the selection (or everything) off the target: a layer's pixels,
+ * with its linked mask following, or a mask on its own. The selection is
+ * hidden while its pixels float and reappears, transformed, on commit.
+ * Whole-pixel moves are exact copies; anything else is resampled.
  */
-function pixelTarget(doc: Doc, layer: Layer): Target | null {
-  const { floating, rest } = extractFloating(layer.pixels, doc.selection);
-  if (isEmpty(floating.bounds)) return null;
-  const initial = initialTransform(floating.bounds);
+function pixelTarget(doc: Doc, layer: Layer, mask: boolean): Target | null {
+  const lift = (p: Pixels) => extractFloating(p, doc.selection);
+  const main = lift(mask ? layer.mask!.pixels : layer.pixels);
+  if (isEmpty(main.floating.bounds)) return null;
+  // A linked mask moves with the layer's pixels.
+  const follower = !mask && layer.mask?.linked ? lift(layer.mask.pixels) : null;
+  const initial = initialTransform(main.floating.bounds);
+  const floatOf = (f: Floating, m: Mapping): FloatingPixels | null => (isEmpty(f.bounds) ? null : { ...f, mapping: m });
+  const rest = (pixels: Pixels, maskPixels: Pixels | null) =>
+    updateLayer(doc, layer.id, mask ? { mask: { ...layer.mask!, pixels } } : { pixels, ...(maskPixels && { mask: { ...layer.mask!, pixels: maskPixels } }) });
   return {
     layer,
+    moving: [layer.id],
     initial,
     frame: initial,
     show(ctx, s) {
-      ctx.preview({ ...updateLayer(doc, layer.id, { pixels: rest }), selection: null }, {
-        pixels: floating.pixels,
-        bounds: floating.bounds,
-        mapping: toMapping(s),
-        aboveLayerId: layer.id,
-        opacity: layer.opacity,
-        blendMode: layer.blendMode,
-      });
+      const m = toMapping(s);
+      const own = floatOf(main.floating, m);
+      const fm = follower && floatOf(follower.floating, subMapping(m, follower.floating.bounds));
+      ctx.preview({ ...rest(main.rest, follower?.rest ?? null), selection: null }, { layerId: layer.id, pixels: mask ? null : own, mask: mask ? own : fm });
     },
     async place(ctx, s, filter) {
       const offset = integerOffset(s);
+      const m = toMapping(s);
       const sel = doc.selection;
-      const moved = offset ? translatePixels(floating.pixels, offset.x, offset.y) : await ctx.raster.resample(floating, toMapping(s), filter);
-      const selection = sel && (offset ? translateMask(sel, offset.x, offset.y) : transformMask(sel, toMapping(s)));
-      return { ...updateLayer(doc, layer.id, { pixels: compositeOver(rest, moved) }), selection };
+      const moved = await land(ctx, main.floating, m, filter, offset);
+      const movedMask = follower && !isEmpty(follower.floating.bounds) ? compositeOver(follower.rest, await land(ctx, follower.floating, subMapping(m, follower.floating.bounds), filter, offset)) : null;
+      const selection = sel && (offset ? translateMask(sel, offset.x, offset.y) : transformMask(sel, m));
+      return { ...rest(compositeOver(main.rest, moved), movedMask), selection };
     },
   };
 }
 
-/** Smart objects and shapes transform as a whole, whatever is selected (as in Photoshop). */
 /**
- * Smart objects and shapes: Free Transform edits the content-framed state
- * (`framed`); the Move tool translates the placement as it is, so a moved
- * shape is recognisably the same content, moved (which renderers draw
- * without rasterizing again).
+ * Where something framed by `b` goes when content moves from state `from`
+ * to `to` (a placement's mask following it): exact for projective
+ * transforms; under a warp, its corners land exactly and the rest follows
+ * the homography between them.
  */
-function contentTarget(doc: Doc, layer: Layer, content: Exclude<LayerContent, { kind: "pixels" }>, framed: boolean): Target {
+function follow(from: TransformState, to: TransformState, b: Rect): Mapping {
+  const inverse = invert3(squareToQuad(from.quad)!)!;
+  const toMap = toMapping(to);
+  const corner = (p: Vec2) => {
+    let q = project(inverse, p.x, p.y);
+    if (from.patch) {
+      const st = invertPatch(from.patch, q);
+      if (st) q = vec(st.s, st.t);
+    }
+    return mapPoint(toMap, q.x, q.y);
+  };
+  const q = quadOf(b);
+  return { source: b, quad: [corner(q[0]), corner(q[1]), corner(q[2]), corner(q[3])], patch: null };
+}
+
+/**
+ * Smart objects and shapes transform as a whole, whatever is selected (as
+ * in Photoshop), their linked mask with them. Free Transform edits the
+ * content-framed state (`framed`); the Move tool translates the placement
+ * as it is, so a moved shape is recognisably the same content, moved (which
+ * renderers draw without rasterizing again).
+ */
+function contentTarget(doc: Doc, layer: Layer, content: PlacedContent, framed: boolean): Target {
   const clip = docRect(doc);
   const at = (s: TransformState): LayerContent => ({ ...content, placement: toPlacement(s) });
   const frame = framedState(content.placement);
+  const initial = framed ? frame : placementState(content.placement);
+  const maskPixels = layer.mask?.linked ? layer.mask.pixels : null;
+  const maskFloat: Floating | null = maskPixels && !isEmpty(contentBounds(maskPixels)) ? { pixels: maskPixels, bounds: contentBounds(maskPixels) } : null;
+  const withMask = (d: Doc, pixels: Pixels) => (maskFloat ? updateLayer(d, layer.id, { mask: { ...layer.mask!, pixels } }) : d);
+  /** A whole-pixel translation of the document, if that's all the transform is. */
+  const offsetOf = (s: TransformState): Vec2 | null => {
+    const dx = s.quad[0].x - initial.quad[0].x, dy = s.quad[0].y - initial.quad[0].y;
+    const same = s.patch === initial.patch && s.quad.every((q, i) => q.x - initial.quad[i].x === dx && q.y - initial.quad[i].y === dy);
+    return same && Number.isInteger(dx) && Number.isInteger(dy) ? vec(dx, dy) : null;
+  };
   return {
     layer,
-    initial: framed ? frame : placementState(content.placement),
+    moving: [layer.id],
+    initial,
     frame,
     show(ctx, s) {
+      const mask = maskFloat && { ...maskFloat, mapping: follow(initial, s, maskFloat.bounds) };
+      const base = withMask(doc, NO_PIXELS);
       // Shapes preview as themselves: the renderer rasterizes the vector on the GPU, exactly, every frame.
-      if (content.kind === "shape") return ctx.preview(updateLayer(doc, layer.id, { content: at(s) }));
-      ctx.preview(updateLayer(doc, layer.id, { pixels: NO_PIXELS }), {
-        ...sourceFloating(content.source),
-        mapping: toMapping(s),
-        aboveLayerId: layer.id,
-        opacity: layer.opacity,
-        blendMode: layer.blendMode,
-      });
+      if (content.kind === "shape") return ctx.preview(updateLayer(base, layer.id, { content: at(s) }), mask && { layerId: layer.id, pixels: null, mask });
+      ctx.preview(updateLayer(base, layer.id, { pixels: NO_PIXELS }), { layerId: layer.id, pixels: { ...sourceFloating(content.source), mapping: toMapping(s) }, mask });
     },
     async place(ctx, s, filter) {
       const { content: c, pixels } = await withContent(layer, at(s), clip, ctx.raster, filter);
-      return updateLayer(doc, layer.id, { content: c, pixels });
+      const d = updateLayer(doc, layer.id, { content: c, pixels });
+      return maskFloat ? withMask(d, await land(ctx, maskFloat, follow(initial, s, maskFloat.bounds), filter, offsetOf(s))) : d;
     },
   };
 }
 
-/** The active layer as a transform target; null when hidden or empty. `framed`: see {@link contentTarget}. */
+/** A group's layers with content of their own (bounding what moves). */
+const contentsOf = (g: Layer) => allLayers(childrenOf(g)).filter(hasPixels);
+
+/**
+ * A group: everything in it transforms together (masks included), as a
+ * projective map of the document. Whole-pixel moves preview exactly, by
+ * drawing its layers shifted; anything else previews the group's contents
+ * merged, as one floating image.
+ */
+function groupTarget(doc: Doc, group: Layer): Target | null {
+  const inside = contentsOf(group);
+  const bounds = inside.reduce((r, l) => union(r, contentBounds(l.pixels)), EMPTY_RECT);
+  if (isEmpty(bounds)) return null;
+  const initial = initialTransform(bounds);
+  const ids = new Set([group.id, ...allLayers(childrenOf(group)).map((l) => l.id)]);
+  let merged: Pixels | null = null;
+  return {
+    layer: group,
+    canWarp: false,
+    moving: [...ids],
+    initial,
+    frame: initial,
+    show(ctx, s) {
+      const offset = integerOffset(s);
+      if (offset) return ctx.preview(doc, { layerId: group.id, pixels: null, mask: null, shift: { ids, by: offset } });
+      merged ??= renderLayers([{ ...group, visible: true, clipped: false, opacity: 1, blendMode: "normal", mask: null }], bounds);
+      // The group stands in as one layer of its merged contents, with its mode, opacity, mask and clipping.
+      const stand: Layer = { ...group, content: PIXELS, pixels: NO_PIXELS, blendMode: group.blendMode === "pass through" ? "normal" : group.blendMode };
+      ctx.preview({ ...doc, layers: updateIn(doc.layers, group.id, () => stand) }, { layerId: group.id, pixels: { pixels: merged, bounds, mapping: toMapping(s) }, mask: null });
+    },
+    async place(ctx, s, filter) {
+      const H = squareToQuad(s.quad)!;
+      // Document space → the unit square over the bounds → the quad.
+      const matrix = mul3(H, [1 / bounds.w, 0, -bounds.x / bounds.w, 0, 1 / bounds.h, -bounds.y / bounds.h, 0, 0, 1]);
+      const moved = await transformLayer(group, { matrix, width: doc.width, height: doc.height, lengthScale: 1, filter, clipToCanvas: false }, ctx.raster);
+      return { ...doc, layers: updateIn(doc.layers, group.id, () => moved) };
+    },
+  };
+}
+
+/**
+ * The edit target as a transform target; null when hidden or empty.
+ * `framed`: see {@link contentTarget}.
+ */
 export function transformTarget(doc: Doc, framed = true): Target | null {
-  const layer = activeLayer(doc);
-  if (!layer || !layer.visible) return null;
-  return layer.content.kind === "pixels" ? pixelTarget(doc, layer) : contentTarget(doc, layer, layer.content, framed);
+  const t = editTarget(doc);
+  if (!t || !t.layer.visible) return null;
+  const { layer } = t;
+  if (t.mask) return pixelTarget(doc, layer, true);
+  if (isGroup(layer)) return groupTarget(doc, layer);
+  if (isPlaced(layer.content)) return contentTarget(doc, layer, layer.content, framed);
+  return layer.content.kind === "pixels" ? pixelTarget(doc, layer, false) : null;
 }
 
 /**
  * What the Move tool frames with its transform controls: a smart object's or
- * shape's placement, else the layer's content clipped to the selection.
- * Cheap (per-tile bounds are cached; nothing is lifted).
+ * shape's placement, a group's contents, else the target's content clipped
+ * to the selection. Cheap (per-tile bounds are cached; nothing is lifted).
  */
 export function moveFrame(doc: Doc): TransformState | null {
-  const layer = activeLayer(doc);
-  if (!layer || !layer.visible) return null;
-  if (layer.content.kind !== "pixels") return framedState(layer.content.placement);
-  const b = contentBounds(layer.pixels);
-  const box = doc.selection ? intersect(b, doc.selection.bounds) : b;
+  const t = editTarget(doc);
+  if (!t || !t.layer.visible) return null;
+  const { layer } = t;
+  let b: Rect;
+  if (!t.mask && isPlaced(layer.content)) return framedState(layer.content.placement);
+  if (!t.mask && isGroup(layer)) b = contentsOf(layer).reduce((r, l) => union(r, contentBounds(l.pixels)), EMPTY_RECT);
+  else if (!t.mask && layer.content.kind === "adjustment") return null;
+  else b = contentBounds(t.pixels);
+  const box = doc.selection && !isGroup(layer) ? intersect(b, doc.selection.bounds) : b;
   return isEmpty(box) ? null : initialTransform(box);
 }
 
@@ -305,7 +404,8 @@ export function createTransformController(): TransformController {
       steps = [];
       placeLabel = place?.label ?? null;
       state = target.initial;
-      if (m === "warp") state = { ...state, patch: state.patch ?? IDENTITY_PATCH };
+      if (m === "warp" && target.canWarp === false) mode = "free";
+      else if (m === "warp") state = { ...state, patch: state.patch ?? IDENTITY_PATCH };
       show(ctx);
       if (grab) down(ctx, grab.event, grab.hit);
       return true;
@@ -314,7 +414,7 @@ export function createTransformController(): TransformController {
     mode: () => mode,
     setState: (ctx, s) => record(ctx, s),
     setMode(ctx, m) {
-      if (!state) return;
+      if (!state || (m === "warp" && target?.canWarp === false)) return;
       mode = m;
       if (m === "warp" && !state.patch) record(ctx, { ...state, patch: IDENTITY_PATCH });
       else show(ctx);
@@ -333,7 +433,7 @@ export function createTransformController(): TransformController {
     down: (ctx, e) => down(ctx, e),
     move(ctx, e) {
       if (!drag || !state || !target) return;
-      state = dragTransform(drag, snappedPointer(ctx, drag, e, target.layer.id), e);
+      state = dragTransform(drag, snappedPointer(ctx, drag, e, target.moving), e);
       show(ctx);
     },
     up() {
@@ -424,7 +524,7 @@ export function createMoveTool(transform: TransformController): Tool {
       if (axis) [dx, dy] = axis === "x" ? [dx, 0] : [0, dy];
       // The moved bounds snap by an edge or the centre; Ctrl suspends snapping, as in Photoshop.
       const b = boundsOf(translate(target.frame, dx, dy).quad);
-      const sn = ctx.snap.rect(b, { exclude: [target.layer.id], off: e.mod });
+      const sn = ctx.snap.rect(b, { exclude: target.moving, off: e.mod });
       if (axis !== "y") dx += sn.x;
       if (axis !== "x") dy += sn.y;
       offset = vec(Math.round(dx), Math.round(dy));
@@ -462,9 +562,9 @@ export function createMoveTool(transform: TransformController): Tool {
  * snapped. Rotation doesn't snap (Shift steps it by 15°), and nor does a
  * move constrained by Shift.
  */
-function snappedPointer(ctx: ToolContext, drag: Drag, e: ToolEvent, layerId: string): Vec2 {
+function snappedPointer(ctx: ToolContext, drag: Drag, e: ToolEvent, moving: readonly string[]): Vec2 {
   const p = vec(e.x, e.y), d = vec(p.x - drag.start.x, p.y - drag.start.y);
-  const o = { exclude: [layerId] };
+  const o = { exclude: moving };
   const pulled = (at: Vec2) => {
     const s = ctx.snap.point(at, o);
     return vec(p.x + s.x - at.x, p.y + s.y - at.y);

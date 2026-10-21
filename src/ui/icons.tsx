@@ -33,6 +33,11 @@ const PATHS = {
   swap: "M15 4l3 3-3 3M18 7H9M9 20l-3-3 3-3M6 17h9",
   file: "M6 3h8l4 4v14H6zM14 3v4h4",
   folder: "M3 6h6l2 2h10v11H3z",
+  chevron: "M9 6l6 6-6 6",
+  adjust: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 3v18M12 3a9 9 0 0 1 0 18",
+  mask: "M4 4h16v16H4zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
+  link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+  clip: "M8 4v9a3 3 0 0 0 3 3h8M16 13l3 3-3 3",
 } as const;
 
 export type IconName = keyof typeof PATHS;

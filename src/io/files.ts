@@ -1,5 +1,6 @@
 import { smartSource } from "../core/content";
-import { createLayer, flatten, type Doc, type SmartSource } from "../core/document";
+import { createLayer, type Doc, type SmartSource } from "../core/document";
+import { flatten } from "../core/composite";
 import type { Floating } from "../core/raster";
 import { readRect, pixelsFromImage, type Pixels } from "../core/pixels";
 import type { SaveFormat } from "./formats";
@@ -52,7 +53,7 @@ export const encodeDocument = (doc: Doc, format: SaveFormat) => call({ op: "enco
 /** A document's pixels as one image: the layer itself when that's exact, else the composite. */
 function compositeTiles(doc: Doc): Pixels {
   const [only] = doc.layers;
-  const plain = doc.layers.length === 1 && only.visible && only.opacity === 1 && only.blendMode === "normal";
+  const plain = doc.layers.length === 1 && only.visible && only.opacity === 1 && only.blendMode === "normal" && only.content.kind === "pixels" && !only.mask;
   return plain ? only.pixels : pixelsFromImage(doc.width, doc.height, flatten(doc));
 }
 

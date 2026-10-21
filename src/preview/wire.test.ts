@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
-import { addLayer, createDocument, createLayer, fillPixels, flatten } from "../core/document";
+import { addLayer, createDocument, createLayer, fillPixels } from "../core/document";
+import { flatten } from "../core/composite";
 import { smartSource } from "../core/content";
 import { rect } from "../core/geometry";
 import { NO_PIXELS, type Tile } from "../core/pixels";
