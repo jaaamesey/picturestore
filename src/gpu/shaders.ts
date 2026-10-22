@@ -534,10 +534,16 @@ struct View {
   hasSel: u32,
   lod: f32,
   workspace: vec4<f32>,
-  /** 1 when the composite is stored below document resolution (GPU memory pressure). */
-  reduced: u32,
+  /** 1 when frame pixels map to whole screen pixels, so they're read as they are. */
+  exact: u32,
+  /** Document pixels per frame pixel (2^level). */
+  scale: f32,
   /** The view's rotation (cos, sin). */
   rot: vec2<f32>,
+  /** The frame: where it starts in the document, its textures' size, and the part of them it fills. */
+  origin: vec2<f32>,
+  texSize: vec2<f32>,
+  frameSize: vec2<f32>,
 }
 @group(0) @binding(0) var<uniform> V: View;
 @group(0) @binding(1) var composite: texture_2d<f32>;
@@ -546,9 +552,12 @@ struct View {
 
 ${FULLSCREEN_VS}
 
+/** Where a document point is in the frame, in frame pixels. */
+fn framePos(doc: vec2<f32>) -> vec2<f32> { return (doc - V.origin) / V.scale; }
+
 fn selected(doc: vec2<f32>) -> bool {
   if (any(doc < vec2<f32>(0.0)) || any(doc >= V.docSize)) { return false; }
-  return textureLoad(sel, vec2<i32>(doc), 0).r >= 0.5;
+  return textureLoad(sel, vec2<i32>(framePos(doc)), 0).r >= 0.5;
 }
 
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
@@ -557,11 +566,13 @@ fn selected(doc: vec2<f32>) -> bool {
   if (any(doc < vec2<f32>(0.0)) || any(doc >= V.docSize)) { return V.workspace; }
 
   var c: vec4<f32>;
-  // Rotated views sample (bilinear) rather than pick a texel.
-  if (V.lod <= 0.0 && V.reduced == 0u && V.rot.y == 0.0) {
-    c = textureLoad(composite, vec2<i32>(doc), 0);
+  let f = framePos(doc);
+  if (V.exact == 1u) {
+    c = textureLoad(composite, vec2<i32>(f), 0);
   } else {
-    c = textureSampleLevel(composite, samp, doc / V.docSize, V.lod);
+    // Filtered, but never reaching past the frame's edge (the document's) into unused texels.
+    let edge = vec2<f32>(0.5 * exp2(V.lod));
+    c = textureSampleLevel(composite, samp, clamp(f, edge, V.frameSize - edge) / V.texSize, V.lod);
   }
   let cell = vec2<i32>(floor(pos.xy / 8.0));
   let checker = select(1.0, 0.8, ((cell.x + cell.y) & 1) == 1);

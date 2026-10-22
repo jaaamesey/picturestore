@@ -128,8 +128,7 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
     are freed. If an allocation fails anyway, the operation is abandoned, undo history is cleared to free memory
     and a message says so; documents are never discarded.
   - *GPU*: if the tile atlas can't grow or a GPU allocation fails, the canvas is redrawn at 1/2, 1/4… resolution
-    (down to 1/16), hidden layers keep no GPU copy, and documents larger than the GPU's texture limit open
-    reduced. Commits are still full quality (GPU, or the CPU reference if the GPU can't). Repeated device loss
+    (down to 1/16), and hidden layers keep no GPU copy. Commits are still full quality (GPU, or the CPU reference if the GPU can't). Repeated device loss
     also steps quality down.
   - A status-bar warning shows what's been given up, with "Retry full quality".
   - *Recovery*: unsaved documents are written to browser storage (OPFS) every 10 minutes by default and offered
@@ -205,10 +204,15 @@ flattening after mapping and strokes built from edge quads with miter/bevel join
 Selection masks store only their bounds.
 
 **The CPU owns pixels; the GPU is a cache.** Tools edit tiles on the CPU (deterministic and testable). The
-renderer keeps on-canvas tiles in a shared **tile atlas** (a texture array grown on demand), so GPU memory
-scales with content rather than layers × canvas size. Each layer composites as one instanced draw over its
-tiles: Normal layers use fixed-function premultiplied blending in a single pass; other blend modes read a
-scissored copy of the destination. Only dirty regions are recomposited and re-mipmapped. Because nothing lives
+renderer composites only the **frame**: the part of the document in view (plus a slot of margin), at the
+coarsest power-of-two reduction still at least as fine as the screen's pixels — as Photoshop draws from its
+cache levels. So a 12000×12000 document costs about what the screen does: zoomed out it's composited at 1/8,
+at 100% only what's visible. Tiles in the frame live in a shared **tile atlas** (a texture array grown on
+demand) of 256² slots; at reduction 1/2^L a slot holds 2^L × 2^L tiles, box-filtered on upload (and cached),
+so GPU memory scales with what's on screen rather than layers × canvas size. Each layer composites as one
+instanced draw over its slots: Normal layers use fixed-function premultiplied blending in a single pass;
+other blend modes read a scissored copy of the destination. The frame stays put until the view leaves it;
+within it only dirty regions are recomposited and re-mipmapped. Because nothing lives
 only on the GPU, a lost device is recovered by re-uploading.
 
 **Transforms are exact projective maps plus an optional warp.** A transform is the quad the source's corners

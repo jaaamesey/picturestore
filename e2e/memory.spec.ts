@@ -1,14 +1,18 @@
 import { expect, test } from "@playwright/test";
-import { cpuPixel, drag, expectClose, expectHistory, gpuPixels, historyLabels, newDocument, setForeground } from "./helpers";
+import { cpuPixel, drag, expectClose, expectHistory, gpuPixels, historyLabels, newDocument, screenPixel, setForeground } from "./helpers";
 
 test("under GPU memory pressure the canvas is drawn at reduced quality, and commits stay exact", async ({ page }) => {
-  // One atlas page holds 64 full-resolution tiles; this document needs 121.
+  // One atlas page holds 64 slots. Fitted, this document is drawn at 1/2 resolution, where two full
+  // layers need 2 × 36 slots: it drops to 1/4.
   await newDocument(page, 2600, 2600, "white", "&gpuAtlasPages=1");
+  const indicator = page.getByTestId("memory-indicator");
+  await expect(indicator).toHaveCount(0);
+  await page.getByTestId("new-layer").click();
   await setForeground(page, "ff0000");
   await page.keyboard.press("Alt+Backspace");
-  const indicator = page.getByTestId("memory-indicator");
   await expect(indicator).toBeVisible();
-  await expect(indicator).toHaveAttribute("data-gpu-level", "1");
+  await expect(indicator).toHaveAttribute("data-gpu-level", "2");
+  expectClose(await screenPixel(page, 1300, 1300), [255, 0, 0, 255]);
   expectClose((await gpuPixels(page, [[1300, 1300]]))[0], [255, 0, 0, 255]);
 
   // Transforms still commit at full resolution (on the GPU, or the CPU when it can't).
@@ -22,14 +26,14 @@ test("under GPU memory pressure the canvas is drawn at reduced quality, and comm
   await page.getByTestId("transform-commit").click();
   await expectHistory(page, "Free Transform");
   // Moved one pixel right: single-pixel edges show the layer itself is untouched by the display's reduction.
-  expect(await cpuPixel(page, 100, 50)).toEqual([0, 0, 0, 0]);
+  expect(await cpuPixel(page, 100, 50)).toEqual([255, 255, 255, 255]);
   expect(await cpuPixel(page, 101, 50)).toEqual([255, 0, 0, 255]);
 
   await indicator.click();
-  await expect(page.getByTestId("memory-details")).toContainText("1/2 resolution");
+  await expect(page.getByTestId("memory-details")).toContainText("1/4 resolution");
   await page.getByRole("button", { name: "Retry full quality" }).click();
   // Still too big for one page: it comes straight back to reduced quality.
-  await expect(indicator).toHaveAttribute("data-gpu-level", "1");
+  await expect(indicator).toHaveAttribute("data-gpu-level", "2");
 });
 
 test("Preferences: History States limits undo history, and persists", async ({ page }) => {

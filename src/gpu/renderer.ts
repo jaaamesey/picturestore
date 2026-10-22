@@ -125,6 +125,26 @@ const WORKSPACE = [0.16, 0.16, 0.17, 1];
 /** The workspace around the canvas, for overlays that match it (the crop shield). */
 export const WORKSPACE_CSS = `rgb(${WORKSPACE.slice(0, 3).map((v) => Math.round(v * 255)).join(" ")})`;
 const CHUNK = 2048; // resample output is rendered and read back in chunks of at most this size
+const SLOTS_PER_SIDE = ATLAS_PAGE / TILE_SIZE;
+const SLOTS_PER_PAGE = SLOTS_PER_SIDE * SLOTS_PER_SIDE;
+const ZEROS = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
+const VIEW_UNIFORM_SIZE = 96; // sizeof(View)
+
+/** Tiles reduced for display, cached at the level last drawn (panning brings them back). */
+const reductions = new WeakMap<Tile, { version: number; level: number; data: Uint8ClampedArray<ArrayBuffer> }>();
+function reduced(tile: Tile, level: number): Uint8ClampedArray<ArrayBuffer> {
+  const c = reductions.get(tile);
+  if (c && c.version === tile.version && c.level === level) return c.data;
+  // One colour throughout (a fill, the background) needs no filtering.
+  const words = new Uint32Array(tile.data.buffer, tile.data.byteOffset, TILE_SIZE * TILE_SIZE);
+  const first = words[0];
+  let uniform = true;
+  for (let i = 1; i < words.length && uniform; i++) uniform = words[i] === first;
+  const n = TILE_SIZE >> level;
+  const data = uniform ? new Uint8ClampedArray(new Uint32Array(n * n).fill(first).buffer) : downsampleTile(tile, level);
+  reductions.set(tile, { version: tile.version, level, data });
+  return data;
+}
 
 export async function requestDevice(): Promise<GPUDevice> {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -163,8 +183,10 @@ interface AdjustResources {
 }
 
 interface LayerEntry {
-  /** What's in the atlas for each on-canvas tile (tile is null for tiles the GPU rasterized). */
-  readonly slots: Map<TileKey, { slot: number; tile: Tile | null; version: number }>;
+  /** The atlas slots in use, keyed by slot-grid position (at level L a slot holds 2^L × 2^L tiles), with how many of `tiles` each holds. */
+  readonly slots: Map<TileKey, { slot: number; count: number }>;
+  /** The document tiles uploaded, as of which version. */
+  readonly tiles: Map<TileKey, { tile: Tile; version: number }>;
   /** For shape layers: the content last rasterized, and what of it was rasterized (document space, within the canvas). */
   shape: ShapeContent | null;
   shapeBounds: Rect;
@@ -208,13 +230,9 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
     ],
   });
-  // Quality reduction under GPU memory pressure: tiles are stored at
-  // slot² texels and the composite at 1/2^level of document resolution.
-  let level = Math.min(MAX_LEVEL, options.level ?? 0);
-  let slotSize = TILE_SIZE >> level;
-  let slotsPerSide = ATLAS_PAGE / slotSize;
-  let slotsPerPage = slotsPerSide * slotsPerSide;
-  let tilesModule = module(tilesWgsl(slotSize));
+  // Quality reduction under GPU memory pressure: the composite is never finer than 1/2^bias.
+  let bias = Math.min(MAX_LEVEL, options.level ?? 0);
+  const tilesModule = module(tilesWgsl(TILE_SIZE));
   const tilePipeline = (entryPoint: string, blend?: GPUBlendState, format = ACCUM_FORMAT) =>
     device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [tileLayout] }),
@@ -225,13 +243,12 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       },
       fragment: { module: tilesModule, entryPoint, targets: [{ format, blend }] },
     });
-  const tilePipelines = () => ({
+  const tile = {
     normal: tilePipeline("fs_normal", PREMULTIPLIED_OVER),
     atop: tilePipeline("fs_normal", PREMULTIPLIED_ATOP),
     mode: tilePipeline("fs_mode"),
     mask: tilePipeline("fs_mask", PREMULTIPLIED_OVER, MASK_FORMAT),
-  });
-  let tile = tilePipelines();
+  };
 
   const meshLayout = device.createBindGroupLayout({
     entries: [
@@ -324,7 +341,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   const vectors = createVectorRasterizer(device);
   const stats = { shapesRasterized: 0, shapesMoved: 0 };
   const trilinear = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
-  const viewUniforms = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const viewUniforms = device.createBuffer({ size: VIEW_UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   let drawUniforms = device.createBuffer({ size: UNIFORM_SLOT * 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   // --- Tile atlas ---------------------------------------------------------
@@ -363,7 +380,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
   function allocSlot(): number {
     if (freeSlots.length) return freeSlots.pop()!;
-    if (nextSlot >= pages * slotsPerPage) {
+    if (nextSlot >= pages * SLOTS_PER_PAGE) {
       const grown = Math.min(maxPages, pages * 2);
       if (grown === pages) throw new AtlasFull();
       // Shapes already encoded this frame write into the current atlas: run them before it's copied.
@@ -380,33 +397,122 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return nextSlot++;
   }
 
-  const uploadTile = (slot: number, tile: Tile) => {
-    const local = slot % slotsPerPage;
-    device.queue.writeTexture(
-      { texture: atlas, origin: [(local % slotsPerSide) * slotSize, Math.floor(local / slotsPerSide) * slotSize, Math.floor(slot / slotsPerPage)] },
-      level === 0 ? (tile.data as Uint8ClampedArray<ArrayBuffer>) : downsampleTile(tile, level),
-      { bytesPerRow: slotSize * 4, rowsPerImage: slotSize },
-      [slotSize, slotSize, 1],
-    );
+  /** Where a slot's texels start in the atlas. */
+  const slotOrigin = (slot: number) => {
+    const local = slot % SLOTS_PER_PAGE;
+    return [(local % SLOTS_PER_SIDE) * TILE_SIZE, Math.floor(local / SLOTS_PER_SIDE) * TILE_SIZE, Math.floor(slot / SLOTS_PER_PAGE)];
   };
 
-  // --- Per-document resources ---------------------------------------------
+  /**
+   * Writes document tile (tx, ty) into its part of a slot: at level L a slot
+   * holds 2^L × 2^L tiles, each reduced to (256 / 2^L)² texels (null clears it).
+   */
+  function uploadTile(slot: number, tx: number, ty: number, tile: Tile | null) {
+    const L = frame.level, n = TILE_SIZE >> L, mask = (1 << L) - 1;
+    const [x, y, page] = slotOrigin(slot);
+    const data = tile ? (L === 0 ? (tile.data as Uint8ClampedArray<ArrayBuffer>) : reduced(tile, L)) : ZEROS;
+    device.queue.writeTexture({ texture: atlas, origin: [x + (tx & mask) * n, y + (ty & mask) * n, page] }, data, { bytesPerRow: n * 4, rowsPerImage: n }, [n, n, 1]);
+  }
+
+  const clearSlot = (slot: number) =>
+    device.queue.writeTexture({ texture: atlas, origin: slotOrigin(slot) }, ZEROS, { bytesPerRow: TILE_SIZE * 4, rowsPerImage: TILE_SIZE }, [TILE_SIZE, TILE_SIZE, 1]);
+
+  // --- Frame ----------------------------------------------------------------
   let size = { width: 0, height: 0 };
-  /** The composite's resolution: the document at 1/2^level. */
-  let px = { width: 0, height: 0 };
-  /** A document-space rectangle in composite pixels (rounded outwards). */
-  const toPx = (r: Rect): Rect => {
-    if (level === 0) return r;
-    const x0 = r.x >> level, y0 = r.y >> level;
-    return intersect(rect(x0, y0, ((r.x + r.w + (1 << level) - 1) >> level) - x0, ((r.y + r.h + (1 << level) - 1) >> level) - y0), rect(0, 0, px.width, px.height));
+  /**
+   * What's composited: the part of the document in view, plus a margin, at
+   * 1/2^level resolution — the coarsest level still at least as fine as the
+   * screen's pixels. Its origin is on the grid of atlas slots, which at level
+   * L each hold 2^L × 2^L document tiles reduced to fit. `w` × `h` is its
+   * size in composite pixels.
+   */
+  interface Frame {
+    readonly x: number;
+    readonly y: number;
+    readonly level: number;
+    readonly w: number;
+    readonly h: number;
+  }
+  /** No frame yet: the next render places one. */
+  const NO_FRAME: Frame = { x: 0, y: 0, level: -1, w: 0, h: 0 };
+  let frame = NO_FRAME;
+  /** The frame in document space. */
+  const frameRect = (f = frame) => intersect(rect(f.x, f.y, f.w << f.level, f.h << f.level), rect(0, 0, size.width, size.height));
+  /** The document tiles the frame covers: [x0, x1) × [y0, y1). */
+  let frameTiles = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  const inFrame = (key: TileKey) => {
+    const tx = keyX(key), ty = keyY(key), t = frameTiles;
+    return tx >= t.x0 && tx < t.x1 && ty >= t.y0 && ty < t.y1;
   };
+  /** A document-space rectangle in frame pixels (rounded outwards). */
+  const toPx = (r: Rect): Rect => {
+    const L = frame.level, k = (1 << L) - 1;
+    const x0 = (r.x - frame.x) >> L, y0 = (r.y - frame.y) >> L;
+    return intersect(rect(x0, y0, ((r.x + r.w - frame.x + k) >> L) - x0, ((r.y + r.h - frame.y + k) >> L) - y0), rect(0, 0, frame.w, frame.h));
+  };
+
+  /** The frame a view needs, and the part of the document it shows. */
+  function frameFor(view: View): { frame: Frame; visible: Rect } {
+    const dpr = window.devicePixelRatio || 1;
+    const c = Math.cos(view.rotation ?? 0), s = Math.sin(view.rotation ?? 0);
+    // Screen = R·doc·zoom + pan, so doc = Rᵀ(screen − pan) / zoom.
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [sx, sy] of [[0, 0], [canvas.clientWidth, 0], [0, canvas.clientHeight], [canvas.clientWidth, canvas.clientHeight]]) {
+      const dx = (sx - view.panX) / view.zoom, dy = (sy - view.panY) / view.zoom;
+      const x = c * dx + s * dy, y = -s * dx + c * dy;
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, y);
+    }
+    const doc = rect(0, 0, size.width, size.height);
+    const visible = intersect(roundOut({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }), doc);
+    const max = device.limits.maxTextureDimension2D;
+    let level = Math.min(MAX_LEVEL, Math.max(bias, Math.floor(1e-6 - Math.log2(view.zoom * dpr))));
+    for (;; level++) {
+      // A slot's worth of margin all round, so panning a little stays within it.
+      const unit = TILE_SIZE << level;
+      const fx = Math.max(0, (Math.floor(visible.x / unit) - 1) * unit), fy = Math.max(0, (Math.floor(visible.y / unit) - 1) * unit);
+      const fx1 = Math.min(size.width, (Math.ceil((visible.x + visible.w) / unit) + 1) * unit);
+      const fy1 = Math.min(size.height, (Math.ceil((visible.y + visible.h) / unit) + 1) * unit);
+      const w = isEmpty(visible) ? 0 : Math.ceil((fx1 - fx) / (1 << level)), h = isEmpty(visible) ? 0 : Math.ceil((fy1 - fy) / (1 << level));
+      if ((w <= max && h <= max) || level >= MAX_LEVEL) return { frame: { x: fx, y: fy, level, w, h }, visible };
+    }
+  }
+
+  /** The whole document at the finest level memory allows (for reading the composite back). */
+  const wholeFrame = (): Frame => ({ x: 0, y: 0, level: bias, w: Math.ceil(size.width / (1 << bias)), h: Math.ceil(size.height / (1 << bias)) });
+
+  /** Moves the frame if the view has left it or needs another level; returns whether it moved. */
+  function updateFrame(view: View, whole: boolean): boolean {
+    const want = whole ? { frame: wholeFrame(), visible: EMPTY_RECT } : frameFor(view);
+    const next = want.frame, f = frame;
+    // Kept while it still covers the view and isn't much bigger than needed.
+    if (!whole && next.level === f.level && contains(frameRect(f), want.visible) && f.w * f.h <= 2 * next.w * next.h) return false;
+    if (next.x === f.x && next.y === f.y && next.level === f.level && next.w === f.w && next.h === f.h) return false;
+    if (next.level !== f.level) dropResidency();
+    frame = next;
+    const r = frameRect();
+    frameTiles = { x0: Math.floor(r.x / TILE_SIZE), y0: Math.floor(r.y / TILE_SIZE), x1: Math.ceil((r.x + r.w) / TILE_SIZE), y1: Math.ceil((r.y + r.h) / TILE_SIZE) };
+    ensureCapacity(next.w, next.h);
+    lastSelection = undefined;
+    selectionWritten = rect(0, 0, capacity.width, capacity.height);
+    return true;
+  }
+
+  // --- Frame textures ------------------------------------------------------------
+  /** Their size: grown to fit the largest frame so far, never shrunk (except under memory pressure). */
+  let capacity = { width: 0, height: 0 };
   let accum: GPUTexture | null = null;
   let scratch: GPUTexture | null = null;
   /** Layer mask coverage at composite resolution: a layer's own (A) and its clipping base's (B). */
   let masks: [GPUTexture, GPUTexture] | null = null;
   /** Intermediate surfaces for groups and clipping groups, one per nesting depth in use (allocated as needed). */
   const surfaces: GPUTexture[] = [];
+  /** The selection over the frame, at its resolution. */
   let selectionTexture: GPUTexture | null = null;
+  /** The part of the selection texture last written (frame pixels). */
+  let selectionWritten = EMPTY_RECT;
   let mipCount = 1;
   let mipsDirty = EMPTY_RECT;
   let tileBindGroup: GPUBindGroup | null = null;
@@ -426,7 +532,6 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   };
   let lastFloating: FloatingLayer | null = null;
   let lastSelection: Mask | null | undefined = undefined;
-  let selectionBounds = EMPTY_RECT;
 
   function rebuildBindGroups() {
     if (!accum) return;
@@ -466,6 +571,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     for (const { slot } of entry.slots.values()) freeSlots.push(slot);
     if (entry.slots.size) entry.instancesDirty = true;
     entry.slots.clear();
+    entry.tiles.clear();
     entry.instanceCount = 0;
     entry.shape = null;
     entry.shapeBounds = EMPTY_RECT;
@@ -481,39 +587,48 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   function resetDocument(width: number, height: number) {
     for (const entry of layers.values()) freeLayer(entry);
     layers.clear();
+    size = { width, height };
+    frame = NO_FRAME;
+    lastStructure = "";
+    lastFloating = null;
+    lastSelection = undefined;
+  }
+
+  function destroyFrameTextures() {
     accum?.destroy();
     scratch?.destroy();
     selectionTexture?.destroy();
     masks?.forEach((t) => t.destroy());
     for (const t of surfaces.splice(0)) t.destroy();
-    size = { width, height };
-    // A document beyond the device's texture size can only be shown reduced.
-    const maxDim = device.limits.maxTextureDimension2D;
-    while (level < MAX_LEVEL && Math.max(width, height) >> level > maxDim) setLevel(level + 1);
-    px = { width: Math.max(1, Math.ceil(width / (1 << level))), height: Math.max(1, Math.ceil(height / (1 << level))) };
-    mipCount = Math.floor(Math.log2(Math.max(px.width, px.height))) + 1;
-    allocating(() => createDocumentTextures(width, height));
-    rebuildBindGroups();
-    lastStructure = "";
-    lastFloating = null;
-    lastSelection = undefined;
-    selectionBounds = EMPTY_RECT;
+    accum = scratch = selectionTexture = masks = null;
   }
 
-  function createDocumentTextures(width: number, height: number) {
+  function ensureCapacity(w: number, h: number) {
+    if (accum && w <= capacity.width && h <= capacity.height) return;
+    const max = device.limits.maxTextureDimension2D;
+    const fit = (n: number, had: number) => Math.min(max, Math.max(had, Math.ceil(Math.max(1, n) / TILE_SIZE) * TILE_SIZE));
+    capacity = { width: fit(w, capacity.width), height: fit(h, capacity.height) };
+    destroyFrameTextures();
+    mipCount = Math.floor(Math.log2(Math.max(capacity.width, capacity.height))) + 1;
+    allocating(createFrameTextures);
+    rebuildBindGroups();
+  }
+
+  function createFrameTextures() {
+    const { width, height } = capacity;
     accum = device.createTexture({
-      size: [px.width, px.height],
+      size: [width, height],
       format: ACCUM_FORMAT,
       mipLevelCount: mipCount,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
     });
     scratch = device.createTexture({
-      size: [px.width, px.height],
+      size: [width, height],
       format: ACCUM_FORMAT,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     const mask = () =>
-      device.createTexture({ size: [px.width, px.height], format: MASK_FORMAT, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
+      device.createTexture({ size: [width, height], format: MASK_FORMAT, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
     masks = [mask(), mask()];
     selectionTexture = device.createTexture({
       size: [width, height],
@@ -531,37 +646,38 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     });
   }
 
-  /** Switches the quality reduction, dropping every GPU copy so it's re-uploaded at the new scale. */
-  function setLevel(next: number) {
-    level = next;
-    slotSize = TILE_SIZE >> level;
-    slotsPerSide = ATLAS_PAGE / slotSize;
-    slotsPerPage = slotsPerSide * slotsPerSide;
-    tilesModule = module(tilesWgsl(slotSize));
-    tile = tilePipelines();
-    for (const entry of layers.values()) freeLayer(entry);
-    layers.clear();
+  /** Drops every layer's atlas contents, to be uploaded again at the frame's new level. */
+  function dropResidency() {
+    flushShapes();
+    for (const entry of layers.values()) releaseSlots(entry);
     freeSlots.length = 0;
     nextSlot = 0;
-    atlas.destroy();
-    pages = 1;
-    atlas = createAtlas(pages);
     for (const f of Object.values(floats)) {
       f.texture?.texture.destroy();
       f.texture = null;
     }
     lastFloating = null;
-    options.onLevelChange?.(level);
   }
 
-  /** Rebuilds the document's GPU state at the next lower quality. */
+  /** Switches the quality reduction, releasing every GPU copy so it's rebuilt at the new scale. */
+  function setBias(next: number) {
+    bias = next;
+    dropResidency();
+    atlas.destroy();
+    pages = 1;
+    atlas = createAtlas(pages);
+    destroyFrameTextures();
+    capacity = { width: 0, height: 0 };
+    frame = NO_FRAME;
+    options.onLevelChange?.(bias);
+  }
+
+  /** Rebuilds the GPU state at the next lower quality. */
   function degrade(): boolean {
-    if (level >= MAX_LEVEL) return false;
-    console.warn(`GPU memory is constrained; drawing at 1/${2 << level} resolution.`);
-    setLevel(level + 1);
-    const { width, height } = size;
-    size = { width: 0, height: 0 };
-    resetDocument(width, height);
+    const at = Math.max(bias, frame.level);
+    if (at >= MAX_LEVEL) return false;
+    console.warn(`GPU memory is constrained; drawing at 1/${2 << at} resolution.`);
+    setBias(at + 1);
     return true;
   }
 
@@ -578,31 +694,43 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     for (const release of w.releases) release();
   }
 
+  /** Uploads what changed of a layer's tiles within the frame, and drops those that left it; returns the area that changed. */
   function syncLayer(entry: LayerEntry, tiles: Pixels): Rect {
-    const canvasRect = rect(0, 0, size.width, size.height);
-    // Was a shape (since rasterized): its GPU-rendered tiles are replaced by uploads below.
-    let dirty = entry.shape ? translateRect(entry.shapeBounds, entry.offset) : EMPTY_RECT;
-    entry.shape = null;
-    entry.shapeBounds = EMPTY_RECT;
-    entry.shapeExtent = EMPTY_RECT;
-    entry.offset = ZERO;
-    for (const [key, tile] of tiles) {
-      const r = tileRect(keyX(key), keyY(key));
-      if (isEmpty(intersect(r, canvasRect))) continue;
-      const prev = entry.slots.get(key);
-      if (prev && prev.tile === tile && prev.version === tile.version) continue;
-      const slot = prev?.slot ?? allocSlot();
-      uploadTile(slot, tile);
-      entry.slots.set(key, { slot, tile, version: tile.version });
-      if (!prev) entry.instancesDirty = true;
-      dirty = union(dirty, r);
+    // Was a shape (since rasterized): its GPU-rendered slots are replaced by uploads.
+    let dirty = EMPTY_RECT;
+    if (entry.shape) {
+      dirty = translateRect(entry.shapeBounds, entry.offset);
+      releaseSlots(entry);
     }
-    for (const [key, { slot }] of entry.slots) {
-      if (tiles.has(key)) continue;
-      entry.slots.delete(key);
-      freeSlots.push(slot);
-      entry.instancesDirty = true;
-      dirty = union(dirty, tileRect(keyX(key), keyY(key)));
+    const L = frame.level;
+    for (const [key, tile] of tiles) {
+      if (!inFrame(key)) continue;
+      const prev = entry.tiles.get(key);
+      if (prev && prev.tile === tile && prev.version === tile.version) continue;
+      const tx = keyX(key), ty = keyY(key), at = tileKey(tx >> L, ty >> L);
+      let s = entry.slots.get(at);
+      if (!s) {
+        s = { slot: allocSlot(), count: 0 };
+        if (L > 0) clearSlot(s.slot);
+        entry.slots.set(at, s);
+        entry.instancesDirty = true;
+      }
+      if (!prev) s.count++;
+      uploadTile(s.slot, tx, ty, tile);
+      entry.tiles.set(key, { tile, version: tile.version });
+      dirty = union(dirty, tileRect(tx, ty));
+    }
+    for (const key of entry.tiles.keys()) {
+      if (tiles.has(key) && inFrame(key)) continue;
+      entry.tiles.delete(key);
+      const tx = keyX(key), ty = keyY(key), at = tileKey(tx >> L, ty >> L);
+      const s = entry.slots.get(at)!;
+      if (--s.count === 0) {
+        entry.slots.delete(at);
+        freeSlots.push(s.slot);
+        entry.instancesDirty = true;
+      } else uploadTile(s.slot, tx, ty, null);
+      dirty = union(dirty, tileRect(tx, ty));
     }
     writeInstances(entry);
     return dirty;
@@ -625,17 +753,24 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
   /**
    * Rasterizes a shape layer on the GPU, straight into its atlas slots, at
-   * the display's resolution. Only when its content changes (or the display
-   * level does); CPU tiles of shape layers are never uploaded.
+   * the frame's resolution and within it. Only when its content changes, or
+   * the frame no longer holds what's rasterized; CPU tiles of shape layers
+   * are never uploaded.
    */
   function syncShape(entry: LayerEntry, content: ShapeContent): Rect {
-    const canvasRect = rect(0, 0, size.width, size.height);
-    const drawn = translateRect(entry.shapeBounds, entry.offset);
-    // Moved by whole pixels, with nothing previously off the canvas coming into view: draw what's
+    const L = frame.level;
+    const area = frameRect();
+    // Was pixels: start afresh.
+    let drawn = translateRect(entry.shapeBounds, entry.offset);
+    if (entry.tiles.size) {
+      releaseSlots(entry);
+      drawn = area;
+    }
+    // Moved by whole pixels, with nothing not yet rasterized coming into the frame: draw what's
     // already rasterized, offset, instead of rasterizing again.
-    const d = entry.shape && wholePixelMove(entry.shape, content, 1 << level);
+    const d = entry.shape && wholePixelMove(entry.shape, content, 1 << L);
     if (d && entry.shape) {
-      const visible = intersect(translateRect(entry.shapeExtent, d), canvasRect);
+      const visible = intersect(translateRect(entry.shapeExtent, d), area);
       if (contains(translateRect(entry.shapeBounds, d), visible)) {
         if (d.x === entry.offset.x && d.y === entry.offset.y) return EMPTY_RECT;
         entry.offset = d;
@@ -645,13 +780,13 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     }
     entry.offset = ZERO;
     stats.shapesRasterized++;
-    const seg = shapeSegments(content.geometry, content.style, placementMapping(content.placement), 1 / (1 << level));
+    const seg = shapeSegments(content.geometry, content.style, placementMapping(content.placement), 1 / (1 << L));
     const extent = roundOut(seg.bounds);
-    const bounds = intersect(extent, canvasRect);
+    const bounds = intersect(extent, area);
     entry.shapeExtent = extent;
     const dirty = union(drawn, bounds);
     const keep = new Set<TileKey>();
-    for (const [tx, ty] of tilesIn(bounds)) keep.add(tileKey(tx, ty));
+    for (const [tx, ty] of tilesIn(bounds)) keep.add(tileKey(tx >> L, ty >> L));
     for (const [key, { slot }] of entry.slots) {
       if (keep.has(key)) continue;
       entry.slots.delete(key);
@@ -661,27 +796,29 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     entry.shape = content;
     entry.shapeBounds = bounds;
     if (!isEmpty(bounds)) {
-      const tx0 = Math.floor(bounds.x / TILE_SIZE), ty0 = Math.floor(bounds.y / TILE_SIZE);
-      const cols = Math.floor((bounds.x + bounds.w - 1) / TILE_SIZE) - tx0 + 1;
-      const rows = Math.floor((bounds.y + bounds.h - 1) / TILE_SIZE) - ty0 + 1;
+      // Slot (sx, sy) is the 256² block of level-L pixels at (256·sx, 256·sy).
+      const unit = TILE_SIZE << L;
+      const sx0 = Math.floor(bounds.x / unit), sy0 = Math.floor(bounds.y / unit);
+      const cols = Math.floor((bounds.x + bounds.w - 1) / unit) - sx0 + 1;
+      const rows = Math.floor((bounds.y + bounds.h - 1) / unit) - sy0 + 1;
       const slots = new Int32Array(cols * rows);
       for (let j = 0; j < rows; j++)
         for (let i = 0; i < cols; i++) {
-          const key = tileKey(tx0 + i, ty0 + j);
+          const key = tileKey(sx0 + i, sy0 + j);
           let s = entry.slots.get(key);
           if (!s) {
-            s = { slot: allocSlot(), tile: null, version: 0 };
+            s = { slot: allocSlot(), count: 0 };
             entry.slots.set(key, s);
             entry.instancesDirty = true;
           }
           slots[j * cols + i] = s.slot;
         }
-      // In composite pixels: tile (tx, ty) is a slotSize² block.
-      const region = rect(tx0 * slotSize, ty0 * slotSize, cols * slotSize, rows * slotSize);
+      const region = rect(sx0 * TILE_SIZE, sy0 * TILE_SIZE, cols * TILE_SIZE, rows * TILE_SIZE);
+      const clip = rect(0, 0, Math.ceil(size.width / (1 << L)), Math.ceil(size.height / (1 << L)));
       const view = atlas.createView({ dimension: "2d-array" });
       shapeWork ??= { encoder: device.createCommandEncoder(), releases: [] };
       shapeWork.releases.push(
-        vectors.encode(shapeWork.encoder, seg, region, rect(0, 0, px.width, px.height), slotSize, { kind: "atlas", view, slotSize, slotsPerSide, slots }),
+        vectors.encode(shapeWork.encoder, seg, region, clip, TILE_SIZE, { kind: "atlas", view, slotSize: TILE_SIZE, slotsPerSide: SLOTS_PER_SIDE, slots }),
       );
     }
     writeInstances(entry);
@@ -691,7 +828,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   const entryFor = (key: string): LayerEntry => {
     let entry = layers.get(key);
     if (!entry) {
-      entry = { slots: new Map(), instances: null, instanceCount: 0, instancesDirty: true, shape: null, shapeBounds: EMPTY_RECT, shapeExtent: EMPTY_RECT, offset: ZERO };
+      entry = { slots: new Map(), tiles: new Map(), instances: null, instanceCount: 0, instancesDirty: true, shape: null, shapeBounds: EMPTY_RECT, shapeExtent: EMPTY_RECT, offset: ZERO };
       layers.set(key, entry);
     }
     return entry;
@@ -822,6 +959,9 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   function floatingTexture(slot: "pixels" | "mask", source: Pixels, bounds: Rect): FloatingTexture {
     const f = floats[slot];
     // Keyed by what was uploaded: the same tiles over a different region (a preview window, then the whole layer) are a different texture.
+    // At the frame's level, or coarser if that won't fit in a texture (a preview of something huge, close up).
+    let level = frame.level;
+    while (Math.max(bounds.w, bounds.h) > device.limits.maxTextureDimension2D << level) level++;
     const t = f.texture;
     if (t && t.source === source && t.level === level && t.bounds.x === bounds.x && t.bounds.y === bounds.y && t.bounds.w === bounds.w && t.bounds.h === bounds.h) return t;
     t?.texture.destroy();
@@ -935,17 +1075,30 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return rect(0, 0, size.width, size.height);
   }
 
+  /** Writes the selection over the frame, at its resolution (point-sampled when reduced). */
   function syncSelection(sel: Mask | null) {
     if (sel === lastSelection) return;
     lastSelection = sel;
-    if (!isEmpty(selectionBounds)) {
-      const b = selectionBounds;
-      device.queue.writeTexture({ texture: selectionTexture!, origin: [b.x, b.y] }, new Uint8Array(b.w * b.h), { bytesPerRow: b.w }, [b.w, b.h]);
-    }
-    selectionBounds = sel ? sel.bounds : EMPTY_RECT;
+    const clear = selectionWritten;
+    if (!isEmpty(clear)) device.queue.writeTexture({ texture: selectionTexture!, origin: [clear.x, clear.y] }, new Uint8Array(clear.w * clear.h), { bytesPerRow: clear.w }, [clear.w, clear.h]);
+    selectionWritten = EMPTY_RECT;
     if (!sel) return;
-    const b = sel.bounds;
-    device.queue.writeTexture({ texture: selectionTexture!, origin: [b.x, b.y] }, sel.data as Uint8Array<ArrayBuffer>, { bytesPerRow: b.w }, [b.w, b.h]);
+    const r = toPx(sel.bounds);
+    if (isEmpty(r)) return;
+    const b = sel.bounds, L = frame.level, k = 1 << L, half = k >> 1;
+    const data = new Uint8Array(r.w * r.h);
+    for (let y = 0; y < r.h; y++) {
+      const sy = frame.y + (r.y + y) * k + half - b.y;
+      if (sy < 0 || sy >= b.h) continue;
+      const row = sy * b.w, x0 = frame.x + r.x * k + half - b.x;
+      if (L === 0) {
+        data.set(sel.data.subarray(row + Math.max(0, x0), row + Math.min(b.w, x0 + r.w)), Math.max(0, -x0) + y * r.w);
+        continue;
+      }
+      for (let x = 0, sx = x0; x < r.w; x++, sx += k) if (sx >= 0 && sx < b.w) data[y * r.w + x] = sel.data[row + sx];
+    }
+    device.queue.writeTexture({ texture: selectionTexture!, origin: [r.x, r.y] }, data, { bytesPerRow: r.w }, [r.w, r.h]);
+    selectionWritten = r;
   }
 
   // --- Compositing -----------------------------------------------------------
@@ -968,7 +1121,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   const surface = (depth: number): GPUTexture =>
     (surfaces[depth] ??= allocating(() =>
       device.createTexture({
-        size: [px.width, px.height],
+        size: [capacity.width, capacity.height],
         format: ACCUM_FORMAT,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
       }),
@@ -992,7 +1145,9 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       const fl = floats[which];
       return p && !isEmpty(p.bounds) && fl.texture && fl.mesh && fl.bindGroup ? fl : null;
     };
-    const viewport = rect(0, 0, size.width, size.height);
+    const L = frame.level;
+    // The targets in document space: the frame's origin, at its scale, over the textures' whole extent.
+    const viewport = rect(frame.x, frame.y, capacity.width << L, capacity.height << L);
     const meshOp = (target: GPUTexture, pipeline: GPURenderPipeline, fl: Float, opacity: number, mode: number, flags: number) =>
       ops.push({ kind: "mesh", target, pipeline, float: fl, slot: slot((data, at) => writeMeshUniform(data, at, viewport, fl.texture!, opacity, mode, 0, flags)) });
     const [maskA, maskB] = masks!;
@@ -1003,8 +1158,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       slot((data, at) => {
         new Float32Array(data, at, 1)[0] = opacity;
         new Uint32Array(data, at + 4, 1)[0] = mode;
-        new Float32Array(data, at + 8, 2).set([px.width, px.height]);
-        new Int32Array(data, at + 16, 2).set([(entry.offset.x + shift.x) >> level, (entry.offset.y + shift.y) >> level]);
+        new Float32Array(data, at + 8, 2).set([capacity.width, capacity.height]);
+        new Int32Array(data, at + 16, 2).set([((entry.offset.x + shift.x) >> L) - (frame.x >> L), ((entry.offset.y + shift.y) >> L) - (frame.y >> L)]);
         new Uint32Array(data, at + 24, 1)[0] = flags;
       });
     const stepSlot = (opacity: number, mode: number, flags: number, kind = 0, params?: Float32Array) =>
@@ -1208,8 +1363,8 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     const encoder = device.createCommandEncoder();
     let r = mipsDirty;
     for (let m = 1; m < mipCount; m++) {
-      const w = Math.max(1, px.width >> m);
-      const h = Math.max(1, px.height >> m);
+      const w = Math.max(1, frame.w >> m);
+      const h = Math.max(1, frame.h >> m);
       const x0 = r.x >> 1, y0 = r.y >> 1;
       r = intersect(rect(x0, y0, ((r.x + r.w + 1) >> 1) - x0, ((r.y + r.h + 1) >> 1) - y0), rect(0, 0, w, h));
       if (isEmpty(r)) break;
@@ -1234,17 +1389,19 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       canvas.height = h;
     }
     const zoom = view.zoom * dpr;
-    // A screen pixel spans 1/zoom document pixels, i.e. 1/(zoom·2^level) composite pixels.
-    const lod = Math.max(0, Math.min(mipCount - 1, -Math.log2(zoom) - level));
+    const L = frame.level;
+    // A screen pixel spans 1/zoom document pixels, i.e. 1/(zoom·2^L) frame pixels.
+    const lod = Math.max(0, Math.min(mipCount - 1, -Math.log2(zoom) - L));
     if (lod > 0 && !isEmpty(mipsDirty)) generateMips();
-    const u = new ArrayBuffer(64);
+    const rot = view.rotation ?? 0;
+    const u = new ArrayBuffer(VIEW_UNIFORM_SIZE);
     new Float32Array(u, 0, 6).set([size.width, size.height, view.panX * dpr, view.panY * dpr, zoom, time]);
     new Uint32Array(u, 24, 1)[0] = hasSelection ? 1 : 0;
     new Float32Array(u, 28, 1)[0] = lod;
     new Float32Array(u, 32, 4).set(WORKSPACE);
-    const rot = view.rotation ?? 0;
-    new Float32Array(u, 56, 2).set([Math.cos(rot), Math.sin(rot)]);
-    new Uint32Array(u, 48, 1)[0] = level > 0 ? 1 : 0;
+    // Whole frame pixels at whole screen pixels: read them as they are.
+    new Uint32Array(u, 48, 1)[0] = lod <= 0 && L === 0 && rot === 0 ? 1 : 0;
+    new Float32Array(u, 52, 9).set([1 << L, Math.cos(rot), Math.sin(rot), frame.x, frame.y, capacity.width, capacity.height, frame.w, frame.h]);
     device.queue.writeBuffer(viewUniforms, 0, u);
 
     const encoder = device.createCommandEncoder();
@@ -1437,40 +1594,48 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return out;
   }
 
-  function draw(scene: Scene, view: View, time: number) {
+  /** Draws the scene: over the view's frame, or (`whole`) the entire document. */
+  function draw(scene: Scene, view: View, time: number, whole: boolean) {
     if (scene.width !== size.width || scene.height !== size.height) resetDocument(scene.width, scene.height);
-    const dirty = union(syncLayers(scene), syncFloating(scene.floating));
+    const moved = updateFrame(view, whole);
+    if (moved) {
+      // Nothing of the last frame is kept; past the new one's edge stays clear (filtering reads up to it).
+      const encoder = device.createCommandEncoder();
+      encoder.beginRenderPass({ colorAttachments: [{ view: accum!.createView({ baseMipLevel: 0, mipLevelCount: 1 }), loadOp: "clear", storeOp: "store" }] }).end();
+      device.queue.submit([encoder.finish()]);
+    }
+    let dirty = union(syncLayers(scene), syncFloating(scene.floating));
+    if (moved) dirty = rect(0, 0, size.width, size.height);
     syncSelection(scene.selection);
-    const area = intersect(dirty, rect(0, 0, size.width, size.height));
+    const area = intersect(dirty, frameRect());
     if (!isEmpty(area)) composite(scene, area);
     present(view, time, scene.selection !== null);
   }
 
-  return {
-    render(scene, view, time) {
-      // Out of GPU memory last frame (or the atlas can't grow): rebuild at lower quality and try again.
-      if (oomReported) {
-        oomReported = false;
-        degrade();
+  let last: { scene: Scene; view: View; time: number } | null = null;
+  function render(scene: Scene, view: View, time: number, whole = false) {
+    last = { scene, view, time };
+    // Out of GPU memory last frame (or the atlas can't grow): rebuild at lower quality and try again.
+    if (oomReported) {
+      oomReported = false;
+      degrade();
+    }
+    for (;;) {
+      try {
+        return draw(scene, view, time, whole);
+      } catch (err) {
+        if (!(err instanceof AtlasFull) || !degrade()) throw err;
       }
-      for (;;) {
-        try {
-          return draw(scene, view, time);
-        } catch (err) {
-          if (!(err instanceof AtlasFull) || !degrade()) throw err;
-        }
-      }
-    },
+    }
+  }
 
-    level: () => level,
+  return {
+    render: (scene, view, time) => render(scene, view, time),
+    level: () => bias,
     stats,
 
     resetLevel() {
-      if (level === 0) return;
-      setLevel(0);
-      const { width, height } = size;
-      size = { width: 0, height: 0 };
-      if (width) resetDocument(width, height);
+      if (bias > 0) setBias(0);
     },
 
     resample,
@@ -1478,8 +1643,10 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     adjust,
 
     async readComposite() {
-      // At reduced quality the composite is smaller; it's scaled back up (nearest) to document size.
-      const { width, height } = px;
+      // Composited whole for this: at reduced quality it's smaller, and scaled back up (nearest) to document size.
+      if (!last) throw new Error("Nothing has been rendered");
+      render(last.scene, last.view, last.time, true);
+      const { w: width, h: height, level } = frame;
       const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
       const buffer = device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const encoder = device.createCommandEncoder();
