@@ -214,18 +214,18 @@ export function pixelReader(pixels: Pixels): (x: number, y: number) => number {
 }
 
 /**
- * A 1/{@link PREVIEW_FACTOR}-scale image of the `width × height` area at the
- * origin, assembled from cached per-tile previews (only changed tiles are
- * re-filtered): what layer thumbnails are drawn from.
+ * A 1/2^level-scale image of the `width × height` area at the origin,
+ * assembled from cached reduced tiles (only changed tiles are filtered
+ * again): what layer thumbnails are drawn from.
  */
-export function previewImage(pixels: Pixels, width: number, height: number): { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> } {
-  const pw = Math.ceil(width / PREVIEW_FACTOR), ph = Math.ceil(height / PREVIEW_FACTOR);
+export function previewImage(pixels: Pixels, width: number, height: number, level: number): { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> } {
+  const n = TILE_SIZE >> level;
+  const pw = Math.ceil(width / (1 << level)), ph = Math.ceil(height / (1 << level));
   const data = new Uint8ClampedArray(pw * ph * 4);
-  const n = TILE_SIZE / PREVIEW_FACTOR;
   for (const [key, tile] of pixels) {
     const ox = keyX(key) * n, oy = keyY(key) * n;
     if (ox >= pw || oy >= ph || ox + n <= 0 || oy + n <= 0) continue;
-    const preview = tilePreview(tile);
+    const preview = reducedTile(tile, level);
     const x0 = Math.max(0, -ox), x1 = Math.min(n, pw - ox);
     for (let y = Math.max(0, -oy); y < n && oy + y < ph; y++) data.set(preview.subarray((y * n + x0) * 4, (y * n + x1) * 4), ((oy + y) * pw + ox + x0) * 4);
   }
@@ -293,45 +293,29 @@ export function contentBounds(pixels: Pixels): Rect {
   return bounds;
 }
 
-/** Downsampling factor of {@link tilePreview}. */
-export const PREVIEW_FACTOR = 16;
-const PREVIEW_SIZE = TILE_SIZE / PREVIEW_FACTOR;
-const previewCache = new WeakMap<Tile, { version: number; data: Uint8ClampedArray }>();
+const reducedCache = new WeakMap<Tile, { version: number; levels: Map<number, Uint8ClampedArray<ArrayBuffer>> }>();
 
 /**
- * Area-averaged (box filtered, alpha-weighted) 1/16-scale copy of a tile,
- * cached per tile version. Thumbnails are assembled from these, so updating
- * one after an edit only re-filters the tiles that changed.
+ * A tile at 1/2^level scale, area-averaged (an alpha-weighted box filter),
+ * cached per tile version and level. Thumbnails and the GPU's reduced views
+ * are assembled from these, so after an edit only the tiles that changed
+ * are filtered again.
  */
-export function tilePreview(t: Tile): Uint8ClampedArray {
-  const cached = previewCache.get(t);
-  if (cached && cached.version === t.version) return cached.data;
-  const out = new Uint8ClampedArray(PREVIEW_SIZE * PREVIEW_SIZE * 4);
-  const d = t.data;
-  const n = PREVIEW_FACTOR * PREVIEW_FACTOR;
-  for (let py = 0; py < PREVIEW_SIZE; py++) {
-    for (let px = 0; px < PREVIEW_SIZE; px++) {
-      let r = 0, g = 0, b = 0, a = 0;
-      for (let y = py * PREVIEW_FACTOR; y < (py + 1) * PREVIEW_FACTOR; y++) {
-        for (let i = (y * TILE_SIZE + px * PREVIEW_FACTOR) * 4, end = i + PREVIEW_FACTOR * 4; i < end; i += 4) {
-          const al = d[i + 3];
-          r += d[i] * al;
-          g += d[i + 1] * al;
-          b += d[i + 2] * al;
-          a += al;
-        }
-      }
-      const o = (py * PREVIEW_SIZE + px) * 4;
-      if (a > 0) {
-        out[o] = r / a;
-        out[o + 1] = g / a;
-        out[o + 2] = b / a;
-        out[o + 3] = a / n;
-      }
-    }
+export function reducedTile(t: Tile, level: number): Uint8ClampedArray {
+  if (level === 0) return t.data;
+  let c = reducedCache.get(t);
+  if (!c || c.version !== t.version) reducedCache.set(t, (c = { version: t.version, levels: new Map() }));
+  let data = c.levels.get(level);
+  if (!data) {
+    // One colour throughout (a fill, a background) needs no filtering.
+    const w = words(t), first = w[0];
+    let uniform = true;
+    for (let i = 1; i < w.length && uniform; i++) uniform = w[i] === first;
+    const n = TILE_SIZE >> level;
+    data = uniform ? new Uint8ClampedArray(new Uint32Array(n * n).fill(first).buffer) : downsampleTile(t, level);
+    c.levels.set(level, data);
   }
-  previewCache.set(t, { version: t.version, data: out });
-  return out;
+  return data;
 }
 
 /** Shifts every pixel by an integer offset. Tile-aligned shifts share tiles instead of copying. */

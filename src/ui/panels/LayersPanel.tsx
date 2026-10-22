@@ -14,31 +14,35 @@ import { createSortable } from "../sortable";
 const THUMB = 36;
 
 /**
- * Thumbnail from the layer's area-averaged 1/16 preview (cached, so only
- * what changed is re-filtered), scaled with the browser's high-quality
- * filter, so thin strokes don't vanish.
+ * Thumbnail at the screen's resolution, from the layer at the finest
+ * power-of-two reduction that still covers it (cached per tile, so only
+ * what changed is filtered again), scaled the rest of the way with the
+ * browser's high-quality filter, so thin strokes don't vanish.
  */
 function Thumbnail(props: { pixels: Pixels; width: number; height: number; background?: number }) {
   let canvas!: HTMLCanvasElement;
   createEffect(
     () => ({ pixels: props.pixels, dw: props.width, dh: props.height, bg: props.background }),
     ({ pixels, dw, dh, bg }) => {
+      const dpr = window.devicePixelRatio || 1;
       const s = THUMB / Math.max(dw, dh);
-      const w = Math.max(1, Math.round(dw * s));
-      const h = Math.max(1, Math.round(dh * s));
-      const img = previewImage(pixels, dw, dh);
+      const w = Math.max(1, Math.round(dw * s)), h = Math.max(1, Math.round(dh * s));
+      const level = Math.max(0, Math.min(8, Math.floor(Math.log2(1 / (s * dpr)))));
+      const img = previewImage(pixels, dw, dh, level);
       const source = new OffscreenCanvas(img.width, img.height);
       source.getContext("2d")!.putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = Math.max(1, Math.round(w * dpr));
+      canvas.height = Math.max(1, Math.round(h * dpr));
+      canvas.style.width = `${w}px`;
+      canvas.style.height = `${h}px`;
       const ctx = canvas.getContext("2d")!;
       // A mask shows over its background grey.
       if (bg !== undefined) {
         ctx.fillStyle = `rgb(${bg} ${bg} ${bg})`;
-        ctx.fillRect(0, 0, w, h);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
       ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(source, 0, 0, w, h);
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
     },
   );
   return (

@@ -9,7 +9,7 @@ import { createVectorRasterizer } from "./vector";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect, type Vec2 } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
-import { NO_PIXELS, TILE_SIZE, downsample, downsampleTile, keyX, keyY, readRect, storedBounds, tileKey, tileRect, tileWriter, pixelsFromImage, tilesIn, writeRect, type Tile, type TileKey, type Pixels } from "../core/pixels";
+import { NO_PIXELS, TILE_SIZE, downsample, reducedTile, keyX, keyY, readRect, storedBounds, tileKey, tileRect, tileWriter, pixelsFromImage, tilesIn, writeRect, type Tile, type TileKey, type Pixels } from "../core/pixels";
 import { tessellate, type Mapping } from "../core/warp";
 import { ADJUST_KINDS, ATLAS_PAGE, ATOP, COMPOSE_WGSL, MASK_A, MASK_B, MESH_WGSL, MIP_WGSL, PREMULTIPLY_WGSL, PRESENT_WGSL, fillWgsl, tilesWgsl } from "./shaders";
 
@@ -130,21 +130,6 @@ const SLOTS_PER_PAGE = SLOTS_PER_SIDE * SLOTS_PER_SIDE;
 const ZEROS = new Uint8Array(TILE_SIZE * TILE_SIZE * 4);
 const VIEW_UNIFORM_SIZE = 96; // sizeof(View)
 
-/** Tiles reduced for display, cached at the level last drawn (panning brings them back). */
-const reductions = new WeakMap<Tile, { version: number; level: number; data: Uint8ClampedArray<ArrayBuffer> }>();
-function reduced(tile: Tile, level: number): Uint8ClampedArray<ArrayBuffer> {
-  const c = reductions.get(tile);
-  if (c && c.version === tile.version && c.level === level) return c.data;
-  // One colour throughout (a fill, the background) needs no filtering.
-  const words = new Uint32Array(tile.data.buffer, tile.data.byteOffset, TILE_SIZE * TILE_SIZE);
-  const first = words[0];
-  let uniform = true;
-  for (let i = 1; i < words.length && uniform; i++) uniform = words[i] === first;
-  const n = TILE_SIZE >> level;
-  const data = uniform ? new Uint8ClampedArray(new Uint32Array(n * n).fill(first).buffer) : downsampleTile(tile, level);
-  reductions.set(tile, { version: tile.version, level, data });
-  return data;
-}
 
 export async function requestDevice(): Promise<GPUDevice> {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -410,7 +395,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   function uploadTile(slot: number, tx: number, ty: number, tile: Tile | null) {
     const L = frame.level, n = TILE_SIZE >> L, mask = (1 << L) - 1;
     const [x, y, page] = slotOrigin(slot);
-    const data = tile ? (L === 0 ? (tile.data as Uint8ClampedArray<ArrayBuffer>) : reduced(tile, L)) : ZEROS;
+    const data = tile ? (reducedTile(tile, L) as Uint8ClampedArray<ArrayBuffer>) : ZEROS;
     device.queue.writeTexture({ texture: atlas, origin: [x + (tx & mask) * n, y + (ty & mask) * n, page] }, data, { bytesPerRow: n * 4, rowsPerImage: n }, [n, n, 1]);
   }
 
