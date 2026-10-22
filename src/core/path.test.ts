@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { pathShape, placementMapping } from "./content";
 import { rasterizeContours } from "./coverage";
 import { readRect } from "./pixels";
-import { documentPath, renderShape } from "./shape";
+import { documentPath, renderShape, type ShapeStyle } from "./shape";
 import { rect, vec } from "./geometry";
 import {
   addSubpath,
@@ -223,7 +223,7 @@ describe("components", () => {
 });
 
 describe("path shapes", () => {
-  const style = { fill: { r: 0, g: 0, b: 0 }, stroke: null };
+  const style: ShapeStyle = { fill: { r: 0, g: 0, b: 0 }, stroke: null };
   const content = (path: VectorPath, s = style) => pathShape(path, s)!;
   const draw = (c: ReturnType<typeof content>, clip = rect(0, 0, 100, 100)) => {
     const px = renderShape(c.geometry, c.style, placementMapping(c.placement), clip);
