@@ -73,6 +73,28 @@ describe("type in PSD", () => {
     expect(changed.paragraphs[0].style.align).toBe("justify-left");
   });
 
+  it("keeps type on a path and inside a shape exactly; Photoshop sees them as point and paragraph type", async () => {
+    const circle = [
+      { anchor: { x: 150, y: 40 }, in: { x: 105, y: 40 }, out: { x: 195, y: 40 } },
+      { anchor: { x: 230, y: 100 }, in: { x: 230, y: 65 }, out: { x: 230, y: 135 } },
+      { anchor: { x: 150, y: 160 }, in: { x: 195, y: 160 }, out: { x: 105, y: 160 } },
+      { anchor: { x: 70, y: 100 }, in: { x: 70, y: 135 }, out: { x: 70, y: 65 } },
+    ];
+    const style = { ...DEFAULT_CHAR_STYLE, size: 14 };
+    const along = textContent("Along", style, DEFAULT_PARAGRAPH_STYLE, { kind: "path", knots: circle, closed: true, start: 60, flipped: false }, [1, 0, 0, 1, 0, 0]);
+    const inside = textContent("Inside the circle", style, DEFAULT_PARAGRAPH_STYLE, { kind: "area", contours: [circle] }, [1, 0, 0, 1, 0, 0]);
+    let doc = createDocument({ width: 300, height: 200, background: { r: 255, g: 255, b: 255 } });
+    for (const c of [along, inside]) doc = addLayer(doc, createLayer({ name: c.text, content: c, pixels: renderDrawing(drawText(c), docRect(doc)) }));
+    const bytes = writePsdDocument(doc);
+    expect(texts(await readPsdDocument(bytes))).toEqual([
+      { ...along, stale: false },
+      { ...inside, stale: false },
+    ]);
+    const psd = readPsd(bytes, { useImageData: true, skipThumbnail: true });
+    expect(psd.children![1].text!.shapeType).toBe("point");
+    expect(psd.children![2].text).toMatchObject({ shapeType: "box", boxBounds: [70, 40, 230, 160] });
+  });
+
   it("guesses a font's family and style from its PostScript name", () => {
     expect(fontFromName("MyriadPro-BoldIt")).toEqual({ postScriptName: "MyriadPro-BoldIt", family: "Myriad Pro", style: "Bold Italic" });
     expect(fontFromName("Arial")).toEqual({ postScriptName: "Arial", family: "Arial", style: "Regular" });

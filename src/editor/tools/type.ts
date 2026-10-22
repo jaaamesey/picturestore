@@ -1,15 +1,18 @@
 import { rasterizeContours } from "../../core/coverage";
 import { addLayer, createLayer, docRect, layerById, removeLayer, updateLayer, type Doc, type Layer } from "../../core/document";
-import { apply, invert, multiply, translation, vec, type Vec2 } from "../../core/geometry";
+import { IDENTITY, apply, invert, multiply, translation, vec, type Vec2 } from "../../core/geometry";
 import { walk } from "../../core/layers";
 import { NO_PIXELS } from "../../core/pixels";
 import { combine, toMask } from "../../core/selection";
-import { renderDrawing } from "../../core/shape";
+import { documentKnots, renderDrawing } from "../../core/shape";
+import { placementMapping } from "../../core/content";
+import { areaPolygons, measurePath } from "../../text/paths";
 import { dragTransform, hitTest, type Drag as TransformDrag } from "../../core/transform";
 import { caretGeometry, collapseSide, indexAt, lineRange, moveCaret, nextStop, nextWord, paragraphOf, previousStop, previousWord, textLayerName, toTextSpace, wordAt, type Motion } from "../../text/edit";
 import { drawText, textLayout } from "../../text/engine";
 import {
   LOREM_IPSUM,
+  type PathKnot,
   insertContent,
   paragraphAt,
   range,
@@ -23,6 +26,7 @@ import {
   type CharStyle,
   type ParagraphStyle,
   type TextContent,
+  type TextFrame,
   type TextRange,
 } from "../../text/model";
 import type { Tool, ToolContext, ToolEvent, TypeToolId } from "../types";
@@ -79,7 +83,7 @@ interface Session {
 }
 
 type Drag =
-  | { readonly kind: "create"; readonly start: Vec2; readonly screen: Vec2; readonly alt: boolean }
+  | { readonly kind: "create"; readonly start: Vec2; readonly screen: Vec2; readonly alt: boolean; readonly shape: ShapeTarget | null }
   | { readonly kind: "select"; readonly unit: "char" | "word" | "line" | "paragraph"; readonly around: TextRange }
   | { readonly kind: "box"; readonly edge: number; readonly from: TextContent; readonly start: Vec2 }
   | { readonly kind: "transform"; readonly drag: TransformDrag; readonly from: TextContent }
@@ -180,6 +184,38 @@ function typeLayerAt(doc: Doc, p: Vec2, tolerance: number): Layer | null {
   return null;
 }
 
+/** Where new type would go on the active shape layer: along its outline (type on a path), or inside it (area type). */
+export type ShapeTarget = { readonly kind: "path"; readonly knots: readonly PathKnot[]; readonly start: number } | { readonly kind: "area"; readonly contours: readonly (readonly PathKnot[])[] };
+
+/**
+ * As Photoshop offers on a shape's path: over the active shape layer's
+ * outline (within `tolerance`), type runs along it from that point; inside
+ * it, type fills it.
+ */
+export function shapeTarget(doc: Doc, p: Vec2, tolerance: number): ShapeTarget | null {
+  const l = layerById(doc, doc.activeLayerId);
+  if (!l || l.content.kind !== "shape" || !l.visible) return null;
+  const contours = documentKnots(l.content.geometry, placementMapping(l.content.placement));
+  for (const knots of contours) {
+    const m = measurePath(knots, true);
+    for (let i = 1; i < m.points.length; i++) {
+      const a = m.points[i - 1], b = m.points[i];
+      const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+      if (Math.hypot(p.x - a.x - dx * t, p.y - a.y - dy * t) <= tolerance) return { kind: "path", knots, start: m.lengths[i - 1] + (m.lengths[i] - m.lengths[i - 1]) * t };
+    }
+  }
+  const polys = areaPolygons(contours);
+  // Non-zero winding, as shapes fill.
+  let winding = 0;
+  for (const poly of polys)
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      if (a.y <= p.y ? b.y > p.y && (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y) > 0 : b.y <= p.y && (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y) < 0) winding += a.y <= p.y ? 1 : -1;
+    }
+  return winding ? { kind: "area", contours } : null;
+}
+
 export function createTypeController(): TypeController {
   let s: Session | null = null;
   let drag: Drag | null = null;
@@ -236,13 +272,22 @@ export function createTypeController(): TypeController {
     show(ctx);
   }
 
-  /** New type at a point or in a box (text space at the document). */
-  function create(ctx: ToolContext, tool: TypeToolId, at: Vec2, box: { width: number; height: number } | null) {
+  /** New type at a point, in a box, along a shape's outline or inside it (text space at the document). */
+  function create(ctx: ToolContext, tool: TypeToolId, at: Vec2, box: { readonly kind?: undefined; readonly width: number; readonly height: number } | ShapeTarget | null) {
     const { type } = ctx.settings;
-    const placeholder = ctx.preferences.placeholderText ? (box ? LOREM_IPSUM : "Lorem Ipsum") : "";
+    const fills = !!box && box.kind !== "path";
+    const placeholder = ctx.preferences.placeholderText ? (fills ? LOREM_IPSUM : "Lorem Ipsum") : "";
     const char: CharStyle = { ...type.char, color: ctx.foreground };
-    const frame = box ? ({ kind: "box", ...box } as const) : ({ kind: "point" } as const);
-    let content: TextContent = { ...textContent(placeholder, char, type.paragraph, frame, translation(at.x, at.y)), antiAlias: type.antiAlias };
+    const frame: TextFrame = !box
+      ? { kind: "point" }
+      : box.kind === "path"
+        ? { kind: "path", knots: box.knots, closed: true, start: box.start, flipped: false }
+        : box.kind === "area"
+          ? { kind: "area", contours: box.contours }
+          : { kind: "box", width: box.width, height: box.height };
+    // Path and area type are set where their shape is: text space is the document's.
+    const placed = box?.kind ? IDENTITY : translation(at.x, at.y);
+    let content: TextContent = { ...textContent(placeholder, char, type.paragraph, frame, placed), antiAlias: type.antiAlias };
     if (isVertical(tool)) content = { ...content, orientation: "vertical" };
     const layer = createLayer({ name: textLayerName(placeholder) || "Layer", content });
     start(ctx, tool, addLayer(ctx.doc, layer), layer, true, "all");
@@ -361,8 +406,9 @@ export function createTypeController(): TypeController {
       show(ctx);
       return;
     }
-    // Not editing: type under the pointer is edited (Shift starts new type instead).
-    const hitLayer = !e.shift ? typeLayerAt(ctx.doc, p, tol) : null;
+    // Not editing: the active shape's path takes new type (on it, or inside it); else type under the pointer is edited (Shift starts new type instead).
+    const shape = e.shift ? null : shapeTarget(ctx.doc, p, 4 / ctx.view.zoom);
+    const hitLayer = !e.shift && !shape ? typeLayerAt(ctx.doc, p, tol) : null;
     if (hitLayer) {
       const c = hitLayer.content as TextContent;
       start(ctx, isMask(tool) ? tool : c.orientation === "vertical" ? "type-vertical" : "type-horizontal", ctx.doc, hitLayer, false, 0);
@@ -372,7 +418,7 @@ export function createTypeController(): TypeController {
       show(ctx);
       return;
     }
-    drag = { kind: "create", start: p, screen: vec(e.screenX, e.screenY), alt: e.alt };
+    drag = { kind: "create", start: p, screen: vec(e.screenX, e.screenY), alt: e.alt, shape };
   }
 
   function move(ctx: ToolContext, e: ToolEvent) {
@@ -426,7 +472,7 @@ export function createTypeController(): TypeController {
       if (size) create(ctx, tool, d.start, size);
       return;
     }
-    if (!moved) return create(ctx, tool, d.start, null);
+    if (!moved) return create(ctx, tool, d.start, d.shape);
     const x0 = Math.min(d.start.x, p.x), y0 = Math.min(d.start.y, p.y);
     create(ctx, tool, vec(x0, y0), { width: Math.abs(p.x - d.start.x), height: Math.abs(p.y - d.start.y) });
   }
@@ -446,6 +492,9 @@ export function createTypeController(): TypeController {
         if (e.mod && inside(state.quad, p)) return "move";
         return inside(grown(state.quad, FRAME_PX / ctx.view.zoom), p) ? (isVertical(s.tool) ? "vertical-text" : "text") : "default";
       }
+      // Over a shape's outline: type on the path; inside it: area type.
+      const target = shapeTarget(ctx.doc, p, 4 / ctx.view.zoom);
+      if (target) return target.kind === "path" ? "crosshair" : "cell";
       return isVertical(id) ? "vertical-text" : "text";
     },
     down: (ctx, e) => down(ctx, id, e),

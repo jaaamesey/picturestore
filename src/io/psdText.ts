@@ -1,5 +1,6 @@
 import type { LayerTextData, ParagraphStyle as PsdParagraphStyle, TextStyle as PsdTextStyle, Warp as PsdWarp, WarpStyle as PsdWarpStyle } from "ag-psd";
-import { multiply, translation, type Mat } from "../core/geometry";
+import { boundsOf, multiply, translation, type Mat } from "../core/geometry";
+import { areaPolygons, measurePath, pointAlong } from "../text/paths";
 import {
   DEFAULT_CHAR_STYLE,
   DEFAULT_ENGINE,
@@ -190,8 +191,31 @@ export function textToPsd(c: TextContent): LayerTextData {
     subscriptSize: e.subscriptSize,
     subscriptPosition: e.subscriptPosition,
     smallCapSize: e.smallCapSize,
-    ...(c.frame.kind === "box" ? { shapeType: "box", boxBounds: [0, 0, c.frame.width, c.frame.height] } : { shapeType: "point", pointBase: [0, 0] }),
+    ...frameToPsd(c),
   };
+}
+
+/**
+ * The frame as Photoshop's data can say it: area and path type (which ag-psd
+ * can't write) as paragraph type in the shape's bounds and point type at
+ * the path's start. Our files keep the real frame (in XMP).
+ */
+function frameToPsd(c: TextContent): Partial<LayerTextData> {
+  const f = c.frame;
+  switch (f.kind) {
+    case "box":
+      return { shapeType: "box", boxBounds: [0, 0, f.width, f.height] };
+    case "area": {
+      const b = boundsOf(areaPolygons(f.contours).flat());
+      return { shapeType: "box", boxBounds: [b.x, b.y, b.x + b.w, b.y + b.h] };
+    }
+    case "path": {
+      const { p } = pointAlong(measurePath(f.knots, f.closed), f.start);
+      return { shapeType: "point", pointBase: [0, 0], transform: [...multiply(c.transform, translation(p.x, p.y))] };
+    }
+    case "point":
+      return { shapeType: "point", pointBase: [0, 0] };
+  }
 }
 
 /** Type from Photoshop's data: drawn from Photoshop's pixels (`stale`) until it's edited. */
@@ -266,6 +290,8 @@ export function typeFromXmp(xmp: string | undefined): TextContent[] {
 /** The exact content for a layer read from Photoshop's data, if what was written still matches it (same text, same placement). */
 export function exactContent(read: TextContent, written: TextContent | undefined): TextContent | null {
   if (!written || written.kind !== "text" || written.text !== read.text) return null;
-  const same = written.transform.every((v, i) => Math.abs(v - read.transform[i]) < 1e-3);
-  return same && written.frame.kind === read.frame.kind ? { ...written, stale: false } : null;
+  // Read back as Photoshop's data says it (area and path type approximated), which is what's compared.
+  const expected = textFromPsd(textToPsd(written));
+  const same = expected.transform.every((v, i) => Math.abs(v - read.transform[i]) < 1e-3);
+  return same && expected.frame.kind === read.frame.kind ? { ...written, stale: false } : null;
 }

@@ -271,3 +271,52 @@ test.describe("Type tool", () => {
     expect(c.runs!.every((r) => r.style.fauxBold)).toBe(true);
   });
 });
+
+test.describe("Type and shapes", () => {
+  /** The active layer's content (new type goes above the active layer). */
+  const activeContent = (page: Page) =>
+    page.evaluate(() => {
+      const d = (window.__ps!.editor as { active(): { doc(): { activeLayerId: string; layers: { id: string; content: { kind: string; frame?: { kind: string; start?: number } } }[] } } }).active().doc();
+      return d.layers.find((l) => l.id === d.activeLayerId)!.content;
+    });
+
+  test("clicking inside a shape with a Type tool fills it with area type; on its outline, type runs along it", async ({ page }) => {
+    await newDocument(page, 400, 300);
+    await page.keyboard.press("u");
+    // The Ellipse tool (U cycles the shape tools: rectangle, ellipse…).
+    await page.keyboard.press("Shift+u");
+    await drag(page, [100, 50], [300, 250]);
+    await expectHistory(page, "Ellipse Tool");
+    // Inside: area type, filled with Lorem Ipsum, which stays inside the ellipse.
+    await page.keyboard.press("t");
+    await click(page, 200, 150);
+    await page.keyboard.press("Control+Enter");
+    await expectHistory(page, "Type Layer");
+    expect((await activeContent(page)).frame!.kind).toBe("area");
+    // With the (black) ellipse hidden: type inside it, none in its bounding box's corners.
+    const shapeRow = page.getByTestId("layer-row").filter({ hasNotText: "Lorem" }).filter({ hasNotText: "Background" });
+    await shapeRow.getByTestId("layer-visibility").click();
+    await settled(page);
+    expect(await ink(page, 150, 100, 250, 200)).toBeGreaterThan(50);
+    expect(await ink(page, 100, 50, 125, 75)).toBe(0);
+    expect(await ink(page, 275, 225, 300, 250)).toBe(0);
+    await shapeRow.getByTestId("layer-visibility").click();
+
+    // On the outline (the ellipse's right): type on a path, from where it was clicked.
+    await shapeRow.click();
+    await page.keyboard.press("t");
+    await click(page, 300, 150);
+    await page.keyboard.type("Along the path");
+    await page.keyboard.press("Control+Enter");
+    await expectHistory(page, "Type Layer");
+    const along = await activeContent(page);
+    expect(along.frame!.kind).toBe("path");
+    // A quarter of the way round (the ellipse's path starts at its top), give or take.
+    const perimeter = Math.PI * 200;
+    expect(along.frame!.start! / perimeter).toBeGreaterThan(0.2);
+    expect(along.frame!.start! / perimeter).toBeLessThan(0.3);
+    // Drawn along the outline: ink near the ellipse's right edge, below the click.
+    await settled(page);
+    expect(await ink(page, 270, 150, 310, 220)).toBeGreaterThan(20);
+  });
+});
