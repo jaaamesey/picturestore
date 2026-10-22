@@ -17,6 +17,8 @@ export interface Knot {
   readonly in: Vec2;
   readonly out: Vec2;
   readonly smooth?: boolean;
+  /** The Curvature Pen's point: its direction lines follow from its neighbours (see curvature.ts) until they are edited. */
+  readonly auto?: boolean;
 }
 
 export const corner = (p: Vec2): Knot => ({ anchor: p, in: p, out: p });

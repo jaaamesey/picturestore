@@ -6,6 +6,8 @@ import { createShapeTool } from "./shape";
 import { createMoveTool, createTransformController, type TransformController } from "./transform";
 import { createCropTool, type CropController } from "./crop";
 import { createPerspectiveCropTool } from "./perspectiveCrop";
+import { createCurvaturePenTool } from "./curvature";
+import { createFreeformPenTool } from "./freeform";
 import { createPenTool } from "./pen";
 import { createAddAnchorTool, createConvertPointTool, createDeleteAnchorTool, createDirectSelectTool, createPathSelectTool } from "./pathTools";
 import { createTypeController, type TypeController } from "./type";
@@ -35,6 +37,8 @@ export const TOOLBAR: readonly ToolInfo[] = [
   { id: "bucket", label: "Paint Bucket", key: "g" },
   { id: "eyedropper", label: "Eyedropper", key: "i" },
   { id: "pen", label: "Pen Tool", key: "p" },
+  { id: "freeform-pen", label: "Freeform Pen Tool", key: "p" },
+  { id: "curvature-pen", label: "Curvature Pen Tool", key: "p" },
   { id: "add-anchor", label: "Add Anchor Point Tool", key: "p" },
   { id: "delete-anchor", label: "Delete Anchor Point Tool", key: "p" },
   { id: "convert-point", label: "Convert Point Tool", key: "p" },
@@ -85,6 +89,8 @@ export function createTools(): Tools {
     bucketTool,
     createEyedropperTool(),
     createPenTool(),
+    createFreeformPenTool(),
+    createCurvaturePenTool(),
     createAddAnchorTool(),
     createDeleteAnchorTool(),
     createConvertPointTool(),

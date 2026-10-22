@@ -1171,4 +1171,135 @@ describe("pen tools", () => {
       expect(h.s.history).toEqual(["Delete Anchor Point"]);
     });
   });
+
+  describe("Freeform Pen", () => {
+    /** Draws through the points with the tool, as a pointer would. */
+    const stroke = async (h: ReturnType<typeof harness>, pts: [number, number][], mods: Partial<ToolEvent> = {}) => {
+      const t = h.tools.byId["freeform-pen"];
+      t.down!(h.ctx(), h.ev(...pts[0], mods));
+      for (const p of pts.slice(1)) t.move!(h.ctx(), h.ev(...p, mods));
+      t.up!(h.ctx(), h.ev(...pts[pts.length - 1], mods));
+      await h.s.pending;
+    };
+    const arc = (cx: number, cy: number, r: number, from: number, to: number, n = 60): [number, number][] =>
+      Array.from({ length: n + 1 }, (_, i) => {
+        const a = from + ((to - from) * i) / n;
+        return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+      });
+
+    it("follows the pointer with few anchor points, as one history step", async () => {
+      const h = harness(blank(), pathMode);
+      await stroke(h, arc(50, 50, 30, 0, Math.PI));
+      const s = h.s.doc.workPath!.subpaths[0];
+      expect(s.closed).toBe(false);
+      expect(s.knots.length).toBeGreaterThanOrEqual(2);
+      expect(s.knots.length).toBeLessThan(8);
+      expect(s.knots[0].anchor).toEqual(P(80, 50));
+      expect(h.s.history).toEqual(["Freeform Pen Tool"]);
+    });
+
+    it("a higher Curve Fit uses fewer anchor points", async () => {
+      const wobbly: [number, number][] = Array.from({ length: 100 }, (_, i) => [i, 50 + 8 * Math.sin(i / 6) + (i % 2)]);
+      const fine = harness(blank(), { pen: { ...DEFAULT_SETTINGS.pen, mode: "path", curveFit: 0.5 } });
+      const coarse = harness(blank(), { pen: { ...DEFAULT_SETTINGS.pen, mode: "path", curveFit: 10 } });
+      await stroke(fine, wobbly);
+      await stroke(coarse, wobbly);
+      expect(coarse.s.doc.workPath!.subpaths[0].knots.length).toBeLessThan(fine.s.doc.workPath!.subpaths[0].knots.length);
+    });
+
+    it("dragging back to where it began closes the path", async () => {
+      const h = harness(blank(), pathMode);
+      await stroke(h, arc(50, 50, 30, 0, Math.PI * 2, 120));
+      const s = h.s.doc.workPath!.subpaths[0];
+      expect(s.closed).toBe(true);
+      expect(h.s.paths.selected).toEqual([]);
+    });
+
+    it("dragging from the end of an open path continues it", async () => {
+      const h = harness(blank(), pathMode);
+      await stroke(h, [[10, 10], [30, 12], [50, 10], [70, 12], [90, 10]]);
+      h.tools.byId["freeform-pen"].cancel!(h.ctx());
+      await stroke(h, [[90, 10], [92, 40], [90, 70]]);
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(1);
+      const knots = h.s.doc.workPath!.subpaths[0].knots;
+      expect(knots[0].anchor).toEqual(P(10, 10));
+      expect(knots[knots.length - 1].anchor).toEqual(P(90, 70));
+    });
+
+    it("Shape mode makes a shape layer; a click without dragging makes nothing", async () => {
+      const h = harness(blank());
+      const layers = h.s.doc.layers.length;
+      await stroke(h, [[20, 20]]);
+      expect(h.s.doc.layers).toHaveLength(layers);
+      expect(h.s.history).toEqual([]);
+      await stroke(h, arc(50, 50, 30, 0, Math.PI * 2, 120));
+      expect(h.s.doc.layers).toHaveLength(layers + 1);
+      expect(getPixel(layerOf(h.s.doc).pixels, 50, 50)[3]).toBe(255);
+    });
+  });
+
+  describe("Curvature Pen", () => {
+    const knots = (h: ReturnType<typeof harness>) => h.s.doc.workPath!.subpaths[0].knots;
+    it("clicks make automatic smooth points that a curve passes through", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[10, 80], [50, 20], [90, 80]]) await click(h, "curvature-pen", x, y);
+      expect(knots(h).map((k) => k.anchor)).toEqual([P(10, 80), P(50, 20), P(90, 80)]);
+      expect(knots(h).every((k) => k.auto && k.smooth)).toBe(true);
+      // The middle point's lines run along the line between its neighbours (horizontal), a third as long as each segment.
+      const m = knots(h)[1];
+      expect(m.in.y).toBeCloseTo(20);
+      expect(m.out.y).toBeCloseTo(20);
+      expect(m.out.x - 50).toBeCloseTo(Math.hypot(40, 60) / 3);
+      // The ends have the one line, straight at the neighbour.
+      expect(knots(h)[0].in).toEqual(P(10, 80));
+      expect(h.s.history).toEqual(Array(3).fill("Curvature Pen Tool"));
+    });
+
+    it("double-clicking a point makes it a corner, and again smooth", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[10, 80], [50, 20], [90, 80]]) await click(h, "curvature-pen", x, y);
+      const t = h.tools.byId["curvature-pen"];
+      t.down!(h.ctx(), h.ev(50, 20, { clicks: 2 }));
+      t.up!(h.ctx(), h.ev(50, 20, { clicks: 2 }));
+      expect(knots(h)[1].in).toEqual(P(50, 20));
+      expect(knots(h)[1].auto).toBeFalsy();
+      t.down!(h.ctx(), h.ev(50, 20, { clicks: 2 }));
+      t.up!(h.ctx(), h.ev(50, 20, { clicks: 2 }));
+      expect(knots(h)[1].auto).toBe(true);
+    });
+
+    it("dragging a point moves it and the curve follows", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[10, 80], [50, 20], [90, 80]]) await click(h, "curvature-pen", x, y);
+      await h.drag("curvature-pen", [50, 20], [50, 40]);
+      expect(knots(h)[1].anchor).toEqual(P(50, 40));
+      expect(knots(h)[1].out.y).toBeCloseTo(40);
+    });
+
+    it("a click on a segment adds a point there", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[10, 80], [90, 80]]) await click(h, "curvature-pen", x, y);
+      h.tools.byId["curvature-pen"].cancel!(h.ctx());
+      await click(h, "curvature-pen", 50, 80);
+      expect(knots(h)).toHaveLength(3);
+      expect(knots(h)[1].anchor.x).toBeCloseTo(50);
+    });
+
+    it("Delete removes the point and the curve re-forms around the rest", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[10, 80], [50, 20], [90, 80], [130, 20]]) await click(h, "curvature-pen", x, y);
+      h.s.paths = { ...h.s.paths, selected: [{ sub: 0, knot: 1 }] };
+      expect(h.tools.byId["curvature-pen"].keyDown!(h.ctx(), { key: "Delete", shift: false, alt: false, mod: false })).toBe(true);
+      expect(knots(h).map((k) => k.anchor)).toEqual([P(10, 80), P(90, 80), P(130, 20)]);
+      // The middle point's lines now follow its new neighbours.
+      expect(knots(h)[1].in.y).toBeGreaterThan(20);
+    });
+
+    it("clicking the first point closes the path", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[10, 80], [50, 20], [90, 80], [10, 80]]) await click(h, "curvature-pen", x, y);
+      expect(h.s.doc.workPath!.subpaths[0].closed).toBe(true);
+      expect(knots(h)).toHaveLength(3);
+    });
+  });
 });

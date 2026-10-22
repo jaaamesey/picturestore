@@ -2,7 +2,8 @@ import { For, Show } from "solid-js";
 import { toHex } from "../core/color";
 import { activeLayer, type Doc } from "../core/document";
 import type { Vec2 } from "../core/geometry";
-import { activeEndpoint, hasHandles, sameRef, type Knot, type Subpath } from "../core/path";
+import { relaxKnots } from "../core/curvature";
+import { activeEndpoint, hasHandles, reverseKnots, sameRef, type Knot, type Subpath } from "../core/path";
 import { effectiveTarget, pathOf, validRefs } from "../editor/tools/pathEdit";
 import { docToScreen } from "../editor/view";
 import type { PathDisplay, PathState, PathToolId, ToolEvent, ToolId } from "../editor/types";
@@ -65,14 +66,25 @@ export function PathsOverlay(props: {
   };
   const rubber = () => {
     const p = path(), h = props.hover;
-    if (!p || !h || !props.rubberBand || props.tool !== "pen") return null;
+    const curvature = props.tool === "curvature-pen";
+    if (!p || !h || !(curvature || (props.rubberBand && props.tool === "pen"))) return null;
     const end = activeEndpoint(p, selected());
     if (!end) return null;
-    const a = p.subpaths[end.sub].knots[end.knot];
+    const s = p.subpaths[end.sub];
     const to = { x: h.x, y: h.y };
+    // The path runs on from its last point, or from its first when that's the end continued from.
+    const first = end.knot === 0 && s.knots.length > 1;
+    const a = s.knots[end.knot];
+    const svg = (from: Knot, out: Vec2, into: Vec2, dest: Vec2) => `M${at(from.anchor).x},${at(from.anchor).y} C${at(out).x},${at(out).y} ${at(into).x},${at(into).y} ${at(dest).x},${at(dest).y}`;
+    if (curvature) {
+      // The curve forms through the pointer as if it were the next point.
+      const ordered = first ? reverseKnots(s.knots) : s.knots;
+      const relaxed = relaxKnots([...ordered, { anchor: to, in: to, out: to, smooth: true, auto: true }], false);
+      const [from, next] = relaxed.slice(-2);
+      return svg(from, from.out, next.in, next.anchor);
+    }
     // From the point's direction line on its open side, if it has one; straight otherwise.
-    const side: "in" | "out" = end.knot === 0 && p.subpaths[end.sub].knots.length > 1 ? "in" : "out";
-    return `M${at(a.anchor).x},${at(a.anchor).y} C${at(a[side]).x},${at(a[side]).y} ${at(to).x},${at(to).y} ${at(to).x},${at(to).y}`;
+    return svg(a, a[first ? "in" : "out"], to, to);
   };
   const handlePoints = (k: Knot) => [k.in, k.out].filter((p) => p.x !== k.anchor.x || p.y !== k.anchor.y);
   return (

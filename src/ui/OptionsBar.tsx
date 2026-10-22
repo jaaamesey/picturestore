@@ -387,6 +387,9 @@ function PenOptions() {
           </Popover>
         </div>
       </Show>
+      <Show when={tool() === "freeform-pen"}>
+        <NumberField label="Curve Fit" testId="pen-curve-fit" value={o().curveFit} min={0.5} max={10} step={0.5} suffix="px" onChange={(curveFit) => set({ curveFit })} />
+      </Show>
       <Show when={tool() === "pen"}>{check("Auto Add/Delete", "pen-auto", o().autoAddDelete, (autoAddDelete) => set({ autoAddDelete }))}</Show>
       <Show when={tool() === "path-select" || tool() === "direct-select"}>
         {check("Constrain Path Dragging", "pen-constrain", o().constrainDragging, (constrainDragging) => set({ constrainDragging }))}

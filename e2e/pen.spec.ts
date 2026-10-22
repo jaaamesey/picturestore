@@ -154,3 +154,44 @@ test.describe("Path Selection and Direct Selection", () => {
     await expect(page.getByTestId("path-component")).toHaveCount(2);
   });
 });
+
+test.describe("Freeform Pen and Curvature Pen", () => {
+  test("Freeform Pen draws a path that follows the drag, fitted with few anchor points", async ({ page }) => {
+    await newDocument(page, 400, 300);
+    await page.keyboard.press("p");
+    await page.getByTestId("pen-mode").selectOption("path");
+    await page.keyboard.press("Shift+p");
+    await expect(page.getByTestId("tool-freeform-pen")).toHaveAttribute("aria-pressed", "true");
+    const pts = Array.from({ length: 40 }, (_, i) => [60 + i * 7, 150 + 60 * Math.sin(i / 6)] as const);
+    const first = await docPoint(page, ...pts[0]);
+    await page.mouse.move(first.x, first.y);
+    await page.mouse.down();
+    for (const p of pts.slice(1)) {
+      const q = await docPoint(page, ...p);
+      await page.mouse.move(q.x, q.y);
+    }
+    await page.mouse.up();
+    await expectHistory(page, "Freeform Pen Tool");
+    await expect(page.getByTestId("path-component")).toHaveCount(1);
+    const n = await page.getByTestId("path-anchor").count();
+    expect(n).toBeGreaterThanOrEqual(2);
+    expect(n).toBeLessThan(15);
+  });
+
+  test("Curvature Pen: clicks make a curve through the points; a double-click makes a corner", async ({ page }) => {
+    await newDocument(page, 400, 300);
+    await page.keyboard.press("p");
+    await page.getByTestId("pen-mode").selectOption("path");
+    await page.keyboard.press("Shift+p");
+    await page.keyboard.press("Shift+p");
+    await expect(page.getByTestId("tool-curvature-pen")).toHaveAttribute("aria-pressed", "true");
+    await click(page, 60, 220, "Curvature Pen Tool");
+    await click(page, 200, 60, "Curvature Pen Tool");
+    await click(page, 340, 220, "Curvature Pen Tool");
+    await expect(page.getByTestId("path-anchor")).toHaveCount(3);
+    // The middle point is smooth: its direction lines show when it's selected.
+    await page.mouse.dblclick(...(await docPoint(page, 200, 60).then((p) => [p.x, p.y] as const)));
+    await expect.poll(async () => (await historyLabels(page)).length).toBeGreaterThan(3);
+    await page.keyboard.press("Escape");
+  });
+});

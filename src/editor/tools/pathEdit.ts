@@ -1,7 +1,8 @@
 import { placementMapping, pathShape } from "../../core/content";
-import { activeLayer, addLayer, createLayer, docRect, layerById, newId, numberedName, updateLayer, type Doc, type Layer } from "../../core/document";
+import { activeLayer, addLayer, createLayer, docRect, layerById, newId, numberedName, removeLayer, updateLayer, type Doc, type Layer } from "../../core/document";
 import type { Vec2 } from "../../core/geometry";
-import { EMPTY_PATH, type PointRef, type VectorPath } from "../../core/path";
+import type { Knot } from "../../core/bezier";
+import { EMPTY_PATH, reverseKnots, type PathOp, type PointRef, type VectorPath } from "../../core/path";
 import { documentPath, type ShapeStyle } from "../../core/shape";
 import type { PathState, PathTarget, ToolContext } from "../types";
 import { shapeStyle } from "./shape";
@@ -145,3 +146,75 @@ export const selectPoints = (ctx: ToolContext, target: PathTarget, selected: rea
 
 /** A pointer movement of under this many screen pixels is a click. */
 export const CLICK_PX = 3;
+
+/** The path the Pen tools edit now: a shape layer's in Shape mode, the work or a saved path in Path mode. */
+export function penEditing(ctx: ToolContext): Editing | null {
+  const ed = editing(ctx);
+  return ed && (ed.target.kind === "layer") === (ctx.settings.pen.mode === "shape") ? ed : null;
+}
+
+/** A component being drawn: where it goes and what it continues. */
+export interface Stroke {
+  readonly ed: Editing | null;
+  /** The path the component joins, without it. */
+  readonly base: VectorPath;
+  /** The component's index in the path. */
+  readonly sub: number;
+  /** Knots it continues (the last is where drawing resumes); none for a new component. */
+  readonly prefix: readonly Knot[];
+  readonly op: PathOp;
+  /** The shape layer made for it, once there is something to show. */
+  made: { doc: Doc; target: PathTarget } | null;
+}
+
+/**
+ * Begins a component for the freehand tools: continuing the open end `from`
+ * of a component (turned round if it's the start), or a new one in the path
+ * being edited — in Shape mode a new shape layer unless an operation is chosen.
+ */
+export function beginStroke(ctx: ToolContext, ed: Editing | null, from: PointRef | null): Stroke {
+  const { pen } = ctx.settings;
+  const op = pen.op === "new" ? "combine" : pen.op;
+  if (ed && from) {
+    const s = ed.path.subpaths[from.sub];
+    const turned = from.knot === 0 && s.knots.length > 1 ? { ...s, knots: reverseKnots(s.knots) } : s;
+    return { ed, base: { subpaths: ed.path.subpaths.map((x, i) => (i === from.sub ? { ...turned, knots: [] } : x)) }, sub: from.sub, prefix: turned.knots, op: s.op, made: null };
+  }
+  const newLayer = pen.mode === "shape" && (!ed || pen.op === "new");
+  const base = newLayer ? EMPTY_PATH : (ed?.path ?? ctx.doc.workPath ?? EMPTY_PATH);
+  return { ed: newLayer ? null : ed, base, sub: base.subpaths.length, prefix: [], op: base.subpaths.length ? op : "combine", made: null };
+}
+
+/**
+ * The stroke's path with `knots` after its prefix as its component. With
+ * `join`, the first of `knots` is the prefix's last point again, continued
+ * (a freehand stroke drawn on from an end).
+ */
+export function strokePath(st: Stroke, knots: readonly Knot[], closed: boolean, join = false): VectorPath {
+  const joined = join && st.prefix.length && knots.length ? [...st.prefix.slice(0, -1), { ...st.prefix[st.prefix.length - 1], out: knots[0].out }, ...knots.slice(1)] : [...st.prefix, ...knots];
+  const component = { knots: joined, closed, op: st.op };
+  const subpaths = [...st.base.subpaths];
+  subpaths[st.sub] = component;
+  return { subpaths };
+}
+
+/** The document showing the stroke's path, and its target (making the shape layer when it first has something to show). */
+export function strokeDoc(ctx: ToolContext, st: Stroke, path: VectorPath): { doc: Doc; target: PathTarget } | null {
+  if (st.ed) return { doc: withPath(ctx.doc, st.ed.target, path), target: st.ed.target };
+  if (ctx.settings.pen.mode === "path") return { doc: withPath(ctx.doc, { kind: "work" }, path), target: { kind: "work" } };
+  st.made ??= (() => {
+    const made = newShapeLayer(ctx, path);
+    return made && { doc: made.doc, target: { kind: "layer", layerId: made.layerId } as PathTarget };
+  })();
+  return st.made && { doc: withPath(st.made.doc, st.made.target, path), target: st.made.target };
+}
+
+/** Escape, Enter or another tool: the path is done (nothing is selected, so the next click starts a new one). */
+export function endPenPath(ctx: ToolContext) {
+  const ed = penEditing(ctx);
+  if (!ed || !ctx.paths.selected.length) return;
+  selectPoints(ctx, ed.target, []);
+  // A lone anchor point in a new shape layer is nothing: the layer goes.
+  const lone = ed.path.subpaths.length === 1 && ed.path.subpaths[0].knots.length === 1;
+  if (lone && ed.target.kind === "layer") ctx.commit("Pen Tool", removeLayer(ctx.doc, ed.target.layerId));
+}

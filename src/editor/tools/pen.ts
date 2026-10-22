@@ -1,4 +1,4 @@
-import { removeLayer, type Doc } from "../../core/document";
+import type { Doc } from "../../core/document";
 import { vec, type Vec2 } from "../../core/geometry";
 import {
   EMPTY_PATH,
@@ -24,7 +24,7 @@ import {
 } from "../../core/path";
 import type { PathTarget, Tool, ToolContext, ToolEvent } from "../types";
 import { penCursor, type PenCursor } from "./cursors";
-import { CLICK_PX, commitPath, constrain45, editing, newShapeLayer, recordPath, selectPoints, tolerance, validRefs, withPath, type Editing } from "./pathEdit";
+import { CLICK_PX, commitPath, constrain45, endPenPath, newShapeLayer, penEditing, recordPath, selectPoints, tolerance, validRefs, withPath, type Editing } from "./pathEdit";
 import { createAddAnchorTool, createConvertPointTool, createDirectSelectTool } from "./pathTools";
 
 /** How near the pointer must be to take hold of an anchor point or segment, in screen pixels. */
@@ -32,12 +32,6 @@ const GRAB_PX = 6;
 const LABEL = "Pen Tool";
 
 const at = (e: { x: number; y: number }): Vec2 => vec(e.x, e.y);
-
-/** The path the Pen edits now: a shape layer's in Shape mode, the work or a saved path in Path mode. */
-function penEditing(ctx: ToolContext): Editing | null {
-  const ed = editing(ctx);
-  return ed && (ed.target.kind === "layer") === (ctx.settings.pen.mode === "shape") ? ed : null;
-}
 
 type What =
   /** Ctrl: the Direct Selection tool. */
@@ -245,18 +239,9 @@ export function createPenTool(): Tool {
         delegate = gesture = null;
         return ctx.preview(null);
       }
-      endPath(ctx);
+      endPenPath(ctx);
     },
-    commit: (ctx) => endPath(ctx),
+    commit: (ctx) => endPenPath(ctx),
   };
 
-  /** Escape, Enter or another tool: the path is done (nothing is selected, so the next click starts a new one). */
-  function endPath(ctx: ToolContext) {
-    const ed = penEditing(ctx);
-    if (!ed || !ctx.paths.selected.length) return;
-    selectPoints(ctx, ed.target, []);
-    // A lone anchor point in a new shape layer is nothing: the layer goes.
-    const lone = ed.path.subpaths.length === 1 && ed.path.subpaths[0].knots.length === 1;
-    if (lone && ed.target.kind === "layer") ctx.commit(LABEL, removeLayer(ctx.doc, ed.target.layerId));
-  }
 }

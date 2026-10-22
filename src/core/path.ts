@@ -1,4 +1,5 @@
 import polygonClipping from "polygon-clipping";
+import { relaxPath } from "./curvature";
 import { cubicAt, flattenKnots, isStraight, nearestOnCubic, splitCubic, type Knot } from "./bezier";
 import { boundsOf, vec, type Rect, type Vec2 } from "./geometry";
 
@@ -68,7 +69,9 @@ const moveKnot = (k: Knot, d: Vec2): Knot => ({ ...k, anchor: add(k.anchor, d), 
  * when first drawing the point); a corner point's lines are independent,
  * and `"break"` (Alt) makes the point a corner.
  */
-export function moveHandle(k: Knot, side: "in" | "out", to: Vec2, mode: "smooth" | "mirror" | "break"): Knot {
+export function moveHandle(knot: Knot, side: "in" | "out", to: Vec2, mode: "smooth" | "mirror" | "break"): Knot {
+  // Edited by hand, a point is no longer automatic.
+  const { auto: _auto, ...k } = knot;
   const other = side === "in" ? "out" : "in";
   const moved = { ...k, [side]: to } as Knot;
   if (mode === "break") return { ...moved, smooth: false };
@@ -162,7 +165,7 @@ export function isEndpoint(path: VectorPath, r: PointRef): boolean {
 export function moveKnots(path: VectorPath, refs: readonly PointRef[], d: Vec2): VectorPath {
   let out = path;
   for (const r of refs) out = withKnot(out, r, (k) => moveKnot(k, d));
-  return out;
+  return relaxPath(out);
 }
 
 /** Moves whole components. */
@@ -199,7 +202,7 @@ export function removeKnot(path: VectorPath, r: PointRef): VectorPath {
   const s = path.subpaths[r.sub];
   const knots = s.knots.filter((_, i) => i !== r.knot);
   if (!knots.length) return { subpaths: path.subpaths.filter((_, i) => i !== r.sub) };
-  return withSub(path, r.sub, (x) => ({ ...x, knots, closed: x.closed && knots.length > 1 }));
+  return relaxPath(withSub(path, r.sub, (x) => ({ ...x, knots, closed: x.closed && knots.length > 1 })));
 }
 
 /** A corner point: its direction lines removed (clicking a smooth point with the Convert Point tool). */
@@ -244,7 +247,9 @@ const replaceSub = (path: VectorPath, i: number, pieces: readonly Subpath[]): Ve
 });
 
 /** Removes segments of a component: a closed component opens where one goes; an open one splits. */
-export const deleteSegments = (path: VectorPath, subIndex: number, segs: readonly number[]): VectorPath => replaceSub(path, subIndex, cutAt(path.subpaths[subIndex], segs));
+const cutSegments = (path: VectorPath, subIndex: number, segs: readonly number[]): VectorPath => replaceSub(path, subIndex, cutAt(path.subpaths[subIndex], segs));
+
+export const deleteSegments = (path: VectorPath, subIndex: number, segs: readonly number[]): VectorPath => relaxPath(cutSegments(path, subIndex, segs));
 
 export const deleteSegment = (path: VectorPath, subIndex: number, seg: number): VectorPath => deleteSegments(path, subIndex, [seg]);
 
@@ -264,7 +269,7 @@ export function deleteSelection(path: VectorPath, refs: readonly PointRef[]): { 
   if (segs.length) {
     // Knots keep their identity through the cut, which is how the selection finds them again.
     const kept = rest.map((r) => out.subpaths[r.sub].knots[r.knot]);
-    for (const sub of [...new Set(segs.map((x) => x.sub))].sort((a, b) => b - a)) out = deleteSegments(out, sub, segs.filter((x) => x.sub === sub).map((x) => x.seg));
+    for (const sub of [...new Set(segs.map((x) => x.sub))].sort((a, b) => b - a)) out = cutSegments(out, sub, segs.filter((x) => x.sub === sub).map((x) => x.seg));
     const selected = kept.flatMap((k) => {
       for (let sub = 0; sub < out.subpaths.length; sub++) {
         const knot = out.subpaths[sub].knots.indexOf(k);
@@ -272,14 +277,14 @@ export function deleteSelection(path: VectorPath, refs: readonly PointRef[]): { 
       }
       return [];
     });
-    return { path: out, selected };
+    return { path: relaxPath(out), selected };
   }
   const subs = [...new Set(rest.map((r) => r.sub))].sort((a, b) => b - a);
   for (const sub of subs) {
     const del = new Set(rest.filter((r) => r.sub === sub).map((r) => r.knot));
     out = replaceSub(out, sub, runsWithout(out.subpaths[sub], del));
   }
-  return { path: out, selected: [] };
+  return { path: relaxPath(out), selected: [] };
 }
 
 /** The runs of knots left when some are removed: each an open component (the whole component if none are). */
