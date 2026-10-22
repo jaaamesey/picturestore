@@ -232,6 +232,90 @@ function paintCoverage(pixels: Pixels, c: Coverage, color: RGB): Pixels {
   return w.finish();
 }
 
+/**
+ * Anti-aliasing as Photoshop's type offers it, as a curve on exact-area
+ * coverage: None thresholds it; Sharp and Crisp steepen it (Sharp more);
+ * Strong thickens; Smooth leaves it. The platform methods draw like Sharp.
+ * Shapes are always Smooth.
+ */
+export const ANTI_ALIAS = { smooth: 0, none: 1, sharp: 2, crisp: 3, strong: 4 } as const;
+export type AntiAliasCode = (typeof ANTI_ALIAS)[keyof typeof ANTI_ALIAS];
+
+/** The coverage curve (shared with the GPU rasterizer's WGSL; keep in sync). */
+export function antiAlias(aa: AntiAliasCode, c: number): number {
+  switch (aa) {
+    case ANTI_ALIAS.none:
+      return c >= 0.5 ? 1 : 0;
+    case ANTI_ALIAS.sharp:
+      return Math.min(1, Math.max(0, (c - 0.5) * 1.6 + 0.5));
+    case ANTI_ALIAS.crisp:
+      return Math.min(1, Math.max(0, (c - 0.5) * 1.3 + 0.5));
+    case ANTI_ALIAS.strong:
+      return 1 - (1 - c) ** 1.8;
+    default:
+      return c;
+  }
+}
+
+const aaTables = new Map<number, Uint8Array>();
+function applyAntiAlias(c: Coverage | null, aa: AntiAliasCode): Coverage | null {
+  if (!c || aa === ANTI_ALIAS.smooth) return c;
+  let lut = aaTables.get(aa);
+  if (!lut) aaTables.set(aa, (lut = Uint8Array.from({ length: 256 }, (_, i) => Math.round(antiAlias(aa, i / 255) * 255))));
+  return { region: c.region, data: c.data.map((v) => lut![v]) };
+}
+
+/**
+ * Vector art as the rasterizers take it: paints composited in order, each a
+ * fill and a stroke (clipped against the fill for inside and outside
+ * alignment) in document space.
+ */
+export interface VectorPaint {
+  readonly fill: readonly (readonly Vec2[])[];
+  readonly stroke: readonly (readonly Vec2[])[];
+  readonly strokeMode: (typeof STROKE_MODES)[keyof typeof STROKE_MODES];
+  readonly fillColor: RGB | null;
+  readonly strokeColor: RGB | null;
+  readonly aa: AntiAliasCode;
+}
+
+export interface VectorDrawing {
+  readonly paints: readonly VectorPaint[];
+  /** What it can touch, in document space. */
+  readonly bounds: Rect;
+}
+
+/** Draws vector art over `pixels` on the CPU (the GPU rasterizer's reference), clipped to `clip`. */
+export function renderDrawing(d: VectorDrawing, clip: Rect, pixels: Pixels = NO_PIXELS): Pixels {
+  for (const p of d.paints) {
+    const fill = applyAntiAlias(rasterizeContours(p.fill, clip), p.aa);
+    if (p.fillColor && fill) pixels = paintCoverage(pixels, fill, p.fillColor);
+    if (!p.strokeColor || p.strokeMode === STROKE_MODES.none) continue;
+    const stroke = applyAntiAlias(rasterizeContours(p.stroke, clip), p.aa);
+    if (!stroke) continue;
+    if (p.strokeMode === STROKE_MODES.center) {
+      pixels = paintCoverage(pixels, stroke, p.strokeColor);
+      continue;
+    }
+    // Inside and outside strokes: a doubled centre stroke, clipped by the fill.
+    const f = (x: number, y: number) => {
+      if (!fill) return 0;
+      const lx = x - fill.region.x, ly = y - fill.region.y;
+      return lx < 0 || ly < 0 || lx >= fill.region.w || ly >= fill.region.h ? 0 : fill.data[ly * fill.region.w + lx];
+    };
+    const r = stroke.region;
+    const clipped = new Uint8Array(stroke.data.length);
+    for (let y = 0; y < r.h; y++)
+      for (let x = 0; x < r.w; x++) {
+        const i = y * r.w + x;
+        const fv = f(r.x + x, r.y + y);
+        clipped[i] = p.strokeMode === STROKE_MODES.inside ? (stroke.data[i] * fv) / 255 : (stroke.data[i] * (255 - fv)) / 255;
+      }
+    pixels = paintCoverage(pixels, { region: r, data: clipped }, p.strokeColor);
+  }
+  return pixels;
+}
+
 /** Point mapper from a source box into the document through a mapping. */
 export function boxMapper(m: Mapping): (p: Vec2) => Vec2 {
   const { x, y, w, h } = m.source;
@@ -244,44 +328,32 @@ export const shapeOutline = (g: ShapeGeometry, m: Mapping) => flattenContours(sh
 /** Coverage of a shape's fill (no stroke), clipped to `clip`. */
 export const fillCoverage = (g: ShapeGeometry, m: Mapping, clip: Rect) => rasterizeContours(shapeOutline(g, m), clip);
 
+/** A shape as vector art: its fill, then its stroke over it. */
+export function shapeDrawing(g: ShapeGeometry, style: ShapeStyle, m: Mapping): VectorDrawing {
+  const outline = shapeOutline(g, m);
+  const s = style.stroke && style.stroke.width > 0 ? style.stroke : null;
+  return {
+    paints: [
+      {
+        fill: outline,
+        // Inside/outside strokes are a doubled centre stroke clipped by the fill.
+        stroke: s ? strokePolygons(outline, s.align === "center" ? s.width : s.width * 2) : [],
+        strokeMode: s ? STROKE_MODES[s.align] : STROKE_MODES.none,
+        fillColor: style.fill,
+        strokeColor: s?.color ?? null,
+        aa: ANTI_ALIAS.smooth,
+      },
+    ],
+    bounds: shapeBounds(g, style, m),
+  };
+}
+
 /**
  * Renders a shape layer's pixels (fill, then stroke over it), clipped to
  * `clip` — the canvas: the vector is the source of truth, so nothing outside
  * it needs caching.
  */
-export function renderShape(g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): Pixels {
-  const outline = shapeOutline(g, m);
-  const fill = rasterizeContours(outline, clip);
-  let pixels: Pixels = NO_PIXELS;
-  if (style.fill && fill) pixels = paintCoverage(pixels, fill, style.fill);
-  const s = style.stroke;
-  if (s && s.width > 0) {
-    // Inside/outside strokes are a doubled centre stroke clipped by the fill.
-    const width = s.align === "center" ? s.width : s.width * 2;
-    const stroke = rasterizeContours(strokePolygons(outline, width), clip);
-    if (stroke) {
-      const f = (x: number, y: number) => {
-        if (!fill) return 0;
-        const lx = x - fill.region.x, ly = y - fill.region.y;
-        return lx < 0 || ly < 0 || lx >= fill.region.w || ly >= fill.region.h ? 0 : fill.data[ly * fill.region.w + lx];
-      };
-      if (s.align !== "center") {
-        const r = stroke.region;
-        const clipped = new Uint8Array(stroke.data.length);
-        for (let y = 0; y < r.h; y++)
-          for (let x = 0; x < r.w; x++) {
-            const i = y * r.w + x;
-            const fv = f(r.x + x, r.y + y);
-            clipped[i] = s.align === "inside" ? (stroke.data[i] * fv) / 255 : (stroke.data[i] * (255 - fv)) / 255;
-          }
-        pixels = paintCoverage(pixels, { region: r, data: clipped }, s.color);
-      } else {
-        pixels = paintCoverage(pixels, stroke, s.color);
-      }
-    }
-  }
-  return pixels;
-}
+export const renderShape = (g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect): Pixels => renderDrawing(shapeDrawing(g, style, m), clip);
 
 /** Document-space bounds a rendered shape can touch (outline plus stroke). */
 export function shapeBounds(g: ShapeGeometry, style: ShapeStyle, m: Mapping): Rect {
@@ -307,14 +379,8 @@ export function documentKnots(g: ShapeGeometry, m: Mapping): Knot[][] {
 /** How a stroke is clipped against the fill: none (no stroke), centred, inside or outside. */
 export const STROKE_MODES = { none: 0, center: 1, inside: 2, outside: 3 } as const;
 
-/**
- * A shape as line segments for the GPU rasterizer (`gpu/vector.ts`), which
- * implements the same exact-area coverage as {@link rasterizeContours}:
- * the fill outline and, for strokes, the stroke polygons (doubled for inside
- * and outside alignment, then clipped by the fill) — the same geometry
- * {@link renderShape} draws. Coordinates are document space × `scale`.
- */
-export interface ShapeSegments {
+/** One paint as line segments for the GPU rasterizer (`gpu/vector.ts`): coordinates are document space × `scale`. */
+export interface PaintSegments {
   /** x0, y0, x1, y1 per edge of the fill outline (always present: inside/outside strokes clip against it). */
   readonly fill: Float32Array;
   readonly stroke: Float32Array;
@@ -322,7 +388,17 @@ export interface ShapeSegments {
   /** Straight RGBA in [0, 1]; alpha 0 when absent. */
   readonly fillColor: readonly [number, number, number, number];
   readonly strokeColor: readonly [number, number, number, number];
-  /** What the shape can touch, in document space. */
+  readonly aa: AntiAliasCode;
+}
+
+/**
+ * Vector art for the GPU rasterizer, which implements the same exact-area
+ * coverage as {@link rasterizeContours} and composites paints as
+ * {@link renderDrawing} does.
+ */
+export interface DrawingSegments {
+  readonly paints: readonly PaintSegments[];
+  /** What it can touch, in document space. */
   readonly bounds: Rect;
 }
 
@@ -346,16 +422,16 @@ function edges(polys: readonly (readonly Vec2[])[], scale: number): Float32Array
 
 const rgba = (c: RGB | null | undefined) => (c ? ([c.r / 255, c.g / 255, c.b / 255, 1] as const) : ([0, 0, 0, 0] as const));
 
-export function shapeSegments(g: ShapeGeometry, style: ShapeStyle, m: Mapping, scale = 1): ShapeSegments {
-  const outline = shapeOutline(g, m);
-  const s = style.stroke && style.stroke.width > 0 ? style.stroke : null;
-  const stroke = s ? strokePolygons(outline, s.align === "center" ? s.width : s.width * 2) : [];
-  return {
-    fill: edges(outline, scale),
-    stroke: edges(stroke, scale),
-    strokeMode: s ? STROKE_MODES[s.align] : STROKE_MODES.none,
-    fillColor: rgba(style.fill),
-    strokeColor: rgba(s?.color),
-    bounds: shapeBounds(g, style, m),
-  };
-}
+export const drawingSegments = (d: VectorDrawing, scale = 1): DrawingSegments => ({
+  paints: d.paints.map((p) => ({
+    fill: edges(p.fill, scale),
+    stroke: edges(p.stroke, scale),
+    strokeMode: p.strokeColor ? p.strokeMode : STROKE_MODES.none,
+    fillColor: rgba(p.fillColor),
+    strokeColor: rgba(p.strokeColor),
+    aa: p.aa,
+  })),
+  bounds: d.bounds,
+});
+
+export const shapeSegments = (g: ShapeGeometry, style: ShapeStyle, m: Mapping, scale = 1) => drawingSegments(shapeDrawing(g, style, m), scale);

@@ -64,7 +64,7 @@ import { combine, invertSelection, selectAll, type SelectionMode } from "../core
 import { intersect, isEmpty, rect, roundOut, translation, type Rect, type Vec2 } from "../core/geometry";
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
-import { renderShape, type ShapeGeometry, type ShapeStyle } from "../core/shape";
+import { renderDrawing, renderShape, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "../core/shape";
 import { isPlaced } from "../core/content";
 import { NO_PIXELS, contentBounds, pixelsFromImage, type Pixels } from "../core/pixels";
 import type { TransformMode, TransformState } from "../core/transform";
@@ -251,7 +251,7 @@ export const RASTERIZE_PROMPTS = {
 } as const;
 
 /** What the editor uses the GPU renderer for, besides display. */
-type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape" | "adjust">;
+type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape" | "rasterizeDrawing" | "adjust">;
 
 /** Photoshop's messages when a pixel edit has nothing to edit. */
 export const NOT_EDITABLE = {
@@ -352,7 +352,19 @@ export function createEditor() {
       return renderShape(g, style, m, clip);
     }
 
-    const raster: Rasterizers = { resample, shape: rasterizeShape };
+    /** Vector art's pixels (type): the same way. */
+    async function rasterizeDrawing(d: VectorDrawing, clip: Rect): Promise<Pixels> {
+      if (gpu) {
+        try {
+          return await gpu.rasterizeDrawing(d, clip);
+        } catch (err) {
+          console.warn("GPU rasterization failed; falling back to the CPU:", err);
+        }
+      }
+      return renderDrawing(d, clip);
+    }
+
+    const raster: Rasterizers = { resample, shape: rasterizeShape, drawing: rasterizeDrawing };
 
     /** Asks to rasterize a smart object or shape (Photoshop's prompt), does so as its own step, then carries on with `proceed`. */
     async function offerRasterize(s: SessionInternals, layer: Layer, proceed?: (ctx: ToolContext) => void) {

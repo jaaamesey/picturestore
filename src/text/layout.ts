@@ -249,7 +249,9 @@ export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
       const face = glyphFace(faceOf(s), code);
       const ch = src.slice(i, i + len);
       let out = ch, scale = 1, smallCaps = false;
-      if (s.caps === "all") out = ch.toLocaleUpperCase(s.language);
+      // Middle Eastern digits: Hindi (Arabic-Indic) or Farsi forms of 0–9.
+      if (s.digits !== "default" && s.digits !== "arabic" && code >= 0x30 && code <= 0x39) out = String.fromCharCode((s.digits === "hindi" ? 0x660 : 0x6f0) + code - 0x30);
+      else if (s.caps === "all") out = ch.toLocaleUpperCase(s.language);
       else if (s.caps === "small") {
         const up = ch.toLocaleUpperCase(s.language);
         if (face.features.has("smcp")) smallCaps = true;

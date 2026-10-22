@@ -94,6 +94,14 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
     // Content crossing a perspective's horizon has no exact transform: it's rasterized, as it looks.
     if (isConvex(content.placement.quad)) return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r, t.filter)), mask };
   }
+  // Type follows affine maps exactly (Image Size scales it, as vectors); a perspective rasterizes it, as Photoshop
+  // only allows affine transforms on live type.
+  const affine = asAffine(t.matrix);
+  if (c.kind === "text" && affine) {
+    // Another app's rendering is replaced by ours, at the new size.
+    const content = { ...c, transform: multiply(affine, c.transform), stale: false };
+    return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r)), mask };
+  }
   return { ...l, mask, content: PIXELS, pixels: await transformPixels(l.pixels, t, r) };
 }
 

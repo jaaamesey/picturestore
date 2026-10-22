@@ -1,5 +1,5 @@
 import type { Rect } from "../core/geometry";
-import type { ShapeSegments } from "../core/shape";
+import type { DrawingSegments, PaintSegments } from "../core/shape";
 
 /**
  * GPU vector rasterization: exact-area, non-zero coverage of polygons, the
@@ -12,9 +12,13 @@ import type { ShapeSegments } from "../core/shape";
  *  2. `sums` / `prefix`: a two-level parallel prefix sum along each row —
  *     per-chunk totals, then an exclusive scan over the chunks.
  *  3. `resolve_*`: each chunk re-scans its pixels from its prefix, turns
- *     winding into coverage, clips the stroke against the fill (inside /
- *     outside alignment), composites stroke over fill and writes straight
- *     RGBA8 — into the tile atlas for display, or a buffer for readback.
+ *     winding into coverage (through the anti-aliasing curve), clips the
+ *     stroke against the fill (inside / outside alignment), composites
+ *     stroke over fill and writes straight RGBA8 — into the tile atlas for
+ *     display, or a buffer for readback.
+ *
+ * Drawings of several paints (type in several colours) composite each
+ * paint in turn into a premultiplied band canvas, then store it.
  *
  * Integer accumulation makes the row sums exact; the only rounding is each
  * contribution's (2⁻²⁰), far below 8-bit precision.
@@ -40,6 +44,7 @@ struct Band {
   tileRow: u32,           // offset of this band's row in the slot table
   chunks: u32,            // chunks per row
   outBase: u32,           // readback: first pixel of this band in the output buffer
+  aa: u32,                // anti-aliasing curve: 0 smooth, 1 none, 2 sharp, 3 crisp, 4 strong (see core/shape.ts)
 }
 @group(0) @binding(0) var<uniform> B: Band;
 `;
@@ -185,10 +190,21 @@ ${COMMON}
 @group(0) @binding(3) var<storage, read> chunkF: array<i32>;
 @group(0) @binding(4) var<storage, read> chunkS: array<i32>;
 
+// The anti-aliasing curve on coverage (core/shape.ts antiAlias).
+fn curve(c: f32) -> f32 {
+  switch B.aa {
+    case 1u: { return select(0.0, 1.0, c >= 0.5); }
+    case 2u: { return clamp((c - 0.5) * 1.6 + 0.5, 0.0, 1.0); }
+    case 3u: { return clamp((c - 0.5) * 1.3 + 0.5, 0.0, 1.0); }
+    case 4u: { return 1.0 - pow(1.0 - c, 1.8); }
+    default: { return c; }
+  }
+}
+
 // Stroke over fill, straight alpha: the same compositing as the CPU's paintCoverage.
 fn shade(wf: i32, ws: i32) -> vec4<f32> {
-  let f = min(1.0, abs(f32(wf)) / SCALE);
-  var s = min(1.0, abs(f32(ws)) / SCALE);
+  let f = curve(min(1.0, abs(f32(wf)) / SCALE));
+  var s = curve(min(1.0, abs(f32(ws)) / SCALE));
   if (B.mode == 0u) { s = 0.0; }
   else if (B.mode == 2u) { s *= f; }
   else if (B.mode == 3u) { s *= 1.0 - f; }
@@ -247,6 +263,70 @@ ${RESOLVE_COMMON}
 }
 `;
 
+const RESOLVE_CANVAS_WGSL = /* wgsl */ `
+${RESOLVE_COMMON}
+@group(1) @binding(0) var<storage, read_write> canvas: array<vec4<f32>>;
+
+// This paint over what's composited so far (premultiplied).
+@compute @workgroup_size(8, 8) fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
+  let c = id.x;
+  let row = id.y;
+  if (c >= B.chunks || row >= B.height) { return; }
+  var wf = chunkF[row * B.chunks + c];
+  var ws = chunkS[row * B.chunks + c];
+  for (var x = c * CHUNK; x < min(B.width, (c + 1u) * CHUNK); x++) {
+    wf += accF[row * B.stride + x];
+    ws += accS[row * B.stride + x];
+    let s = shade(wf, ws);
+    let i = row * B.width + x;
+    canvas[i] = vec4<f32>(s.rgb * s.a, s.a) + canvas[i] * (1.0 - s.a);
+  }
+}
+`;
+
+const STORE_COMMON = /* wgsl */ `
+${COMMON}
+@group(0) @binding(1) var<storage, read> canvas: array<vec4<f32>>;
+
+fn straight(row: u32, x: u32) -> vec4<f32> {
+  let p = vec2<i32>(i32(x), i32(row));
+  if (any(p < B.clip.xy) || any(p >= B.clip.zw)) { return vec4<f32>(0.0); }
+  let c = canvas[row * B.width + x];
+  if (c.a <= 0.0) { return vec4<f32>(0.0); }
+  return vec4<f32>(c.rgb / c.a, c.a);
+}
+`;
+
+const STORE_ATLAS_WGSL = /* wgsl */ `
+${STORE_COMMON}
+@group(1) @binding(0) var atlas: texture_storage_2d_array<rgba8unorm, write>;
+@group(1) @binding(1) var<storage, read> slots: array<i32>;
+
+@compute @workgroup_size(8, 8) fn store(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x;
+  let row = id.y;
+  if (x >= B.width || row >= B.height) { return; }
+  let slot = slots[B.tileRow + x / B.slotSize];
+  if (slot < 0) { return; }
+  let perPage = B.slotsPerSide * B.slotsPerSide;
+  let local = u32(slot) % perPage;
+  let at = vec2<u32>((local % B.slotsPerSide) * B.slotSize + x % B.slotSize, (local / B.slotsPerSide) * B.slotSize + row);
+  textureStore(atlas, at, u32(slot) / perPage, straight(row, x));
+}
+`;
+
+const STORE_BUFFER_WGSL = /* wgsl */ `
+${STORE_COMMON}
+@group(1) @binding(0) var<storage, read_write> out: array<u32>;
+
+@compute @workgroup_size(8, 8) fn store(@builtin(global_invocation_id) id: vec3<u32>) {
+  let x = id.x;
+  let row = id.y;
+  if (x >= B.width || row >= B.height) { return; }
+  out[B.outBase + row * B.width + x] = pack4x8unorm(straight(row, x));
+}
+`;
+
 /** Where resolved pixels go. */
 export type VectorTarget =
   | {
@@ -265,14 +345,16 @@ export type VectorTarget =
 
 export interface VectorRasterizer {
   /**
-   * Encodes the rasterization of `seg` over `region` (target pixels; x and
-   * width multiples of `band`), in bands of `band` rows starting at
+   * Encodes the rasterization of `drawing` over `region` (target pixels; x
+   * and width multiples of `band`), in bands of `band` rows starting at
    * `region.y`. Pixels outside `clip` are written transparent. Call the
-   * returned function once the encoder is submitted, to free per-shape buffers.
+   * returned function once the encoder is submitted, to free its buffers.
    */
-  encode(encoder: GPUCommandEncoder, seg: ShapeSegments, region: Rect, clip: Rect, band: number, target: VectorTarget): () => void;
+  encode(encoder: GPUCommandEncoder, drawing: DrawingSegments, region: Rect, clip: Rect, band: number, target: VectorTarget): () => void;
   destroy(): void;
 }
+
+const NO_PAINT: PaintSegments = { fill: new Float32Array(0), stroke: new Float32Array(0), strokeMode: 0, fillColor: [0, 0, 0, 0], strokeColor: [0, 0, 0, 0], aa: 0 };
 
 export function createVectorRasterizer(device: GPUDevice): VectorRasterizer {
   const uniformEntry: GPUBindGroupLayoutEntry = {
@@ -296,6 +378,8 @@ export function createVectorRasterizer(device: GPUDevice): VectorRasterizer {
     ],
   });
   const outLayout = device.createBindGroupLayout({ entries: [buf(0, "storage")] });
+  const canvasLayout = device.createBindGroupLayout({ entries: [buf(0, "storage")] });
+  const storeLayout = device.createBindGroupLayout({ entries: [uniformEntry, buf(1, "read-only-storage")] });
 
   const pipeline = (code: string, entryPoint: string, layouts: GPUBindGroupLayout[]) =>
     device.createComputePipeline({
@@ -309,10 +393,14 @@ export function createVectorRasterizer(device: GPUDevice): VectorRasterizer {
   const prefix = device.createComputePipeline({ layout: scanPipelineLayout, compute: { module: scanModule, entryPoint: "prefix" } });
   const resolveAtlas = pipeline(RESOLVE_ATLAS_WGSL, "resolve", [resolveLayout, atlasLayout]);
   const resolveBuffer = pipeline(RESOLVE_BUFFER_WGSL, "resolve", [resolveLayout, outLayout]);
+  const resolveCanvas = pipeline(RESOLVE_CANVAS_WGSL, "resolve", [resolveLayout, canvasLayout]);
+  const storeAtlas = pipeline(STORE_ATLAS_WGSL, "store", [storeLayout, atlasLayout]);
+  const storeBuffer = pipeline(STORE_BUFFER_WGSL, "store", [storeLayout, outLayout]);
 
-  // Scratch, grown on demand and reused across shapes and bands.
+  // Scratch, grown on demand and reused across drawings and bands.
   let accF: GPUBuffer | null = null, accS: GPUBuffer | null = null;
   let chunkF: GPUBuffer | null = null, chunkS: GPUBuffer | null = null;
+  let canvas: GPUBuffer | null = null;
   // Replaced scratch may still be referenced by work encoded but not yet submitted: freed on release.
   let retired: GPUBuffer[] = [];
   const ensure = (b: GPUBuffer | null, size: number) => {
@@ -329,42 +417,50 @@ export function createVectorRasterizer(device: GPUDevice): VectorRasterizer {
   };
 
   return {
-    encode(encoder, seg, region, clip, band, target) {
+    encode(encoder, drawing, region, clip, band, target) {
       const bands = Math.ceil(region.h / band);
       if (bands <= 0 || region.w <= 0) return () => {};
+      const paints = drawing.paints.filter((p) => p.fill.length || p.stroke.length);
+      if (!paints.length) paints.push(NO_PAINT);
+      const multi = paints.length > 1;
       const stride = region.w + 2;
       const chunks = Math.ceil(region.w / CHUNK);
       accF = ensure(accF, stride * band * 4);
       accS = ensure(accS, stride * band * 4);
       chunkF = ensure(chunkF, chunks * band * 4);
       chunkS = ensure(chunkS, chunks * band * 4);
-      const fill = segmentBuffer(seg.fill);
-      const stroke = segmentBuffer(seg.stroke);
-      const uniforms = device.createBuffer({ size: bands * UNIFORM_SLOT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const data = new ArrayBuffer(bands * UNIFORM_SLOT);
+      if (multi) canvas = ensure(canvas, region.w * band * 16);
+      const segments = paints.map((p) => ({ fill: segmentBuffer(p.fill), stroke: segmentBuffer(p.stroke) }));
+      // One uniform slot per band and paint.
+      const P = paints.length;
+      const uniforms = device.createBuffer({ size: bands * P * UNIFORM_SLOT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const data = new ArrayBuffer(bands * P * UNIFORM_SLOT);
       const cols = region.w / (target.kind === "atlas" ? target.slotSize : band);
-      for (let i = 0; i < bands; i++) {
-        const o = i * UNIFORM_SLOT;
-        const y = region.y + i * band;
-        const h = Math.min(band, region.y + region.h - y);
-        new Float32Array(data, o, 2).set([region.x, y]);
-        new Uint32Array(data, o + 8, 6).set([
-          region.w,
-          h,
-          stride,
-          seg.strokeMode,
-          target.kind === "atlas" ? target.slotSize : band,
-          target.kind === "atlas" ? target.slotsPerSide : 0,
-        ]);
-        new Int32Array(data, o + 32, 4).set([clip.x - region.x, clip.y - y, clip.x + clip.w - region.x, clip.y + clip.h - y]);
-        new Float32Array(data, o + 48, 8).set([...seg.fillColor, ...seg.strokeColor]);
-        new Uint32Array(data, o + 80, 3).set([i * cols, chunks, i * band * region.w]);
-      }
+      for (let i = 0; i < bands; i++)
+        paints.forEach((paint, k) => {
+          const o = (i * P + k) * UNIFORM_SLOT;
+          const y = region.y + i * band;
+          const h = Math.min(band, region.y + region.h - y);
+          new Float32Array(data, o, 2).set([region.x, y]);
+          new Uint32Array(data, o + 8, 6).set([
+            region.w,
+            h,
+            stride,
+            paint.strokeMode,
+            target.kind === "atlas" ? target.slotSize : band,
+            target.kind === "atlas" ? target.slotsPerSide : 0,
+          ]);
+          new Int32Array(data, o + 32, 4).set([clip.x - region.x, clip.y - y, clip.x + clip.w - region.x, clip.y + clip.h - y]);
+          new Float32Array(data, o + 48, 8).set([...paint.fillColor, ...paint.strokeColor]);
+          new Uint32Array(data, o + 80, 4).set([i * cols, chunks, i * band * region.w, paint.aa]);
+        });
       device.queue.writeBuffer(uniforms, 0, data);
 
       const u = { buffer: uniforms, size: 96 };
-      const fillGroup = device.createBindGroup({ layout: edgesLayout, entries: [{ binding: 0, resource: u }, { binding: 1, resource: { buffer: fill } }, { binding: 2, resource: { buffer: accF } }] });
-      const strokeGroup = device.createBindGroup({ layout: edgesLayout, entries: [{ binding: 0, resource: u }, { binding: 1, resource: { buffer: stroke } }, { binding: 2, resource: { buffer: accS } }] });
+      const edgeGroups = segments.map((sg) => ({
+        fill: device.createBindGroup({ layout: edgesLayout, entries: [{ binding: 0, resource: u }, { binding: 1, resource: { buffer: sg.fill } }, { binding: 2, resource: { buffer: accF! } }] }),
+        stroke: device.createBindGroup({ layout: edgesLayout, entries: [{ binding: 0, resource: u }, { binding: 1, resource: { buffer: sg.stroke } }, { binding: 2, resource: { buffer: accS! } }] }),
+      }));
       const scanGroup = device.createBindGroup({
         layout: scanLayout,
         entries: [{ binding: 0, resource: u }, ...[accF, accS, chunkF, chunkS].map((buffer, k) => ({ binding: k + 1, resource: { buffer } }))],
@@ -382,45 +478,59 @@ export function createVectorRasterizer(device: GPUDevice): VectorRasterizer {
       } else {
         outGroup = device.createBindGroup({ layout: outLayout, entries: [{ binding: 0, resource: { buffer: target.buffer } }] });
       }
+      const canvasGroup = multi ? device.createBindGroup({ layout: canvasLayout, entries: [{ binding: 0, resource: { buffer: canvas! } }] }) : null;
+      const storeGroup = multi ? device.createBindGroup({ layout: storeLayout, entries: [{ binding: 0, resource: u }, { binding: 1, resource: { buffer: canvas! } }] }) : null;
 
-      const fillCount = Math.max(1, seg.fill.length / 4), strokeCount = Math.max(1, seg.stroke.length / 4);
       for (let i = 0; i < bands; i++) {
-        const offset = [i * UNIFORM_SLOT];
-        encoder.clearBuffer(accF);
-        encoder.clearBuffer(accS);
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(edges);
-        pass.setBindGroup(0, fillGroup, offset);
-        pass.dispatchWorkgroups(Math.ceil(fillCount / 64));
-        pass.setBindGroup(0, strokeGroup, offset);
-        pass.dispatchWorkgroups(Math.ceil(strokeCount / 64));
-        pass.end();
-        const scan = encoder.beginComputePass();
-        scan.setBindGroup(0, scanGroup, offset);
-        scan.setPipeline(sums);
-        scan.dispatchWorkgroups(Math.ceil(chunks / 8), Math.ceil(band / 8));
-        scan.setPipeline(prefix);
-        scan.dispatchWorkgroups(Math.ceil(band / 64));
-        scan.end();
-        const resolve = encoder.beginComputePass();
-        resolve.setPipeline(target.kind === "atlas" ? resolveAtlas : resolveBuffer);
-        resolve.setBindGroup(0, resolveGroup, offset);
-        resolve.setBindGroup(1, outGroup);
-        resolve.dispatchWorkgroups(Math.ceil(chunks / 8), Math.ceil(band / 8));
-        resolve.end();
+        if (multi) encoder.clearBuffer(canvas!);
+        paints.forEach((paint, k) => {
+          const offset = [(i * P + k) * UNIFORM_SLOT];
+          encoder.clearBuffer(accF!);
+          encoder.clearBuffer(accS!);
+          const pass = encoder.beginComputePass();
+          pass.setPipeline(edges);
+          pass.setBindGroup(0, edgeGroups[k].fill, offset);
+          pass.dispatchWorkgroups(Math.ceil(Math.max(1, paint.fill.length / 4) / 64));
+          pass.setBindGroup(0, edgeGroups[k].stroke, offset);
+          pass.dispatchWorkgroups(Math.ceil(Math.max(1, paint.stroke.length / 4) / 64));
+          pass.end();
+          const scan = encoder.beginComputePass();
+          scan.setBindGroup(0, scanGroup, offset);
+          scan.setPipeline(sums);
+          scan.dispatchWorkgroups(Math.ceil(chunks / 8), Math.ceil(band / 8));
+          scan.setPipeline(prefix);
+          scan.dispatchWorkgroups(Math.ceil(band / 64));
+          scan.end();
+          const resolve = encoder.beginComputePass();
+          resolve.setPipeline(multi ? resolveCanvas : target.kind === "atlas" ? resolveAtlas : resolveBuffer);
+          resolve.setBindGroup(0, resolveGroup, offset);
+          resolve.setBindGroup(1, multi ? canvasGroup! : outGroup);
+          resolve.dispatchWorkgroups(Math.ceil(chunks / 8), Math.ceil(band / 8));
+          resolve.end();
+        });
+        if (multi) {
+          const store = encoder.beginComputePass();
+          store.setPipeline(target.kind === "atlas" ? storeAtlas : storeBuffer);
+          store.setBindGroup(0, storeGroup!, [i * P * UNIFORM_SLOT]);
+          store.setBindGroup(1, outGroup);
+          store.dispatchWorkgroups(Math.ceil(region.w / 8), Math.ceil(band / 8));
+          store.end();
+        }
       }
       const old = retired;
       retired = [];
       return () => {
         for (const b of old) b.destroy();
-        fill.destroy();
-        stroke.destroy();
+        for (const sg of segments) {
+          sg.fill.destroy();
+          sg.stroke.destroy();
+        }
         uniforms.destroy();
         slotBuffer?.destroy();
       };
     },
     destroy() {
-      for (const b of [accF, accS, chunkF, chunkS]) b?.destroy();
+      for (const b of [accF, accS, chunkF, chunkS, canvas]) b?.destroy();
     },
   };
 }

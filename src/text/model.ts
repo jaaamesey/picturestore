@@ -476,6 +476,21 @@ export function insertContent(c: TextContent, r: TextRange, piece: Pick<TextCont
   return out;
 }
 
+/**
+ * If `next` is `prev` moved by whole pixels (a multiple of `step`), the
+ * move; else null (see wholePixelMove in core/content.ts).
+ */
+export function wholePixelTextMove(prev: TextContent, next: TextContent, step = 1): { x: number; y: number } | null {
+  if (prev === next) return { x: 0, y: 0 };
+  for (const k of Object.keys(next) as (keyof TextContent)[]) if (k !== "transform" && prev[k] !== next[k]) return null;
+  const a = prev.transform, b = next.transform;
+  for (let i = 0; i < 4; i++) if (Math.abs(a[i] - b[i]) > 1e-9) return null;
+  const dx = b[4] - a[4], dy = b[5] - a[5];
+  const rx = Math.round(dx), ry = Math.round(dy);
+  if (Math.abs(dx - rx) > 1e-6 || Math.abs(dy - ry) > 1e-6 || rx % step !== 0 || ry % step !== 0) return null;
+  return { x: rx, y: ry };
+}
+
 /** Text space → document, after Image Size and the like. */
 export const withTransform = (c: TextContent, transform: Mat): TextContent => ({ ...c, transform });
 

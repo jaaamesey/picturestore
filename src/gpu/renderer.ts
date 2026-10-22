@@ -4,8 +4,10 @@ import { programOf } from "../core/composite";
 import { placementMapping, wholePixelMove } from "../core/content";
 import type { Layer, LayerContent } from "../core/document";
 import { hasPixels, isClipped, isGroup, walk } from "../core/layers";
-import { shapeSegments, type ShapeGeometry, type ShapeStyle } from "../core/shape";
+import { drawingSegments, shapeDrawing, shapeSegments, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "../core/shape";
 import { createVectorRasterizer } from "./vector";
+import { drawText, textVersion } from "../text/engine";
+import { wholePixelTextMove, type TextContent } from "../text/model";
 import { EMPTY_RECT, intersect, isEmpty, rect, roundOut, union, type Rect, type Vec2 } from "../core/geometry";
 import type { Filter } from "../core/rasterize";
 import type { Mask } from "../core/selection";
@@ -65,6 +67,8 @@ export interface Renderer {
    * tiles, clipped to `clip` (a committed shape layer's pixels).
    */
   rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<Pixels>;
+  /** Rasterizes vector art (type) the same way. */
+  rasterizeDrawing(drawing: VectorDrawing, clip: Rect): Promise<Pixels>;
   /**
    * Applies an adjustment program to pixels (Image ▸ Adjustments) within
    * the selection's coverage, on the GPU: the same shader as adjustment layers.
@@ -99,6 +103,13 @@ export interface RendererOptions {
 }
 
 type ShapeContent = Extract<LayerContent, { kind: "shape" }>;
+/** Content drawn from vectors on the GPU, at the display's resolution: shapes, and type (unless it's another app's pixels). */
+type VectorContent = ShapeContent | TextContent;
+const isVector = (c: LayerContent): c is VectorContent => c.kind === "shape" || (c.kind === "text" && !c.stale);
+const vectorMove = (prev: VectorContent, next: VectorContent, step: number) =>
+  prev.kind === "shape" && next.kind === "shape" ? wholePixelMove(prev, next, step) : prev.kind === "text" && next.kind === "text" ? wholePixelTextMove(prev, next, step) : null;
+const vectorSegments = (c: VectorContent, scale: number) =>
+  c.kind === "shape" ? shapeSegments(c.geometry, c.style, placementMapping(c.placement), scale) : drawingSegments(drawText(c), scale);
 
 const ZERO: Vec2 = { x: 0, y: 0 };
 const translateRect = (r: Rect, d: Vec2): Rect => (d.x || d.y ? rect(r.x + d.x, r.y + d.y, r.w, r.h) : r);
@@ -173,7 +184,7 @@ interface LayerEntry {
   /** The document tiles uploaded, as of which version. */
   readonly tiles: Map<TileKey, { tile: Tile; version: number }>;
   /** For shape layers: the content last rasterized, and what of it was rasterized (document space, within the canvas). */
-  shape: ShapeContent | null;
+  shape: VectorContent | null;
   shapeBounds: Rect;
   /** The shape's full extent when rasterized (document space, unclipped). */
   shapeExtent: Rect;
@@ -742,7 +753,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
    * the frame no longer holds what's rasterized; CPU tiles of shape layers
    * are never uploaded.
    */
-  function syncShape(entry: LayerEntry, content: ShapeContent): Rect {
+  function syncShape(entry: LayerEntry, content: VectorContent): Rect {
     const L = frame.level;
     const area = frameRect();
     // Was pixels: start afresh.
@@ -753,7 +764,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     }
     // Moved by whole pixels, with nothing not yet rasterized coming into the frame: draw what's
     // already rasterized, offset, instead of rasterizing again.
-    const d = entry.shape && wholePixelMove(entry.shape, content, 1 << L);
+    const d = entry.shape && vectorMove(entry.shape, content, 1 << L);
     if (d && entry.shape) {
       const visible = intersect(translateRect(entry.shapeExtent, d), area);
       if (contains(translateRect(entry.shapeBounds, d), visible)) {
@@ -765,7 +776,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     }
     entry.offset = ZERO;
     stats.shapesRasterized++;
-    const seg = shapeSegments(content.geometry, content.style, placementMapping(content.placement), 1 / (1 << L));
+    const seg = vectorSegments(content, 1 / (1 << L));
     const extent = roundOut(seg.bounds);
     const bounds = intersect(extent, area);
     entry.shapeExtent = extent;
@@ -839,9 +850,16 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       .join(",");
 
   /** Uploads what changed of every layer's pixels and mask; returns the area that changed. */
+  let textSeen = textVersion();
   function syncLayers(scene: Scene): Rect {
     const full = rect(0, 0, size.width, size.height);
     let dirty = EMPTY_RECT;
+    // Fonts changed: type is laid out afresh, so it's rasterized again.
+    if (textSeen !== textVersion()) {
+      textSeen = textVersion();
+      for (const entry of layers.values()) if (entry.shape?.kind === "text") entry.shape = null;
+      dirty = full;
+    }
     const seen = new Set<string>();
     const programs = new Set<Program>();
     for (const layer of walk(scene.layers)) {
@@ -850,7 +868,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
         const entry = entryFor(layer.id);
         // Hidden layers keep no GPU copy; showing one uploads it again.
         if (!layer.visible) releaseSlots(entry);
-        else dirty = union(dirty, layer.content.kind === "shape" ? syncShape(entry, layer.content) : syncLayer(entry, layer.pixels));
+        else dirty = union(dirty, isVector(layer.content) ? syncShape(entry, layer.content) : syncLayer(entry, layer.pixels));
       }
       if (layer.mask) {
         const key = maskKey(layer.id);
@@ -1545,8 +1563,10 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   /** Bands read back per round trip, bounding the staging memory (≤ 64 MB at 16k px wide). */
   const READBACK_BANDS = 16;
 
-  async function rasterizeShape(geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect): Promise<Pixels> {
-    const seg = shapeSegments(geometry, style, mapping);
+  const rasterizeShape = (geometry: ShapeGeometry, style: ShapeStyle, mapping: Mapping, clip: Rect) => rasterizeDrawing(shapeDrawing(geometry, style, mapping), clip);
+
+  async function rasterizeDrawing(drawing: VectorDrawing, clip: Rect): Promise<Pixels> {
+    const seg = drawingSegments(drawing);
     const bounds = intersect(roundOut(seg.bounds), clip);
     if (isEmpty(bounds)) return NO_PIXELS;
     const tx0 = Math.floor(bounds.x / TILE_SIZE), ty0 = Math.floor(bounds.y / TILE_SIZE);
@@ -1625,6 +1645,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
 
     resample,
     rasterizeShape,
+    rasterizeDrawing,
     adjust,
 
     async readComposite() {

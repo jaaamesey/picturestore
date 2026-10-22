@@ -1,4 +1,4 @@
-import * as hb from "harfbuzzjs";
+import type * as HB from "harfbuzzjs";
 import type { Knot } from "../core/shape";
 import type { FontRef } from "./model";
 
@@ -13,6 +13,14 @@ import type { FontRef } from "./model";
  * face also lists named instances. Each face or instance is a font a type
  * layer can name, by PostScript name as PSD does.
  */
+
+/** HarfBuzz, loaded on demand: its WebAssembly initialises with a top-level await, which workers that don't set type mustn't wait on. */
+let hb: typeof HB;
+let loading: Promise<void> | null = null;
+export function loadHarfBuzz(): Promise<void> {
+  return (loading ??= import("harfbuzzjs").then((m) => void (hb = m)));
+}
+export const harfBuzzLoaded = () => !!hb;
 
 export type FontOrigin = "bundled" | "uploaded" | "local";
 
@@ -124,7 +132,7 @@ export async function sfntOf(bytes: Uint8Array): Promise<Uint8Array> {
 const faceCount = (b: Uint8Array) => (fontFormat(b) === "ttc" ? view(b).getUint32(8) : 1);
 
 /** Named instances in a variable face's fvar table. */
-function namedInstances(face: hb.Face): { name: string; postScriptName: string | null; coords: Record<string, number> }[] {
+function namedInstances(face: HB.Face): { name: string; postScriptName: string | null; coords: Record<string, number> }[] {
   const t = face.referenceTable("fvar");
   if (!t) return [];
   const v = view(t);
@@ -141,13 +149,13 @@ function namedInstances(face: hb.Face): { name: string; postScriptName: string |
   return out;
 }
 
-function nameOf(face: hb.Face, id: number): string {
+function nameOf(face: HB.Face, id: number): string {
   const names = face.listNames().filter((n) => n.nameId === id);
   const en = names.find((n) => n.language.startsWith("en")) ?? names[0];
   return en ? face.getName(id, en.language) : "";
 }
 
-const os2 = (face: hb.Face) => {
+const os2 = (face: HB.Face) => {
   const t = face.referenceTable("OS/2");
   if (!t || t.length < 64) return { weight: 400, italic: false };
   const v = view(t);
@@ -229,9 +237,9 @@ export type GlyphOutline = readonly (readonly Knot[])[];
 const SUBUNITS = 16;
 
 export class LoadedFace {
-  readonly face: hb.Face;
+  readonly face: HB.Face;
   readonly upem: number;
-  private readonly fonts = new Map<string, hb.Font>();
+  private readonly fonts = new Map<string, HB.Font>();
   private readonly outlines = new Map<string, GlyphOutline>();
   private readonly metricsCache = new Map<string, FontMetrics>();
   private readonly coverage = new Map<number, boolean>();
@@ -239,7 +247,7 @@ export class LoadedFace {
 
   constructor(
     readonly info: FontInfo,
-    blob: hb.Blob,
+    blob: HB.Blob,
   ) {
     this.face = new hb.Face(blob, info.index);
     this.upem = this.face.upem;
@@ -251,7 +259,7 @@ export class LoadedFace {
     return { ...this.info.coords, ...variations };
   }
 
-  private font(variations?: Readonly<Record<string, number>>): { font: hb.Font; key: string } {
+  private font(variations?: Readonly<Record<string, number>>): { font: HB.Font; key: string } {
     const coords = this.coords(variations);
     const key = Object.entries(coords)
       .filter(([t]) => this.info.axes.some((a) => a.tag === t))
@@ -306,7 +314,7 @@ export class LoadedFace {
     if (o.language) buffer.setLanguage(o.language);
     buffer.guessSegmentProperties();
     buffer.setClusterLevel(hb.ClusterLevel.MONOTONE_CHARACTERS);
-    hb.shape(font, buffer, o.features.map((f) => hb.Feature.fromString(f)).filter((f): f is hb.Feature => !!f));
+    hb.shape(font, buffer, o.features.map((f) => hb.Feature.fromString(f)).filter((f): f is HB.Feature => !!f));
     const infos = buffer.getGlyphInfos(), pos = buffer.getGlyphPositions();
     const n = infos.length, k = 1 / (this.upem * SUBUNITS);
     const out: Shaped = {
@@ -415,7 +423,7 @@ export function toKnots(commands: readonly { type: string; values: number[] }[],
  * and then by family and style.
  */
 export class FontLibrary {
-  private readonly files = new Map<string, { file: FontFile; blob: hb.Blob }>();
+  private readonly files = new Map<string, { file: FontFile; blob: HB.Blob }>();
   private readonly infos: FontInfo[] = [];
   private readonly loaded = new Map<string, LoadedFace>();
   private listeners: (() => void)[] = [];

@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { BUNDLED_FONTS } from "./bundled";
-import { FontLibrary } from "./fonts";
+import { FontLibrary, loadHarfBuzz } from "./fonts";
 
 const require = createRequire(import.meta.url);
+await loadHarfBuzz();
 
 /** A library with the bundled fonts, read from node_modules (unit tests). */
 export function testLibrary(): FontLibrary {

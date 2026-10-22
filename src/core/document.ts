@@ -5,6 +5,7 @@ import { intersect, isEmpty, rect, type Rect } from "./geometry";
 import { allLayers, childrenOf, findLayer, hasPixels, insertAt, isGroup, locate, removeFrom, treeShape, updateIn, type Placement as TreePlacement } from "./layers";
 import type { Mask } from "./selection";
 import type { ShapeGeometry, ShapeStyle } from "./shape";
+import type { TextContent } from "../text/model";
 import type { TransformState } from "./transform";
 import { NO_PIXELS, clipPixels, contentBounds, tileWriter, translatePixels, writeSpans, type Pixels } from "./pixels";
 import { quadOf } from "./warp";
@@ -26,9 +27,9 @@ export interface SmartSource {
 
 /**
  * What a layer is. Pixel layers are edited directly; smart objects and
- * shapes are rendered from a source through a placement, so transforming
- * them never loses quality; for these `Layer.pixels` holds the rendered
- * pixels. Groups hold layers (bottom to top); adjustment layers change the
+ * shapes are rendered from a source through a placement, and type from its
+ * text (see text/model.ts), so transforming them never loses quality; for
+ * these `Layer.pixels` holds the rendered pixels. Groups hold layers (bottom to top); adjustment layers change the
  * colours of what's below them. Neither has pixels of its own.
  */
 export type LayerContent =
@@ -36,7 +37,8 @@ export type LayerContent =
   | { readonly kind: "smart"; readonly source: SmartSource; readonly placement: Placement }
   | { readonly kind: "shape"; readonly geometry: ShapeGeometry; readonly style: ShapeStyle; readonly placement: Placement }
   | { readonly kind: "group"; readonly layers: readonly Layer[]; readonly open: boolean }
-  | { readonly kind: "adjustment"; readonly adjustment: Adjustment };
+  | { readonly kind: "adjustment"; readonly adjustment: Adjustment }
+  | TextContent;
 
 /**
  * A layer mask: greyscale coverage, white revealing the layer and black

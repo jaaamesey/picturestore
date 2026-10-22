@@ -2,7 +2,8 @@ import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type
 import { rect, vec, type Rect, type Vec2 } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
-import { renderShape, type ShapeGeometry, type ShapeStyle } from "./shape";
+import { renderDrawing, renderShape, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "./shape";
+import { drawText } from "../text/engine";
 import type { Pixels } from "./pixels";
 import type { TransformState } from "./transform";
 import { evalPatch, invert3, isIdentityPatch, project, quadOf, reparameterizePatch, squareToQuad, type Mapping, type Quad } from "./warp";
@@ -11,17 +12,21 @@ import { evalPatch, invert3, isIdentityPatch, project, quadOf, reparameterizePat
 export type Resample = (f: Floating, m: Mapping, filter: Filter, clip?: Rect) => Promise<Pixels>;
 /** A shape's pixels, clipped to `clip`. */
 export type ShapeRasterizer = (g: ShapeGeometry, style: ShapeStyle, m: Mapping, clip: Rect) => Promise<Pixels>;
+/** Vector art's pixels (type), clipped to `clip`. */
+export type DrawingRasterizer = (d: VectorDrawing, clip: Rect) => Promise<Pixels>;
 
 /** How content becomes pixels: on the GPU in the app; {@link CPU_RASTERIZERS} are the reference. */
 export interface Rasterizers {
   readonly resample: Resample;
   readonly shape: ShapeRasterizer;
+  readonly drawing: DrawingRasterizer;
 }
 
 /** CPU reference implementations: for tests, GPU parity checks, and fallback. */
 export const CPU_RASTERIZERS: Rasterizers = {
   resample: async (f, m, filter, clip) => transformFloatingCpu(f, m, filter, clip),
   shape: async (g, style, m, clip) => renderShape(g, style, m, clip),
+  drawing: async (d, clip) => renderDrawing(d, clip),
 };
 
 export const placementMapping = (p: Placement): Mapping => ({ source: p.source, quad: p.quad, patch: p.patch });
@@ -84,7 +89,7 @@ export const sourceFloating = (s: SmartSource): Floating => ({ pixels: s.pixels,
 export type PlacedContent = Extract<LayerContent, { kind: "smart" | "shape" }>;
 export const isPlaced = (c: LayerContent): c is PlacedContent => c.kind === "smart" || c.kind === "shape";
 
-/** Renders placed content through its placement, clipped to the canvas (null for anything else). */
+/** Renders placed content and type, clipped to the canvas (null for anything else). */
 export async function renderContent(content: LayerContent, clip: Rect, r: Rasterizers, filter: Filter = "bicubic"): Promise<Pixels | null> {
   switch (content.kind) {
     case "pixels":
@@ -95,6 +100,8 @@ export async function renderContent(content: LayerContent, clip: Rect, r: Raster
       return r.shape(content.geometry, content.style, placementMapping(content.placement), clip);
     case "smart":
       return r.resample(sourceFloating(content.source), placementMapping(content.placement), filter, clip);
+    case "text":
+      return r.drawing(drawText(content), clip);
   }
 }
 

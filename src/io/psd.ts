@@ -257,6 +257,8 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
       return { opened: content.open, children: content.layers.map((l) => layerOut(l, linked)) };
     case "adjustment":
       return { adjustment: toPsd(content.adjustment) };
+    case "text":
+      return {};
     case "smart": {
       const { source, placement } = content;
       if (!linked.has(source.id)) linked.set(source.id, linkedFile(source));
