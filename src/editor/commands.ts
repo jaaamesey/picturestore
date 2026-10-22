@@ -2,6 +2,7 @@ import { ADJUSTMENTS, type AdjustmentKind } from "../core/adjustments";
 import { activeLayer } from "../core/document";
 import { hasPixels, isClipped, isGroup, locate } from "../core/layers";
 import { TOOLBAR } from "./tools";
+import { TYPE_COMMANDS, type PanelName } from "./typeCommands";
 import type { Editor } from "./editor";
 import type { ToolId } from "./types";
 import type { PreferencesPane } from "./preferences";
@@ -39,6 +40,13 @@ export interface Shell {
   copy(merged: boolean): void;
   cut(): void;
   paste(inPlace: boolean): void;
+  /** Window ▸ a panel: opens it, or closes it if it's open. */
+  togglePanel(id: PanelName): void;
+  panelOpen(id: PanelName): boolean;
+  /** Opens or closes panels together (the Type tools' Character and Paragraph button). */
+  togglePanelGroup(ids: readonly PanelName[]): void;
+  /** Type ▸ Warp Text dialog. */
+  warpText(): void;
 }
 
 export interface CommandSpec {
@@ -50,7 +58,7 @@ export interface CommandSpec {
   readonly run: (ed: Editor, shell: Shell) => void;
   readonly enabled?: (ed: Editor) => boolean;
   /** For toggles: shown with a check mark when true. */
-  readonly checked?: (ed: Editor) => boolean;
+  readonly checked?: (ed: Editor, shell: Shell) => boolean;
 }
 
 const hasDoc = (ed: Editor) => ed.active() !== null;
@@ -253,8 +261,9 @@ export const COMMANDS = {
   "layer.rasterize": {
     label: "Rasterize Layer",
     run: (ed) => ed.rasterizeLayer(),
-    enabled: (ed) => layerKind(ed) === "smart" || layerKind(ed) === "shape",
+    enabled: (ed) => layerKind(ed) === "smart" || layerKind(ed) === "shape" || layerKind(ed) === "text",
   },
+  ...TYPE_COMMANDS,
 
   // Select
   "select.all": { label: "All", shortcuts: ["Mod+A"], run: (ed) => ed.selectAll(), enabled: hasDoc },

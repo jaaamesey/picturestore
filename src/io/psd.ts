@@ -11,14 +11,14 @@ import {
 } from "ag-psd";
 import { isBlendMode } from "../core/blend";
 import type { RGB } from "../core/color";
-import { placementMapping } from "../core/content";
+import { pathShape, placementMapping } from "../core/content";
 import { PIXELS, resolutionOf, createLayer, docRect, type Doc, type Layer, type LayerContent, type LayerMask, type SmartSource } from "../core/document";
 import { fromPsd, rgbOf, toPsd } from "./psdAdjustments";
 import { flatten } from "../core/composite";
-import { boundsOf, isEmpty, rect, vec, type Vec2 } from "../core/geometry";
+import { isEmpty, rect, vec, type Vec2 } from "../core/geometry";
 import { documentKnots, type Knot, type ShapeStyle } from "../core/shape";
 import { NO_PIXELS, contentBounds, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
-import { isIdentityPatch, quadOf, type Patch, type Quad } from "../core/warp";
+import { isIdentityPatch, type Patch, type Quad } from "../core/warp";
 
 // ag-psd allocates pixel buffers through these hooks. Plain buffers avoid canvas
 // premultiplication losses and work outside the browser (tests, workers).
@@ -148,8 +148,6 @@ function shapeContent(c: PsdLayer): LayerContent | null {
   const contours: Knot[][] = mask.paths.map((p) =>
     p.knots.map(({ points: q }) => ({ in: vec(q[0], q[1]), anchor: vec(q[2], q[3]), out: vec(q[4], q[5]) })),
   );
-  const pts = contours.flat().flatMap((k) => [k.anchor, k.in, k.out]);
-  if (pts.length === 0) return null;
   const s = c.vectorStroke;
   const fill = s?.fillEnabled === false ? null : rgbOf(c.vectorFill.color);
   const strokeColor = s?.content?.type === "color" ? rgbOf(s.content.color) : null;
@@ -160,15 +158,7 @@ function shapeContent(c: PsdLayer): LayerContent | null {
         ? { color: strokeColor, width: s.lineWidth?.value ?? 1, align: s.lineAlignment ?? "inside" }
         : null,
   };
-  // Contours are kept in document coordinates: the source box is their bounds, placed where it is.
-  const box = boundsOf(pts);
-  if (isEmpty(box)) return null;
-  return {
-    kind: "shape",
-    geometry: { kind: "path", contours },
-    style,
-    placement: { source: box, quad: quadOf(box), angle: 0, patch: null },
-  };
+  return pathShape(contours, style);
 }
 
 /**

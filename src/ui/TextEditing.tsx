@@ -171,11 +171,20 @@ export function TextInput(props: { overlay: TextOverlay; view: View }) {
   let area!: HTMLTextAreaElement;
   onSettled(() => {
     area.focus({ preventScroll: true });
-    // Keep the focus while editing: clicks on the canvas return it here.
-    const refocus = () => queueMicrotask(() => editor.type.session() && area.focus({ preventScroll: true }));
+    // Keep the focus while editing: clicks on the canvas, a button (on the options bar, in a panel) or
+    // leaving a field (a size typed in the Character panel) return it here, as typing goes on in Photoshop.
+    const refocus = () => queueMicrotask(() => editor.type.session() && !isField(document.activeElement) && area.focus({ preventScroll: true }));
+    const isField = (el: EventTarget | null) => el instanceof HTMLElement && el !== area && el.matches("input, select, textarea, [contenteditable]");
+    const onFocusOut = (e: FocusEvent) => {
+      if ((e.target === area || isField(e.target)) && !isField(e.relatedTarget)) refocus();
+    };
     const host = area.closest("[data-testid=viewport]");
     host?.addEventListener("pointerup", refocus);
-    return () => host?.removeEventListener("pointerup", refocus);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      host?.removeEventListener("pointerup", refocus);
+      document.removeEventListener("focusout", onFocusOut);
+    };
   });
   const at = createMemo(() => {
     const c = props.overlay.content;

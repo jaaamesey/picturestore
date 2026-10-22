@@ -84,6 +84,73 @@ export const SELECTION_MENU: readonly MenuItem[] = [
   "edit.freeTransform",
 ];
 
+/** Window ▸ Character panel's menu. */
+export const CHARACTER_MENU: readonly MenuItem[] = [
+  "type.orientation.horizontal",
+  "type.orientation.vertical",
+  "char.verticalRoman",
+  "char.tateChuYoko",
+  "-",
+  { submenu: "OpenType", items: ["char.oldStyle", "char.ornaments"] },
+  "-",
+  "char.fauxBold",
+  "char.fauxItalic",
+  "char.allCaps",
+  "char.smallCaps",
+  "char.superscript",
+  "char.subscript",
+  "char.underline",
+  "char.strikethrough",
+  "-",
+  "char.underlineRight",
+  "char.underlineLeft",
+  "-",
+  "char.fractionalWidths",
+  "char.noBreak",
+  "-",
+  { submenu: "Digits", items: ["char.digits.default", "char.digits.arabic", "char.digits.hindi", "char.digits.farsi"] },
+  "-",
+  "char.reset",
+];
+
+/** Window ▸ Paragraph panel's menu. */
+export const PARAGRAPH_MENU: readonly MenuItem[] = [
+  "para.hangingPunctuation",
+  "-",
+  "para.composer.single",
+  "para.composer.every",
+  "-",
+  "para.direction.ltr",
+  "para.direction.rtl",
+  "-",
+  "para.reset",
+];
+
+const TYPE_MENU: readonly MenuItem[] = [
+  { submenu: "Panels", items: ["type.panels.character", "type.panels.paragraph", "type.panels.glyphs"] },
+  {
+    submenu: "Anti-Alias",
+    items: ["type.antiAlias.none", "type.antiAlias.sharp", "type.antiAlias.crisp", "type.antiAlias.strong", "type.antiAlias.smooth", "-", "type.antiAlias.platformLCD", "type.antiAlias.platform"],
+  },
+  { submenu: "Orientation", items: ["type.orientation.horizontal", "type.orientation.vertical"] },
+  "-",
+  "type.convertToShape",
+  "-",
+  "type.rasterize",
+  "type.convertShapeType",
+  "type.warp",
+  "-",
+  {
+    submenu: "Font Preview Size",
+    items: ["type.previewSize.none", "type.previewSize.small", "type.previewSize.medium", "type.previewSize.large", "type.previewSize.extraLarge", "type.previewSize.huge"],
+  },
+  "-",
+  "type.updateAll",
+  "type.replaceMissing",
+  "-",
+  "type.pasteLorem",
+];
+
 const MENUS: readonly { readonly title: string; readonly items: readonly MenuItem[] }[] = [
   {
     title: "File",
@@ -136,6 +203,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "layer.mergeDown",
     ],
   },
+  { title: "Type", items: TYPE_MENU },
   { title: "Select", items: ["select.all", "select.deselect", "select.inverse"] },
   {
     title: "View",
@@ -159,6 +227,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "view.newGuide",
     ],
   },
+  { title: "Window", items: ["window.character", "window.glyphs", "window.history", "window.layers", "window.paragraph", "window.properties"] },
 ];
 
 /** A dropdown list of commands; used by the menu bar and context menus. */
@@ -192,7 +261,7 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
             <button
               type="button"
               role={command(item).checked ? "menuitemcheckbox" : "menuitem"}
-              aria-checked={command(item).checked ? (command(item).checked!(editor) ? "true" : "false") : undefined}
+              aria-checked={command(item).checked ? (command(item).checked!(editor, shell) ? "true" : "false") : undefined}
               data-command={item}
               disabled={!isEnabled(item, editor)}
               class="flex w-full items-center justify-between gap-6 px-4 py-1 text-left hover:bg-accent hover:text-white disabled:text-dim disabled:hover:bg-transparent"
@@ -203,7 +272,7 @@ export function MenuList(props: { items: readonly MenuItem[]; onDone: () => void
             >
               <span class="flex items-center gap-1.5">
                 <Show when={checkable()}>
-                  <span class="w-3 text-center">{command(item).checked?.(editor) ? "✓" : ""}</span>
+                  <span class="w-3 text-center">{command(item).checked?.(editor, shell) ? "✓" : ""}</span>
                 </Show>
                 {command(item).title?.(editor) ?? command(item).label}
               </span>

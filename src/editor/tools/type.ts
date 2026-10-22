@@ -195,7 +195,7 @@ export function createTypeController(): TypeController {
     const name = s.autoName && !s.mask ? textLayerName(s.content.text) : l.name;
     // A Type Mask tool's text isn't a layer: it shows in the quick mask instead.
     ctx.preview(updateLayer(s.base, s.layerId, { content: s.content, name, pixels: NO_PIXELS, ...(s.mask && { visible: false }) }));
-    ctx.overlay({ kind: "text", layerId: s.layerId, content: s.content, anchor: s.anchor, focus: s.focus, mask: s.mask, hideSelection: s.hide, transforming: s.transforming, composing: !!s.composition });
+    ctx.overlay({ kind: "text", layerId: s.layerId, content: s.content, anchor: s.anchor, focus: s.focus, mask: s.mask, hideSelection: s.hide, transforming: s.transforming, composing: !!s.composition, typing: s.typing?.style ?? null });
   }
 
   /** Records the state before an edit, for undo within the session. */

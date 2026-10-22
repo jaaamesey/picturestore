@@ -4,6 +4,7 @@ import serif from "source-serif/VAR/SourceSerif4Variable-Roman.ttf?url";
 import serifItalic from "source-serif/VAR/SourceSerif4Variable-Italic.ttf?url";
 import code from "source-code-pro/VF/SourceCodeVF-Upright.ttf?url";
 import codeItalic from "source-code-pro/VF/SourceCodeVF-Italic.ttf?url";
+import { createSignal } from "solid-js";
 import { loadHyphenation } from "../text/breaks";
 import { BUNDLED_FONTS } from "../text/bundled";
 import { fontLibrary, invalidateText } from "../text/engine";
@@ -28,6 +29,16 @@ const URLS: Record<string, string> = {
 };
 
 let ready: Promise<void> | null = null;
+
+const [fontsVersion, setFontsVersion] = createSignal(0);
+let watching: (() => void) | null = null;
+
+/** The font families, for menus: kept current as fonts come and go. */
+export function fontFamilies() {
+  watching ??= fontLibrary().onChange(() => setFontsVersion((v) => v + 1));
+  fontsVersion();
+  return fontLibrary().families();
+}
 
 /** Loads HarfBuzz, the bundled fonts and the stored ones (once). */
 export function initFonts(): Promise<void> {

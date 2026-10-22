@@ -1,8 +1,8 @@
 import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type Placement, type SmartSource } from "./document";
-import { rect, vec, type Rect, type Vec2 } from "./geometry";
+import { boundsOf, isEmpty, rect, vec, type Rect, type Vec2 } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
-import { renderDrawing, renderShape, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "./shape";
+import { renderDrawing, renderShape, type Knot, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "./shape";
 import { drawText } from "../text/engine";
 import type { Pixels } from "./pixels";
 import type { TransformState } from "./transform";
@@ -28,6 +28,13 @@ export const CPU_RASTERIZERS: Rasterizers = {
   shape: async (g, style, m, clip) => renderShape(g, style, m, clip),
   drawing: async (d, clip) => renderDrawing(d, clip),
 };
+
+/** A shape layer's content from contours in document coordinates: the source box is their bounds, placed where it is. */
+export function pathShape(contours: readonly (readonly Knot[])[], style: ShapeStyle): Extract<LayerContent, { kind: "shape" }> | null {
+  const box = boundsOf(contours.flat().flatMap((k) => [k.anchor, k.in, k.out]));
+  if (isEmpty(box)) return null;
+  return { kind: "shape", geometry: { kind: "path", contours }, style, placement: { source: box, quad: quadOf(box), angle: 0, patch: null } };
+}
 
 export const placementMapping = (p: Placement): Mapping => ({ source: p.source, quad: p.quad, patch: p.patch });
 

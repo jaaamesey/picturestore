@@ -38,17 +38,22 @@ import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
 import { Icon } from "./icons";
-import { MenuBar, MenuList, type MenuItem } from "./MenuBar";
+import { CHARACTER_MENU, MenuBar, MenuList, PARAGRAPH_MENU, type MenuItem } from "./MenuBar";
+import { CharacterPanel } from "./type/CharacterPanel";
+import { GlyphsPanel } from "./type/GlyphsPanel";
+import { ParagraphPanel } from "./type/ParagraphPanel";
+import { WarpTextDialog } from "./type/WarpTextDialog";
 import { Popover, dismissable } from "./Popover";
 import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
-import { Dock } from "./Dock";
+import { Dock, panels } from "./Dock";
 import { HistoryPanel } from "./panels/HistoryPanel";
 import { LayersPanel } from "./panels/LayersPanel";
 import { PropertiesPanel } from "./panels/PropertiesPanel";
 import { TEST_CORE } from "./testHooks";
 import { AdjustmentDialog } from "./AdjustmentDialog";
 import type { AdjustmentKind } from "../core/adjustments";
+import type { TextWarp } from "../text/model";
 import { Toolbar } from "./Toolbar";
 import { Viewport } from "./Viewport";
 
@@ -220,6 +225,7 @@ export function App() {
   const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
   const [newGuideFor, setNewGuideFor] = createSignal<DocumentSession | null>(null);
+  const [warping, setWarping] = createSignal<{ session: DocumentSession; initial: TextWarp | null } | null>(null);
 
   // --- Recovery information ------------------------------------------------------
   // Every so often (Preferences ▸ File Handling), each document with unsaved
@@ -300,6 +306,13 @@ export function App() {
     canvasSize: () => setCanvasSize(editor.active() as DocumentSession | null),
     imageSize: () => setImageSizeFor(editor.active() as DocumentSession | null),
     newGuide: () => setNewGuideFor(editor.active() as DocumentSession | null),
+    togglePanel: (id) => panels.toggle(id),
+    panelOpen: (id) => panels.isOpen(id),
+    togglePanelGroup: (ids) => panels.toggleGroup(ids),
+    warpText() {
+      const t = editor.type.target();
+      if (t) setWarping({ session: editor.active() as DocumentSession, initial: t.content.warp });
+    },
     adjust(kind) {
       const s = editor.active();
       const d = s?.doc();
@@ -451,7 +464,17 @@ export function App() {
               </Show>
             </div>
           </main>
-          <Dock panels={{ history: () => <HistoryPanel />, properties: () => <PropertiesPanel />, layers: () => <LayersPanel /> }} />
+          <Dock
+            panels={{
+              history: () => <HistoryPanel />,
+              properties: () => <PropertiesPanel />,
+              layers: () => <LayersPanel />,
+              character: () => <CharacterPanel />,
+              paragraph: () => <ParagraphPanel />,
+              glyphs: () => <GlyphsPanel />,
+            }}
+            menus={{ character: CHARACTER_MENU, paragraph: PARAGRAPH_MENU }}
+          />
         </div>
       </div>
       <Show when={showNew()}>
@@ -495,6 +518,20 @@ export function App() {
             onAnswer={(size) => {
               setBoxSizeAsk(null);
               answer()(size);
+            }}
+          />
+        )}
+      </Show>
+      <Show when={warping()} keyed>
+        {(w) => (
+          <WarpTextDialog
+            initial={w.initial}
+            onPreview={(warp) => editor.active() === w.session && editor.type.previewWarp(warp)}
+            onAnswer={(warp) => {
+              setWarping(null);
+              if (editor.active() !== w.session) return;
+              if (warp === undefined) editor.type.previewWarp(undefined);
+              else editor.type.setWarp(warp);
             }}
           />
         )}

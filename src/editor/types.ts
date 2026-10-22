@@ -156,6 +156,8 @@ export type Overlay =
       readonly transforming: boolean;
       /** An IME composition is in progress. */
       readonly composing: boolean;
+      /** What's typed next at the caret, when formatted there (else the style before it). */
+      readonly typing: CharStyle | null;
     }
   | {
       readonly kind: "perspective-crop";

@@ -13,6 +13,7 @@ import { locatorPoint, numeric, withNumeric, type NumericTransform, type Transfo
 import { AppContext } from "./context";
 import { IconButton, NumberField, Separator } from "./controls";
 import { CropOptions, PerspectiveCropOptions } from "./CropOptions";
+import { TypeOptions } from "./type/TypeOptions";
 
 const MODES: readonly { mode: SelectionMode; label: string; glyph: string }[] = [
   { mode: "replace", label: "New selection", glyph: "▢" },
@@ -362,6 +363,9 @@ export function OptionsBar() {
         </Match>
         <Match when={SHAPE_TOOLS.includes(editor.tool())}>
           <ShapeOptions />
+        </Match>
+        <Match when={editor.tool().startsWith("type-")}>
+          <TypeOptions />
         </Match>
         <Match when={editor.tool() === "bucket"}>
           <ToleranceOptions />

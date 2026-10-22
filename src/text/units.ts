@@ -33,3 +33,11 @@ export function parseTypeLength(text: string, unit: TypeUnit, ppi: number, allow
 
 /** A pixel length in the unit, for fields: "12 pt" (two decimals at most). */
 export const formatTypeLength = (px: number, unit: TypeUnit, ppi: number) => `${Math.round(toTypeUnit(px, unit, ppi) * 100) / 100} ${TYPE_UNIT_SUFFIX[unit]}`;
+
+/**
+ * How much a type layer's transform scales its type vertically and
+ * horizontally: Photoshop shows sizes as they're drawn, so scaled type
+ * reads at its scaled size (vertical for font size, leading and baseline
+ * shift; horizontal for indents).
+ */
+export const typeScale = (m: readonly number[]) => ({ x: Math.hypot(m[0], m[1]) || 1, y: Math.hypot(m[2], m[3]) || 1 });

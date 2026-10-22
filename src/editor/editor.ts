@@ -1,9 +1,10 @@
-import { DEFAULT_CHAR_STYLE, DEFAULT_PARAGRAPH_STYLE, range, setCharStyle, setParagraphStyle, type CharStyle, type ParagraphStyle, type TextContent, type TextRange } from "../text/model";
-import { drawText } from "../text/engine";
+import { DEFAULT_CHAR_STYLE, DEFAULT_FONT, DEFAULT_PARAGRAPH_STYLE, paragraphsIn, range, setCharStyle, setParagraphStyle, stylesIn, type CharStyle, type ParagraphStyle, type TextContent, type TextRange, type TextWarp } from "../text/model";
+import { drawText, fontLibrary } from "../text/engine";
+import { overflowLost, textOutlines, toParagraphText, toPointText, usesFauxBold } from "../text/convert";
 import type { Motion } from "../text/edit";
 import { createEffect, createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
-import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
+import { pathShape, placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
 import { affine3, canvasOffset, imageSize, resizeCanvas, setResolution, transformDocument, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
 import { DEFAULT_BRUSH } from "../core/brush";
 import { BLACK, WHITE, type RGB } from "../core/color";
@@ -46,7 +47,7 @@ import {
 import { adjustPixels, adjustedBackground, applyMask, flatten, histogram, maskValues, mergeDown, selectionFrom } from "../core/composite";
 import { adjustmentLabel, compile, defaultAdjustment, equalizeCurve, type Adjustment, type AdjustmentKind, type Program } from "../core/adjustments";
 import type { LayerBlendMode } from "../core/blend";
-import { hasPixels, isClipped, isGroup, locate, walk, type Placement as LayerPlacement } from "../core/layers";
+import { allLayers, hasPixels, isClipped, isGroup, locate, walk, type Placement as LayerPlacement } from "../core/layers";
 import {
   amend,
   canRedo,
@@ -909,6 +910,23 @@ export function createEditor() {
       return null;
     }
 
+    /** The character attributes the type panels show: over the selection (a caret's typing style), the active type layer, else new type's. */
+    function targetCharStyles(): readonly CharStyle[] {
+      const t = textTarget();
+      if (!t) return [settings.type.char];
+      const o = active()?.overlay();
+      if (o?.kind === "text" && o.typing && t.range.start === t.range.end) return [o.typing];
+      return stylesIn(t.content, t.range).map((r) => r.style);
+    }
+
+    /** The paragraph attributes the type panels show: of the paragraphs the selection touches, all of the active type layer's, else new type's. */
+    function targetParagraphStyles(): readonly ParagraphStyle[] {
+      const t = textTarget();
+      if (!t) return [settings.type.paragraph];
+      const p = paragraphsIn(t.content.text, t.range);
+      return t.content.paragraphs.slice(p.start, p.end).map((q) => q.style);
+    }
+
     /** A type layer's content changed, as one history step: laid out and rendered again. */
     function typeLayerEdit(label: string, f: (c: TextContent) => TextContent, key: string | null = null) {
       edit(
@@ -959,6 +977,41 @@ export function createEditor() {
       if (t) typeLayerEdit(label, f);
     }
 
+    /** Every type layer's content changed by `f` (null: unchanged), as one step. */
+    function editTypeLayers(label: string, f: (c: TextContent) => TextContent | null) {
+      edit(label, (d) => {
+        let out = d;
+        for (const l of allLayers(d.layers)) {
+          if (l.content.kind !== "text") continue;
+          const next = f(l.content);
+          if (next) out = updateLayer(out, l.id, { content: { ...next, stale: false }, pixels: renderDrawing(drawText(next), docRect(d)) });
+        }
+        return out;
+      });
+    }
+
+    /** Type ▸ Convert Text Shape Type: point type to paragraph type and back (asking first if overflowing text would be lost). */
+    async function convertTextShapeType() {
+      if (tools.type.session()) typing((ctx) => tools.type.commit(ctx));
+      const t = textTarget();
+      if (!t) return;
+      if (t.content.frame.kind === "box") {
+        if (overflowLost(t.content) && !(await askConfirm("Converting to point text will delete the text that overflows the bounding box. Continue?"))) return;
+        typeLayerEdit("Convert to Point Text", toPointText);
+      } else if (t.content.frame.kind === "point") typeLayerEdit("Convert to Paragraph Text", toParagraphText);
+    }
+
+    /** Type ▸ Convert to Shape: the type layer becomes a shape layer of its outlines, filled with its first colour. */
+    function convertTypeToShape() {
+      if (tools.type.session()) typing((ctx) => tools.type.commit(ctx));
+      const t = textTarget();
+      if (!t) return;
+      if (usesFauxBold(t.content)) return reportError("Could not complete the Convert to Shape command because the type layer uses a faux bold style.");
+      const shape = pathShape(textOutlines(t.content), { fill: t.content.runs.find((r) => r.length)?.style.color ?? t.content.runs[0].style.color, stroke: null });
+      if (!shape) return;
+      edit("Convert to Shape", (d) => updateLayer(d, t.layerId, { content: shape, pixels: renderShape(shape.geometry, shape.style, placementMapping(shape.placement), docRect(d)) }));
+    }
+
     const editor = {
       tools,
       sessions: sessions as Accessor<readonly DocumentSession[]>,
@@ -989,6 +1042,8 @@ export function createEditor() {
           return o?.kind === "text" ? o : null;
         },
         target: textTarget,
+        charStyles: targetCharStyles,
+        paragraphStyles: targetParagraphStyles,
         input: (text: string) => typing((ctx) => tools.type.input(ctx, text)),
         paste: (piece: Pick<TextContent, "text" | "runs">) => typing((ctx) => tools.type.paste(ctx, piece)),
         copy: () => tools.type.copy(),
@@ -1012,6 +1067,32 @@ export function createEditor() {
         formatCharacters,
         formatParagraphs,
         update: updateType,
+        convertShapeType: convertTextShapeType,
+        /** Type ▸ Warp Text's preview: the active type layer drawn with `warp` until it's set or the preview ends (undefined). */
+        previewWarp(warp: TextWarp | null | undefined) {
+          const s = active();
+          const t = textTarget();
+          if (!s || !t || t.editing) return;
+          if (warp === undefined) s.setPreview(null);
+          else s.setPreview(updateLayer(s.doc(), t.layerId, { content: { ...t.content, warp } }));
+          renderRequested();
+        },
+        /** Type ▸ Warp Text: commits any editing first, then warps (or unwarps) the whole layer. */
+        setWarp(warp: TextWarp | null) {
+          if (tools.type.session()) typing((ctx) => tools.type.commit(ctx));
+          active()?.setPreview(null);
+          typeLayerEdit("Warp Text", (c) => ({ ...c, warp }));
+        },
+        convertToShape: convertTypeToShape,
+        /** Type ▸ Update All Text Layers: imported type is laid out and drawn here (its fonts permitting). */
+        updateAll: () => editTypeLayers("Update All Text Layers", (c) => (c.stale ? c : null)),
+        /** Type ▸ Replace All Missing Fonts: with the default font. */
+        replaceMissingFonts: () =>
+          editTypeLayers("Replace All Missing Fonts", (c) => {
+            const lib = fontLibrary();
+            if (c.runs.every((r) => lib.knows(r.style.font))) return null;
+            return { ...c, runs: c.runs.map((r) => (lib.knows(r.style.font) ? r : { ...r, style: { ...r.style, font: DEFAULT_FONT, variations: {} } })) };
+          }),
       },
       foreground,
       background,

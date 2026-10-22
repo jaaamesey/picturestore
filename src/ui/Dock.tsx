@@ -1,6 +1,21 @@
 import type { JSX } from "@solidjs/web";
-import { For, Show, createSignal } from "solid-js";
-import { PANEL_MIN_HEIGHT, PANEL_TITLES, dividerPanels, dragDivider, loadDock, saveDock, toggleMinimized, withWidth, type DockLayout, type PanelId } from "./dock";
+import { For, Show, createSignal, useContext } from "solid-js";
+import { AppContext } from "./context";
+import type { MenuItem } from "./MenuBar";
+import { PANEL_MIN_HEIGHT, PANEL_TITLES, activateTab, dividerPanels, dragDivider, isOpen, loadDock, saveDock, toggleMinimized, togglePanel, togglePanels, withWidth, type DockLayout, type PanelId } from "./dock";
+
+const [layout, setLayout] = createSignal<DockLayout>(loadDock());
+const commit = (d: DockLayout) => {
+  setLayout(d);
+  saveDock(d);
+};
+
+/** The dock's panels, for the Window menu and panel buttons. */
+export const panels = {
+  isOpen: (id: PanelId) => isOpen(layout(), id),
+  toggle: (id: PanelId) => commit(togglePanel(layout(), id)),
+  toggleGroup: (ids: readonly PanelId[]) => commit(togglePanels(layout(), ids)),
+};
 
 /**
  * Follows a press on a handle until it's released, with the pointer
@@ -26,16 +41,12 @@ function track(e: PointerEvent, move: (dx: number, dy: number) => void, done: ()
 
 /**
  * The panel dock beside the canvas (see ./dock.ts): drag its left edge to
- * widen it, the divider between two panels to trade height between them,
- * and double-click a panel's tab to minimize or restore it. The layout is
- * remembered.
+ * widen it, the divider between two groups to trade height between them,
+ * click a tab to bring its panel to the front, and double-click one to
+ * minimize or restore its group. The layout is remembered.
  */
-export function Dock(props: { panels: Record<PanelId, () => JSX.Element> }) {
-  const [layout, setLayout] = createSignal<DockLayout>(loadDock());
-  const commit = (d: DockLayout) => {
-    setLayout(d);
-    saveDock(d);
-  };
+export function Dock(props: { panels: Record<PanelId, () => JSX.Element>; menus?: Partial<Record<PanelId, readonly MenuItem[]>> }) {
+  const { openMenu } = useContext(AppContext);
   const sections: HTMLElement[] = [];
 
   const resizeWidth = (e: PointerEvent) => {
@@ -44,7 +55,7 @@ export function Dock(props: { panels: Record<PanelId, () => JSX.Element> }) {
   };
   const resizePanels = (e: PointerEvent, i: number) => {
     const start = layout();
-    const heights = start.panels.map((_, k) => sections[k].getBoundingClientRect().height);
+    const heights = start.groups.map((_, k) => sections[k].getBoundingClientRect().height);
     track(e, (_, dy) => setLayout(dragDivider(start, heights, i, dy)), () => saveDock(layout()));
   };
 
@@ -56,26 +67,63 @@ export function Dock(props: { panels: Record<PanelId, () => JSX.Element> }) {
         title="Drag to resize the panels"
         onPointerDown={resizeWidth}
       />
-      <For each={layout().panels} keyed={false}>
-        {(p, i) => (
+      <For each={layout().groups} keyed={(g) => g.id}>
+        {(g, i) => (
           <section
-            ref={(el) => (sections[i] = el)}
-            class={["relative flex min-h-0 flex-col border-b border-line", { "flex-none": p().minimized }]}
-            style={p().minimized ? undefined : { flex: `${p().size} 1 0px`, "min-height": `${PANEL_MIN_HEIGHT}px` }}
-            data-testid={`${p().id}-panel`}
-            data-minimized={p().minimized ? "" : undefined}
+            ref={(el) => (sections[i()] = el)}
+            class={["relative flex min-h-0 flex-col border-b border-line", { "flex-none": g().minimized }]}
+            style={g().minimized ? undefined : { flex: `${g().size} 1 0px`, "min-height": `${PANEL_MIN_HEIGHT}px` }}
+            data-testid={`${g().id}-panel`}
+            data-minimized={g().minimized ? "" : undefined}
           >
             <header
-              class="border-b border-line bg-panel-2 px-2 py-1 font-semibold select-none"
-              aria-expanded={p().minimized ? "false" : "true"}
-              onDblClick={() => commit(toggleMinimized(layout(), p().id))}
+              class="flex gap-0.5 border-b border-line bg-panel-2 px-1 pt-1 select-none"
+              role="tablist"
+              aria-expanded={g().minimized ? "false" : "true"}
+              onDblClick={() => commit(toggleMinimized(layout(), g().id))}
             >
-              {PANEL_TITLES[p().id]}
+              <For each={g().tabs}>
+                {(t) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    data-testid={`panel-tab-${t}`}
+                    aria-selected={g().active === t ? "true" : "false"}
+                    class={["rounded-t-sm px-2 py-0.5 font-semibold", g().active === t ? "bg-panel text-fg" : "text-dim hover:text-fg"]}
+                    onClick={() => commit(activateTab(layout(), t))}
+                  >
+                    {PANEL_TITLES[t]}
+                  </button>
+                )}
+              </For>
+              <Show when={props.menus?.[g().active]}>
+                {(items) => (
+                  <button
+                    type="button"
+                    class="ml-auto px-1.5 text-dim hover:text-fg"
+                    title="Panel menu"
+                    data-testid={`panel-menu-${g().active}`}
+                    onDblClick={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      openMenu(r.left, r.bottom, items());
+                    }}
+                  >
+                    ≡
+                  </button>
+                )}
+              </Show>
             </header>
-            {/* Kept mounted while minimized, so it keeps its state. */}
-            <div class={["min-h-0 flex-1 flex-col", p().minimized ? "hidden" : "flex"]}>{props.panels[p().id]()}</div>
-            <Show when={dividerPanels(layout(), i)}>
-              <div class="absolute inset-x-0 -bottom-1 z-10 h-2 cursor-ns-resize" data-testid="dock-divider" onPointerDown={(e) => resizePanels(e, i)} />
+            {/* Every tab kept mounted (and while minimized), so each keeps its state. */}
+            <For each={g().tabs}>
+              {(t) => (
+                <div class={["min-h-0 flex-1 flex-col", !g().minimized && g().active === t ? "flex" : "hidden"]} data-panel={t}>
+                  {props.panels[t]()}
+                </div>
+              )}
+            </For>
+            <Show when={dividerPanels(layout(), i())}>
+              <div class="absolute inset-x-0 -bottom-1 z-10 h-2 cursor-ns-resize" data-testid="dock-divider" onPointerDown={(e) => resizePanels(e, i())} />
             </Show>
           </section>
         )}
