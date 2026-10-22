@@ -19,6 +19,7 @@ import { CPU_RASTERIZERS, smartObjectLayer, smartSource, wholePixelMove } from "
 import { convertToSmartObject, createLayer } from "../../core/document";
 import { IDENTITY_PATCH, quadOf } from "../../core/warp";
 import { cornerKnot, smoothKnot, type VectorPath } from "../../core/path";
+import { flattenKnots } from "../../core/bezier";
 
 const settings: ToolSettings = {
   ...DEFAULT_SETTINGS,
@@ -1300,6 +1301,78 @@ describe("pen tools", () => {
       for (const [x, y] of [[10, 80], [50, 20], [90, 80], [10, 80]]) await click(h, "curvature-pen", x, y);
       expect(h.s.doc.workPath!.subpaths[0].closed).toBe(true);
       expect(knots(h)).toHaveLength(3);
+    });
+  });
+
+  describe("Magnetic Pen", () => {
+    const squareDoc = () => {
+      const d = blank();
+      return updateLayer(d, d.activeLayerId, { pixels: fillPixels(NO_PIXELS, rect(20, 20, 50, 50), { r: 0, g: 0, b: 0 }) });
+    };
+    const magnetic = { pen: { ...DEFAULT_SETTINGS.pen, mode: "path" as const, magnetic: true, magneticWidth: 12 } };
+    const press = (h: ReturnType<typeof harness>, x: number, y: number, mods: Partial<ToolEvent> = {}) => h.tools.byId["freeform-pen"].down!(h.ctx(), h.ev(x, y, mods));
+    const hover = (h: ReturnType<typeof harness>, x: number, y: number) => h.tools.byId["freeform-pen"].hover!(h.ctx(), h.ev(x, y));
+
+    it("snaps to the edges of the image between clicks and closes along them", async () => {
+      const h = harness(squareDoc(), magnetic);
+      press(h, 20, 20);
+      hover(h, 45, 26);
+      expect(h.s.preview).not.toBeNull();
+      press(h, 70, 20);
+      hover(h, 74, 45);
+      press(h, 70, 70);
+      hover(h, 45, 74);
+      press(h, 20, 70);
+      hover(h, 24, 40);
+      press(h, 21, 22, { clicks: 2 });
+      await h.s.pending;
+      expect(h.s.history).toEqual(["Magnetic Pen Tool"]);
+      const s = h.s.doc.workPath!.subpaths[0];
+      expect(s.closed).toBe(true);
+      // The path runs along the square's edge, though the pointer was off it.
+      const poly = flattenKnots(s.knots, true);
+      for (const p of poly) {
+        const d = Math.min(Math.abs(p.x - 20), Math.abs(p.x - 70), Math.abs(p.y - 20), Math.abs(p.y - 70));
+        expect(d).toBeLessThan(1.6);
+      }
+    });
+
+    it("Delete removes the last fastening point; Escape cancels; Enter ends an open path", async () => {
+      const h = harness(squareDoc(), magnetic);
+      const t = h.tools.byId["freeform-pen"];
+      const key = (k: string) => t.keyDown!(h.ctx(), { key: k, shift: false, alt: false, mod: false });
+      press(h, 20, 20);
+      hover(h, 70, 20);
+      press(h, 70, 20);
+      hover(h, 70, 70);
+      press(h, 70, 70);
+      expect(key("Backspace")).toBe(true);
+      hover(h, 70, 40);
+      expect(key("Enter")).toBe(true);
+      await h.s.pending;
+      const s = h.s.doc.workPath!.subpaths[0];
+      expect(s.closed).toBe(false);
+      const last = s.knots[s.knots.length - 1].anchor;
+      expect(last.x).toBeCloseTo(70, 0);
+      expect(last.y).toBeCloseTo(40, 0);
+      // Escape drops a path in progress.
+      press(h, 20, 20);
+      hover(h, 50, 20);
+      t.cancel!(h.ctx());
+      expect(h.s.preview).toBeNull();
+      expect(key("Enter")).toBe(false);
+      expect(h.s.history).toHaveLength(1);
+    });
+
+    it("[ and ] change the width", () => {
+      const h = harness(squareDoc(), magnetic);
+      const t = h.tools.byId["freeform-pen"];
+      press(h, 20, 20);
+      t.keyDown!(h.ctx(), { key: "]", shift: false, alt: false, mod: false });
+      expect(h.s.settings.pen.magneticWidth).toBe(13);
+      t.keyDown!(h.ctx(), { key: "[", shift: false, alt: false, mod: false });
+      t.keyDown!(h.ctx(), { key: "[", shift: false, alt: false, mod: false });
+      expect(h.s.settings.pen.magneticWidth).toBe(11);
     });
   });
 });

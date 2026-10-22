@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { cpuPixel, docPoint, drag, expectHistory, gpuPixels, historyLabels, newDocument, settled } from "./helpers";
+import { cpuPixel, docPoint, drag, expectHistory, gpuPixels, historyLabels, newDocument, rectOnLayer, settled } from "./helpers";
 
 /** Presses at a document point and waits for the click to be recorded. */
 async function click(page: Page, x: number, y: number, label = "Pen Tool") {
@@ -194,4 +194,36 @@ test.describe("Freeform Pen and Curvature Pen", () => {
     await expect.poll(async () => (await historyLabels(page)).length).toBeGreaterThan(3);
     await page.keyboard.press("Escape");
   });
+});
+
+test("Magnetic Pen snaps to the edges of the image and closes along them", async ({ page }) => {
+  await newDocument(page, 400, 300);
+  await rectOnLayer(page, 100, 80, 300, 220);
+  await page.keyboard.press("p");
+  await page.keyboard.press("Shift+p");
+  await page.getByTestId("pen-mode").selectOption("path");
+  await page.getByTestId("pen-magnetic").check();
+  const at = async (x: number, y: number) => {
+    const p = await docPoint(page, x, y);
+    await page.mouse.move(p.x, p.y, { steps: 6 });
+    return p;
+  };
+  let p = await at(100, 80);
+  await page.mouse.click(p.x, p.y);
+  for (const [x, y, cx, cy] of [[300, 80, 200, 86], [300, 220, 294, 150], [100, 220, 200, 214]]) {
+    await at(cx, cy);
+    p = await at(x, y);
+    await page.mouse.click(p.x, p.y);
+  }
+  await at(104, 150);
+  p = await docPoint(page, 101, 82);
+  await page.mouse.dblclick(p.x, p.y);
+  await expectHistory(page, "Magnetic Pen Tool");
+  await expect(page.getByTestId("path-component")).toHaveCount(1);
+  const anchors = await page.getByTestId("path-anchor").evaluateAll((els) => els.map((e) => [Number(e.getAttribute("data-x")), Number(e.getAttribute("data-y"))]));
+  expect(anchors.length).toBeGreaterThanOrEqual(4);
+  for (const [x, y] of anchors) {
+    const d = Math.min(Math.abs(x - 100), Math.abs(x - 300), Math.abs(y - 80), Math.abs(y - 220));
+    expect(d).toBeLessThan(2.5);
+  }
 });

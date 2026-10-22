@@ -388,7 +388,16 @@ function PenOptions() {
         </div>
       </Show>
       <Show when={tool() === "freeform-pen"}>
-        <NumberField label="Curve Fit" testId="pen-curve-fit" value={o().curveFit} min={0.5} max={10} step={0.5} suffix="px" onChange={(curveFit) => set({ curveFit })} />
+        {check("Magnetic", "pen-magnetic", o().magnetic, (magnetic) => set({ magnetic }))}
+        <Show
+          when={o().magnetic}
+          fallback={<NumberField label="Curve Fit" testId="pen-curve-fit" value={o().curveFit} min={0.5} max={10} step={0.5} suffix="px" onChange={(curveFit) => set({ curveFit })} />}
+        >
+          <NumberField label="Width" testId="pen-magnetic-width" value={o().magneticWidth} min={1} max={256} suffix="px" onChange={(magneticWidth) => set({ magneticWidth })} />
+          <NumberField label="Contrast" testId="pen-magnetic-contrast" value={o().magneticContrast} min={1} max={100} suffix="%" onChange={(magneticContrast) => set({ magneticContrast })} />
+          <NumberField label="Frequency" testId="pen-magnetic-frequency" value={o().magneticFrequency} min={0} max={100} onChange={(magneticFrequency) => set({ magneticFrequency })} />
+          {check("Pen Pressure", "pen-magnetic-pressure", o().magneticPressure, (magneticPressure) => set({ magneticPressure }))}
+        </Show>
       </Show>
       <Show when={tool() === "pen"}>{check("Auto Add/Delete", "pen-auto", o().autoAddDelete, (autoAddDelete) => set({ autoAddDelete }))}</Show>
       <Show when={tool() === "path-select" || tool() === "direct-select"}>
