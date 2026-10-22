@@ -148,13 +148,7 @@ function smartContent(c: PsdLayer, sources: Map<string, SmartSource>): LayerCont
 function shapeContent(c: PsdLayer): LayerContent | null {
   const mask = c.vectorMask;
   if (!mask || mask.invert || !c.vectorFill || c.vectorFill.type !== "color") return null;
-  const path: VectorPath = {
-    subpaths: mask.paths.map((p) => ({
-      closed: !p.open,
-      op: p.operation ?? "combine",
-      knots: p.knots.map(({ points: q, linked }): Knot => ({ in: vec(q[0], q[1]), anchor: vec(q[2], q[3]), out: vec(q[4], q[5]), smooth: linked })),
-    })),
-  };
+  const path = pathOfBezier(mask.paths);
   const s = c.vectorStroke;
   const fill = s?.fillEnabled === false ? null : rgbOf(c.vectorFill.color);
   const strokeColor = s?.content?.type === "color" ? rgbOf(s.content.color) : null;
@@ -194,6 +188,8 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
         blendMode: c.blendMode && isBlendMode(c.blendMode) ? c.blendMode : ("normal" as const),
         clipped: !!c.clipping,
         mask: maskIn(c),
+        // A fill layer's pixels already show its vector mask; on any other layer it still has to be applied.
+        ...(c.vectorMask && !c.vectorFill && { vectorMask: { path: pathOfBezier(c.vectorMask.paths), enabled: !c.vectorMask.disable } }),
       };
       if (c.children) {
         const blendMode = c.blendMode === "pass through" ? ("pass through" as const) : common.blendMode;
@@ -265,6 +261,22 @@ const flatQuad = (q: Quad) => q.flatMap((p: Vec2) => [p.x, p.y]);
 /** What writing collects across layers: smart objects' files, and type layers' exact content (for XMP). */
 type Written = Map<string, LinkedFile> & { typeLayers: TextContent[] };
 
+const bezierPaths = (path: VectorPath): BezierPath[] =>
+  path.subpaths.map((s) => ({
+    open: !s.closed,
+    operation: s.op,
+    fillRule: "non-zero",
+    knots: s.knots.map((k) => ({ linked: isSmooth(k), points: [k.in.x, k.in.y, k.anchor.x, k.anchor.y, k.out.x, k.out.y] })),
+  }));
+
+const pathOfBezier = (paths: readonly BezierPath[]): VectorPath => ({
+  subpaths: paths.map((p) => ({
+    closed: !p.open,
+    op: p.operation ?? "combine",
+    knots: p.knots.map(({ points: q, linked }): Knot => ({ in: vec(q[0], q[1]), anchor: vec(q[2], q[3]), out: vec(q[4], q[5]), smooth: linked })),
+  })),
+});
+
 function contentFields(content: LayerContent, linked: Written): Partial<PsdLayer> {
   switch (content.kind) {
     case "pixels":
@@ -310,14 +322,8 @@ function contentFields(content: LayerContent, linked: Written): Partial<PsdLayer
     }
     case "shape": {
       const { style } = content;
-      const paths: BezierPath[] = documentPath(content.geometry, placementMapping(content.placement)).subpaths.map((s) => ({
-        open: !s.closed,
-        operation: s.op,
-        fillRule: "non-zero",
-        knots: s.knots.map((k) => ({ linked: isSmooth(k), points: [k.in.x, k.in.y, k.anchor.x, k.anchor.y, k.out.x, k.out.y] })),
-      }));
       return {
-        vectorMask: { paths },
+        vectorMask: { paths: bezierPaths(documentPath(content.geometry, placementMapping(content.placement))) },
         vectorFill: { type: "color", color: psdColor(style.fill ?? { r: 0, g: 0, b: 0 }) },
         vectorStroke: {
           strokeEnabled: !!style.stroke,
@@ -343,6 +349,7 @@ function layerOut(l: Layer, linked: Written): PsdLayer {
     clipping: l.clipped,
     ...(l.mask && { mask: maskOut(l.mask) }),
     ...contentFields(l.content, linked),
+    ...(l.vectorMask && l.content.kind !== "shape" && { vectorMask: { paths: bezierPaths(l.vectorMask.path), disable: !l.vectorMask.enabled } }),
   };
   const b = contentBounds(l.pixels);
   if (isEmpty(b)) return { ...base, left: 0, top: 0, right: 0, bottom: 0 };

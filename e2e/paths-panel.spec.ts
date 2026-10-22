@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { cpuPixel, docPoint, drag, expectHistory, historyLabels, newDocument, settled } from "./helpers";
+import { cpuPixel, docPoint, drag, expectHistory, gpuPixels, historyLabels, newDocument, settled } from "./helpers";
 
 async function pen(page: Page, x: number, y: number) {
   const p = await docPoint(page, x, y);
@@ -114,5 +114,76 @@ test.describe("Paths panel", () => {
     await pen(page, 200, 100);
     await expect(page.getByTestId("path-row")).toHaveCount(1);
     await expect(page.getByTestId("path-row")).toHaveAttribute("data-kind", "saved");
+  });
+});
+
+test.describe("Vector masks", () => {
+  const menu = async (page: Page, ...names: string[]) => {
+    await page.getByRole("menuitem", { name: names[0], exact: true }).click();
+    // Submenus open when the pointer is over them.
+    for (const [i, n] of names.slice(1).entries()) {
+      if (i < names.length - 2) await page.getByRole("menuitem", { name: n }).hover();
+      else await page.getByRole("menu").getByText(n, { exact: true }).last().click();
+    }
+  };
+
+  test("a vector mask from the current path hides the layer outside it, on screen and in the composite", async ({ page }) => {
+    await newDocument(page, 400, 300);
+    await page.getByTestId("new-layer").click();
+    await page.keyboard.press("m");
+    await drag(page, [0, 0], [400, 300]);
+    await page.keyboard.press("Alt+Backspace");
+    await page.keyboard.press("Control+d");
+    expect(await cpuPixel(page, 50, 250)).toEqual([0, 0, 0, 255]);
+    await triangle(page);
+    await menu(page, "Layer", "Vector Mask", "Current Path");
+    await expectHistory(page, "Add Vector Mask");
+    await page.getByTestId("panel-tab-layers").click();
+    expect(await cpuPixel(page, 200, 100)).toEqual([0, 0, 0, 255]);
+    expect(await cpuPixel(page, 50, 250)).toEqual([255, 255, 255, 255]);
+    await expect(page.getByTestId("vector-mask-thumbnail")).toBeVisible();
+    // On screen it's the same.
+    await settled(page);
+    expect(await gpuPixels(page, [[200, 100], [50, 250]])).toEqual([await cpuPixel(page, 200, 100), await cpuPixel(page, 50, 250)]);
+  });
+
+  test("the mask's path can be edited with the path tools, and disabling it shows the whole layer", async ({ page }) => {
+    await newDocument(page, 400, 300);
+    await page.getByTestId("new-layer").click();
+    await page.keyboard.press("m");
+    await drag(page, [0, 0], [400, 300]);
+    await page.keyboard.press("Alt+Backspace");
+    await page.keyboard.press("Control+d");
+    await triangle(page);
+    await menu(page, "Layer", "Vector Mask", "Current Path");
+    await expectHistory(page, "Add Vector Mask");
+    await page.getByTestId("panel-tab-layers").click();
+    await page.getByTestId("vector-mask-thumbnail").click();
+    // Direct Selection drags a corner of the mask's path.
+    await page.keyboard.press("Shift+a");
+    await page.keyboard.press("Shift+a");
+    await drag(page, [100, 60], [20, 20]);
+    await expectHistory(page, "Move Anchor Points");
+    expect(await cpuPixel(page, 60, 40)).toEqual([0, 0, 0, 255]);
+    await menu(page, "Layer", "Vector Mask", "Disable");
+    expect(await cpuPixel(page, 50, 250)).toEqual([0, 0, 0, 255]);
+    await menu(page, "Layer", "Vector Mask", "Delete");
+    await expect(page.getByTestId("vector-mask-thumbnail")).toHaveCount(0);
+  });
+
+  test("Mask in the Pen's options makes a vector mask from the path, Shape makes a shape layer", async ({ page }) => {
+    await newDocument(page, 400, 300);
+    await page.getByTestId("new-layer").click();
+    await page.keyboard.press("m");
+    await drag(page, [0, 0], [400, 300]);
+    await page.keyboard.press("Alt+Backspace");
+    await page.keyboard.press("Control+d");
+    await triangle(page);
+    await page.getByTestId("pen-make-shape").click();
+    await expectHistory(page, "Make Shape");
+    await page.getByTestId("panel-tab-layers").click();
+    await expect(page.getByTestId("layer-row")).toHaveCount(3);
+    await page.getByTestId("pen-make-mask").click();
+    await expect(page.getByTestId("vector-mask-thumbnail")).toHaveCount(0); // (a shape layer can't take one)
   });
 });

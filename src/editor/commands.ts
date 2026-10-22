@@ -94,6 +94,8 @@ const current = (ed: Editor) => {
   return d && activeLayer(d);
 };
 const layerKind = (ed: Editor) => current(ed)?.content.kind;
+const hasVectorMask = (ed: Editor) => !!current(ed)?.vectorMask;
+const canAddVectorMask = (ed: Editor) => !!current(ed) && !hasVectorMask(ed) && layerKind(ed) !== "shape";
 /** Where the active layer is in its container. */
 const place = (ed: Editor) => {
   const d = ed.active()?.doc();
@@ -247,6 +249,16 @@ export const COMMANDS = {
   "layer.mask.hideAll": { label: "Hide All", run: (ed) => ed.addMask(true), enabled: (ed) => canAddMask(ed) && !hasSelection(ed) },
   "layer.mask.revealSelection": { label: "Reveal Selection", run: (ed) => ed.addMask(false), enabled: (ed) => canAddMask(ed) && hasSelection(ed) },
   "layer.mask.hideSelection": { label: "Hide Selection", run: (ed) => ed.addMask(true), enabled: (ed) => canAddMask(ed) && hasSelection(ed) },
+  "layer.vectorMask.revealAll": { label: "Reveal All", run: (ed) => ed.addVectorMask("reveal"), enabled: canAddVectorMask },
+  "layer.vectorMask.hideAll": { label: "Hide All", run: (ed) => ed.addVectorMask("hide"), enabled: canAddVectorMask },
+  "layer.vectorMask.currentPath": {
+    label: "Current Path",
+    run: (ed) => ed.addVectorMask("path"),
+    enabled: (ed) => canAddVectorMask(ed) && (ed.paths.current()?.target.kind === "work" || ed.paths.current()?.target.kind === "saved"),
+  },
+  "layer.vectorMask.delete": { label: "Delete", run: (ed) => ed.deleteVectorMask(), enabled: hasVectorMask },
+  "layer.vectorMask.disable": { label: "Disable", run: (ed) => ed.toggleVectorMask(), enabled: hasVectorMask, checked: (ed) => current(ed)?.vectorMask?.enabled === false },
+  "layer.vectorMask.rasterize": { label: "Rasterize Vector Mask", run: (ed) => ed.rasterizeVectorMask(), enabled: hasVectorMask },
   "layer.mask.delete": { label: "Delete", run: (ed) => ed.deleteMask(), enabled: hasMask },
   "layer.mask.apply": { label: "Apply", run: (ed) => ed.applyMask(), enabled: (ed) => hasMask(ed) && layerKind(ed) === "pixels" },
   "layer.mask.disable": {

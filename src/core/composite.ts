@@ -5,6 +5,7 @@ import { EMPTY_RECT, isEmpty, rect, union, type Rect } from "./geometry";
 import { findLayer, hasPixels, isClipped, isGroup, locate, updateIn } from "./layers";
 import { pixelReader, pixelsFromImage, readSpans, storedBounds, tileWriter, writeSpans, type Pixels } from "./pixels";
 import { toMask, type Mask } from "./selection";
+import { resolveVectorMasks } from "./vectorMask";
 
 /**
  * The reference compositor: renders a layer tree the way Photoshop does,
@@ -27,7 +28,8 @@ import { toMask, type Mask } from "./selection";
  * Work is done in horizontal bands of premultiplied float RGBA, so memory
  * stays bounded whatever the image size.
  */
-export function flatten(d: Pick<Doc, "width" | "height" | "layers">, area: Rect = rect(0, 0, d.width, d.height), layers: readonly Layer[] = d.layers): Uint8ClampedArray {
+export function flatten(d: Pick<Doc, "width" | "height" | "layers">, area: Rect = rect(0, 0, d.width, d.height), source: readonly Layer[] = d.layers): Uint8ClampedArray {
+  const layers = d.width > 0 ? resolveVectorMasks(source, d.width, d.height) : source;
   const out = new Uint8ClampedArray(area.w * area.h * 4);
   const rows = Math.max(1, Math.min(area.h, Math.floor(BAND_PIXELS / Math.max(1, area.w))));
   for (let y = 0; y < area.h; y += rows) {

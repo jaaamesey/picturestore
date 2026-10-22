@@ -36,6 +36,8 @@ const IMAGE_ADJUSTMENTS_MENU: readonly MenuItem[] = [
   "image.equalize",
 ];
 
+const VECTOR_MASK_MENU: readonly MenuItem[] = ["layer.vectorMask.revealAll", "layer.vectorMask.hideAll", "layer.vectorMask.currentPath", "-", "layer.vectorMask.delete", "layer.vectorMask.disable", "layer.vectorMask.rasterize"];
+
 const LAYER_MASK_MENU: readonly MenuItem[] = [
   "layer.mask.revealAll",
   "layer.mask.hideAll",
@@ -219,6 +221,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       { submenu: "New Adjustment Layer", items: ADJUSTMENT_LAYER_MENU },
       "-",
       { submenu: "Layer Mask", items: LAYER_MASK_MENU },
+      { submenu: "Vector Mask", items: VECTOR_MASK_MENU },
       "layer.clippingMask",
       "layer.releaseClippingMask",
       "-",

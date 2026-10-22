@@ -5,6 +5,7 @@ import { hasPixels, isClipped, isGroup } from "../../core/layers";
 import { previewImage, type Pixels } from "../../core/pixels";
 import type { SelectionMode } from "../../core/selection";
 import { isEnabled } from "../../editor/commands";
+import { pathData } from "../../core/pathSvg";
 import { AppContext } from "../context";
 import { ADJUSTMENT_LAYER_MENU, LAYER_MENU } from "../MenuBar";
 import { IconButton, NumberField } from "../controls";
@@ -258,6 +259,36 @@ function LayerRow(props: {
               </Show>
             </div>
           </>
+        )}
+      </Show>
+      <Show when={layer().vectorMask}>
+        {(v) => (
+          <div
+            class={["relative cursor-pointer border border-line bg-white", targetRing(props.active && (editor.active()?.paths().target as { layerId?: string } | null)?.layerId === layer().id)]}
+            style={{ width: "28px", height: `${Math.max(8, (28 * props.height) / props.width)}px` }}
+            title="Vector mask (click to edit its path, Shift-click to disable)"
+            data-testid="vector-mask-thumbnail"
+            data-enabled={v().enabled ? "" : undefined}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (e.shiftKey) {
+                editor.selectLayer(layer().id, false);
+                editor.toggleVectorMask();
+              } else {
+                editor.selectLayer(layer().id, false);
+                editor.paths.select({ kind: "layer", layerId: layer().id });
+              }
+            }}
+          >
+            <svg viewBox={`0 0 ${props.width} ${props.height}`} class="size-full" aria-hidden="true">
+              <path d={pathData(v().path)} fill="rgba(0,0,0,.45)" stroke="black" stroke-width={Math.max(1, props.width / 28)} />
+            </svg>
+            <Show when={!v().enabled}>
+              <span class="absolute inset-0 grid place-items-center text-red-500">
+                <Icon name="x" size={20} />
+              </span>
+            </Show>
+          </div>
         )}
       </Show>
       <Show

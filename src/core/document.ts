@@ -14,6 +14,7 @@ export interface SavedPath {
   readonly path: VectorPath;
 }
 import type { ShapeGeometry, ShapeStyle } from "./shape";
+import type { VectorMask } from "./vectorMask";
 import type { TextContent } from "../text/model";
 import type { TransformState } from "./transform";
 import { NO_PIXELS, clipPixels, contentBounds, tileWriter, translatePixels, writeSpans, type Pixels } from "./pixels";
@@ -82,6 +83,8 @@ export interface Layer {
   /** Clipped to the layer below (Create Clipping Mask): shown only where the clipping group's base layer is. */
   readonly clipped: boolean;
   readonly mask: LayerMask | null;
+  /** A path that hides what's outside it, with the pixel mask (Layer ▸ Vector Mask). */
+  readonly vectorMask?: VectorMask;
 }
 
 /** A guide: a vertical line at x = `position`, or a horizontal one at y, in document pixels (it may lie off the canvas). */

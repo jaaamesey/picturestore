@@ -40,6 +40,7 @@ import { DEFAULT_BRUSH, beginStroke as beginBrushStroke } from "../core/brush";
 import { flattenSubpath } from "../core/path";
 import { addPath, deleteSavedPath, duplicateSavedPath, renamePath, reorderSavedPath, saveWorkPath, selectionFromPath, workPathFromSelection, type MakeSelectionOptions } from "../core/paths";
 import { pathToMask } from "../core/pathMask";
+import { addVectorMask, deleteVectorMask, rasterizeVectorMask, toggleVectorMask } from "../core/vectorMask";
 import { effectiveTarget, pathOf } from "./tools/pathEdit";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
@@ -1620,6 +1621,20 @@ export function createEditor() {
           commitTo(s, "Make Work Path", d);
           s.setPaths(() => ({ target: { kind: "work" }, selected: [] }));
         }),
+        /** Make Shape: a shape layer from the path, filled and stroked as the Pen's options say. */
+        makeShape: whenIdle(() => {
+          const s = active();
+          const cur = currentPath();
+          if (!s || !cur) return;
+          cancelTool();
+          const d = s.doc();
+          const content = pathShape(cur.path, shapeStyle(snapshot(settings).shape, foreground()));
+          if (!content) return;
+          const layer = createLayer({ name: numberedName(d, "Shape"), content });
+          const shown = addLayer(d, layer);
+          s.setPreview(shown);
+          commitAsync(s, "Make Shape", raster.shape(content.geometry, content.style, placementMapping(content.placement), docRect(d)).then((pixels) => updateLayer(shown, layer.id, { pixels })));
+        }),
         /** Fill Path: the area the path covers, with a colour, at an opacity. */
         fill: whenIdle((o: { color: RGB; opacity: number; feather: number; antiAlias: boolean }) => {
           const cur = currentPath();
@@ -1843,6 +1858,19 @@ export function createEditor() {
        * `hide` (Alt-click) gives Hide All / Hide Selection. The mask becomes
        * the target, and the selection is dropped, as in Photoshop.
        */
+      /** Layer ▸ Vector Mask: reveal all, hide all or from the current (work or saved) path. */
+      addVectorMask: whenIdle((start: "reveal" | "hide" | "path") =>
+        edit("Add Vector Mask", (d) => {
+          const l = activeLayer(d);
+          if (!l || l.content.kind === "shape") return d;
+          const path = start === "path" ? currentPath()?.path : start;
+          const target = currentPath()?.target;
+          return (path && !(start === "path" && target?.kind === "layer") && addVectorMask(d, l.id, path)) || d;
+        }),
+      ),
+      deleteVectorMask: whenIdle(() => edit("Delete Vector Mask", (d) => (activeLayer(d)?.vectorMask ? deleteVectorMask(d, d.activeLayerId) : d))),
+      toggleVectorMask: whenIdle(() => edit("Toggle Vector Mask", (d) => toggleVectorMask(d, d.activeLayerId))),
+      rasterizeVectorMask: whenIdle(() => edit("Rasterize Vector Mask", (d) => rasterizeVectorMask(d, d.activeLayerId))),
       addMask: whenIdle((hide: boolean = false) =>
         edit("Add Layer Mask", (d) => {
           const l = activeLayer(d);

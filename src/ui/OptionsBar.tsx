@@ -343,7 +343,7 @@ const PEN_OPS: readonly { op: PenSettings["op"]; label: string }[] = [
 
 /** The Pen group's and the path selection tools' options. */
 function PenOptions() {
-  const { editor } = useContext(AppContext);
+  const { editor, shell } = useContext(AppContext);
   const o = () => editor.settings.pen;
   const tool = () => editor.tool();
   const set = (patch: Partial<PenSettings>) => editor.setSettings((s) => void Object.assign(s.pen, patch));
@@ -387,6 +387,20 @@ function PenOptions() {
             </div>
           </Popover>
         </div>
+      </Show>
+      <Show when={draws() && o().mode === "path"}>
+        <span class="text-dim">Make:</span>
+        {(
+          [
+            ["Selection…", "pen-make-selection", () => shell.pathDialog("makeSelection")],
+            ["Mask", "pen-make-mask", () => editor.addVectorMask("path")],
+            ["Shape", "pen-make-shape", () => editor.paths.makeShape()],
+          ] as const
+        ).map(([label, id, run]) => (
+          <button type="button" data-testid={id} disabled={!editor.paths.current()} class="rounded-sm border border-line px-2 py-0.5 enabled:hover:bg-raised disabled:opacity-40" onClick={run}>
+            {label}
+          </button>
+        ))}
       </Show>
       <Show when={tool() === "freeform-pen"}>
         {check("Magnetic", "pen-magnetic", o().magnetic, (magnetic) => set({ magnetic }))}

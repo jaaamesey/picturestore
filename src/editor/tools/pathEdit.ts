@@ -20,12 +20,21 @@ const shapeLayer = (doc: Doc, id: string): (Layer & { content: ShapeContent }) |
   return l && l.content.kind === "shape" ? (l as Layer & { content: ShapeContent }) : null;
 };
 
+/** A layer whose path can be edited: a shape layer's, or the vector mask of any other. */
+const pathLayer = (doc: Doc, id: string): Layer | null => {
+  const l = layerById(doc, id);
+  return l && (l.content.kind === "shape" || l.vectorMask) ? l : null;
+};
+
+/** Whether the target is a shape layer's path (as opposed to a vector mask, the work path or a saved path). */
+export const isShapeTarget = (doc: Doc, t: PathTarget) => t.kind === "layer" && layerById(doc, t.layerId)?.content.kind === "shape";
+
 /** A target that still exists: a work path needs the document to have one; a layer's path, that layer to be the active one. */
 export function validTarget(doc: Doc, t: PathTarget | null): PathTarget | null {
   if (!t) return null;
   if (t.kind === "work") return doc.workPath ? t : null;
   if (t.kind === "saved") return doc.paths?.some((p) => p.id === t.id) ? t : null;
-  return doc.activeLayerId === t.layerId && shapeLayer(doc, t.layerId) ? t : null;
+  return doc.activeLayerId === t.layerId && pathLayer(doc, t.layerId) ? t : null;
 }
 
 /**
@@ -37,7 +46,7 @@ export function effectiveTarget(doc: Doc, st: PathState): PathTarget | null {
   const t = validTarget(doc, st.target);
   if (t) return t;
   const l = activeLayer(doc);
-  return l && l.content.kind === "shape" ? { kind: "layer", layerId: l.id } : null;
+  return l && (l.content.kind === "shape" || l.vectorMask) ? { kind: "layer", layerId: l.id } : null;
 }
 
 /** The target's path, in document space. */
@@ -48,8 +57,9 @@ export function pathOf(doc: Doc, t: PathTarget): VectorPath | null {
     case "saved":
       return doc.paths?.find((p) => p.id === t.id)?.path ?? null;
     case "layer": {
-      const l = shapeLayer(doc, t.layerId);
-      return l ? documentPath(l.content.geometry, placementMapping(l.content.placement)) : null;
+      const l = pathLayer(doc, t.layerId);
+      if (!l) return null;
+      return l.content.kind === "shape" ? documentPath(l.content.geometry, placementMapping(l.content.placement)) : (l.vectorMask?.path ?? null);
     }
   }
 }
@@ -63,7 +73,10 @@ export function withPath(doc: Doc, t: PathTarget, path: VectorPath): Doc {
       return { ...doc, paths: doc.paths?.map((p) => (p.id === t.id ? { ...p, path } : p)) };
     case "layer": {
       const l = shapeLayer(doc, t.layerId);
-      if (!l) return doc;
+      if (!l) {
+        const v = layerById(doc, t.layerId);
+        return v?.vectorMask ? updateLayer(doc, v.id, { vectorMask: { ...v.vectorMask, path } }) : doc;
+      }
       const content = pathShape(path, l.content.style);
       // An empty path leaves the layer as it is, drawing nothing.
       return updateLayer(doc, l.id, { content: content ?? { ...l.content, geometry: { kind: "path", contours: [] } } });
@@ -90,6 +103,7 @@ export function newShapeLayer(ctx: ToolContext, path: VectorPath): { doc: Doc; l
  */
 export function commitPath(ctx: ToolContext, label: string, doc: Doc, t: PathTarget) {
   if (t.kind !== "layer") return ctx.commit(label, doc);
+  // A vector mask is just a path: nothing to rasterize.
   const l = shapeLayer(doc, t.layerId);
   if (!l) return ctx.commit(label, doc);
   ctx.preview(doc);
@@ -150,7 +164,8 @@ export const CLICK_PX = 3;
 /** The path the Pen tools edit now: a shape layer's in Shape mode, the work or a saved path in Path mode. */
 export function penEditing(ctx: ToolContext): Editing | null {
   const ed = editing(ctx);
-  return ed && (ed.target.kind === "layer") === (ctx.settings.pen.mode === "shape") ? ed : null;
+  // Shape mode draws shape layers; Path mode the work path, a saved path or a vector mask.
+  return ed && isShapeTarget(ctx.doc, ed.target) === (ctx.settings.pen.mode === "shape") ? ed : null;
 }
 
 /** A component being drawn: where it goes and what it continues. */
@@ -216,5 +231,5 @@ export function endPenPath(ctx: ToolContext) {
   selectPoints(ctx, ed.target, []);
   // A lone anchor point in a new shape layer is nothing: the layer goes.
   const lone = ed.path.subpaths.length === 1 && ed.path.subpaths[0].knots.length === 1;
-  if (lone && ed.target.kind === "layer") ctx.commit("Pen Tool", removeLayer(ctx.doc, ed.target.layerId));
+  if (lone && isShapeTarget(ctx.doc, ed.target) && ed.target.kind === "layer") ctx.commit("Pen Tool", removeLayer(ctx.doc, ed.target.layerId));
 }

@@ -13,6 +13,7 @@ import { toHex } from "../core/color";
 import type { Overlay, ToolEvent } from "../editor/types";
 import { TextInput, TextOverlayView } from "./TextEditing";
 import { PathsOverlay } from "./PathsOverlay";
+import { resolveVectorMasks } from "../core/vectorMask";
 import { RULER_PX, docToScreen, rulerStep, screenToDoc, zoomAt } from "../editor/view";
 import { shown } from "../editor/viewOptions";
 import { gridSpacing } from "../editor/preferences";
@@ -198,7 +199,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
         antsStep = step;
         // View ▸ Extras hides selection edges too.
         const selection = editor.viewOptions().extras ? doc.selection : null;
-        renderer.render({ ...doc, selection, floating: s.floating() }, s.view(), step < 0 ? 0 : (step % 8) / 8);
+        renderer.render({ ...doc, layers: resolveVectorMasks(doc.layers, doc.width, doc.height), selection, floating: s.floating() }, s.view(), step < 0 ? 0 : (step % 8) / 8);
       };
       raf = requestAnimationFrame(frame);
       return () => {

@@ -185,4 +185,23 @@ describe("PSD", () => {
     expect(none.paths).toBeUndefined();
     expect(none.workPath).toBeUndefined();
   });
+
+  it("keeps a vector mask on an ordinary layer and applies it again on reading", async () => {
+    const base = sampleDoc();
+    const id = base.activeLayerId;
+    const path = { subpaths: [{ closed: true, op: "combine" as const, knots: [corner(10, 10), corner(110, 10), corner(110, 110), corner(10, 110)] }] };
+    const doc = { ...base, layers: base.layers.map((l) => (l.id === id ? { ...l, opacity: 1, blendMode: "normal" as const, pixels: fillPixels(NO_PIXELS, rect(0, 0, 300, 200), { r: 200, g: 100, b: 0 }), vectorMask: { path, enabled: true } } : l)) };
+    const bytes = writePsdDocument(doc);
+    const psd = readPsd(bytes, { useImageData: true });
+    expect(psd.children![1].vectorMask!.paths).toHaveLength(1);
+    const back = await readPsdDocument(new Uint8Array(bytes));
+    const layer = back.layers[1];
+    expect(layer.content.kind).toBe("pixels");
+    expect(layer.vectorMask!.enabled).toBe(true);
+    expect(layer.vectorMask!.path.subpaths[0].knots[2].anchor.x).toBeCloseTo(110, 3);
+    expect([...flatten(back, rect(50, 50, 1, 1))].slice(0, 3)).toEqual([200, 100, 0]);
+    expect([...flatten(back, rect(200, 150, 1, 1))].slice(0, 3)).toEqual([10, 20, 30]);
+    const disabled = { ...doc, layers: doc.layers.map((l) => (l.id === id ? { ...l, vectorMask: { path, enabled: false } } : l)) };
+    expect((await readPsdDocument(new Uint8Array(writePsdDocument(disabled)))).layers[1].vectorMask!.enabled).toBe(false);
+  });
 });

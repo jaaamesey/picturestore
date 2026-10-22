@@ -49,10 +49,10 @@ export function PathsPanel(props: { onDialog: (kind: "makeSelection" | "makeWork
     const out: Row[] = (d.paths ?? []).map((p) => ({ target: { kind: "saved", id: p.id }, name: p.name, path: p.path, temporary: false }));
     if (d.workPath) out.push({ target: { kind: "work" }, name: "Work Path", path: d.workPath, temporary: true });
     const l = activeLayer(d);
-    if (l?.content.kind === "shape") {
+    if (l && (l.content.kind === "shape" || l.vectorMask)) {
       const target: PathTarget = { kind: "layer", layerId: l.id };
       const path = pathOf(d, target);
-      if (path) out.push({ target, name: `${l.name} Shape Path`, path, temporary: true });
+      if (path) out.push({ target, name: l.content.kind === "shape" ? `${l.name} Shape Path` : `${l.name} Vector Mask`, path, temporary: true });
     }
     return out;
   });
