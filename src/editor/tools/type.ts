@@ -6,11 +6,12 @@ import { NO_PIXELS } from "../../core/pixels";
 import { combine, toMask } from "../../core/selection";
 import { renderDrawing } from "../../core/shape";
 import { dragTransform, hitTest, type Drag as TransformDrag } from "../../core/transform";
-import { caretGeometry, indexAt, lineRange, moveCaret, paragraphOf, textLayerName, toTextSpace, wordAt, type Motion } from "../../text/edit";
+import { caretGeometry, collapseSide, indexAt, lineRange, moveCaret, nextStop, nextWord, paragraphOf, previousStop, previousWord, textLayerName, toTextSpace, wordAt, type Motion } from "../../text/edit";
 import { drawText, textLayout } from "../../text/engine";
 import {
   LOREM_IPSUM,
   insertContent,
+  paragraphAt,
   range,
   replaceText,
   setCharStyle,
@@ -480,7 +481,8 @@ export function createTypeController(): TypeController {
         const r = sel(x);
         if (r.start === r.end) {
           if (r.start === 0) return;
-          const to = unit === "word" ? moveCaret(layout(x), x.content.text, r.start, "word-left", null).index : moveCaret(layout(x), x.content.text, r.start, "left", null).index;
+          // In reading order, whichever way the text runs.
+          const to = unit === "word" ? previousWord(x.content.text, r.start) : previousStop(x.content.text, r.start);
           setCaret(x, to, r.start);
         }
         replace(x, "");
@@ -491,7 +493,7 @@ export function createTypeController(): TypeController {
         const r = sel(x);
         if (r.start === r.end) {
           if (r.end >= x.content.text.length) return;
-          const to = moveCaret(layout(x), x.content.text, r.end, unit === "word" ? "word-right" : "right", null).index;
+          const to = unit === "word" ? nextWord(x.content.text, r.end) : nextStop(x.content.text, r.end);
           setCaret(x, r.start, to);
         }
         replace(x, "");
@@ -502,11 +504,12 @@ export function createTypeController(): TypeController {
         const r = sel(x);
         // Left/right with a selection collapse it to that side.
         if (!extend && r.start !== r.end && (motion === "left" || motion === "right")) {
-          setCaret(x, motion === "left" ? r.start : r.end);
+          setCaret(x, collapseSide(layout(x), r.start, r.end, motion));
           x.goal = null;
           return;
         }
-        const m = moveCaret(layout(x), x.content.text, x.focus, motion, x.goal);
+        const rtl = x.content.paragraphs[paragraphAt(x.content.text, x.focus)]?.style.direction === "rtl";
+        const m = moveCaret(layout(x), x.content.text, x.focus, motion, x.goal, rtl);
         if (extend) {
           x.focus = m.index;
           x.typing = null;

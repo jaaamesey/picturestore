@@ -8,7 +8,8 @@ describe("fonts", () => {
 
   it("lists the bundled families with Adobe's style and PostScript names", () => {
     const fams = lib.families().map((f) => f.family);
-    expect(fams).toEqual(["Source Code Pro", "Source Sans 3", "Source Serif 4"]);
+    expect(fams).toEqual(["Noto Sans Arabic", "Source Code Pro", "Source Sans 3", "Source Serif 4"]);
+    expect(lib.families().find((f) => f.family === "Noto Sans Arabic")!.fonts.map((f) => f.ref.postScriptName)).toEqual(["NotoSansArabic-Regular", "NotoSansArabic-Bold"]);
     const sans = lib.families().find((f) => f.family === "Source Sans 3")!.fonts.map((f) => f.ref.style);
     expect(sans).toContain("Regular");
     expect(sans).toContain("Bold Italic");
@@ -37,8 +38,7 @@ describe("fonts", () => {
 
   it("reads WOFF", async () => {
     const { readFileSync } = await import("node:fs");
-    const { createRequire } = await import("node:module");
-    const woff = new Uint8Array(readFileSync(createRequire(import.meta.url).resolve("source-sans/WOFF/TTF/SourceSans3-Regular.ttf.woff")));
+    const woff = new Uint8Array(readFileSync(new URL(import.meta.resolve("source-sans/WOFF/TTF/SourceSans3-Regular.ttf.woff"))));
     expect(fontFormat(woff)).toBe("woff");
     const sfnt = await sfntOf(woff);
     expect(fontFormat(sfnt)).toBe("ttf");

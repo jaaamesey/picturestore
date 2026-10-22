@@ -4,6 +4,8 @@ import serif from "source-serif/VAR/SourceSerif4Variable-Roman.ttf?url";
 import serifItalic from "source-serif/VAR/SourceSerif4Variable-Italic.ttf?url";
 import code from "source-code-pro/VF/SourceCodeVF-Upright.ttf?url";
 import codeItalic from "source-code-pro/VF/SourceCodeVF-Italic.ttf?url";
+import arabic from "@expo-google-fonts/noto-sans-arabic/400Regular/NotoSansArabic_400Regular.ttf?url";
+import arabicBold from "@expo-google-fonts/noto-sans-arabic/700Bold/NotoSansArabic_700Bold.ttf?url";
 import { createSignal } from "solid-js";
 import { loadHyphenation } from "../text/breaks";
 import { BUNDLED_FONTS } from "../text/bundled";
@@ -26,6 +28,8 @@ const URLS: Record<string, string> = {
   "bundled:source-serif-4-italic": serifItalic,
   "bundled:source-code-pro": code,
   "bundled:source-code-pro-italic": codeItalic,
+  "bundled:noto-sans-arabic": arabic,
+  "bundled:noto-sans-arabic-bold": arabicBold,
 };
 
 let ready: Promise<void> | null = null;

@@ -48,3 +48,35 @@ test("a 12000×12000 document renders, zoomed out, at 100% and panned", async ({
   expectClose(await screenPixel(page, far, 10750), [0, 0, 0, 255], 0);
   expect(errors).toEqual([]);
 });
+
+test("a 4K document zooms and pans without recompositing or re-uploading anything", async ({ page }) => {
+  test.setTimeout(120_000);
+  await newDocument(page, 3840, 2160);
+  await page.keyboard.press("m");
+  await drag(page, [1000, 600], [2800, 1600]);
+  await page.keyboard.press("Alt+Backspace");
+  await page.keyboard.press("Control+d");
+  await settled(page);
+  type Stats = Record<"framesMoved" | "levelChanges" | "composited" | "tilesUploaded", number>;
+  const stats = () => page.evaluate(() => ({ ...(window.__ps!.renderer as { stats: Stats }).stats }));
+  const before = await stats();
+  const box = (await page.getByTestId("viewport").boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // Zoom in past 100% and back out, by the wheel, then pan.
+  await page.keyboard.down("Control");
+  for (let i = 0; i < 25; i++) await page.mouse.wheel(0, -60);
+  await settled(page);
+  for (let i = 0; i < 25; i++) await page.mouse.wheel(0, 60);
+  await page.keyboard.up("Control");
+  for (let i = 0; i < 20; i++) await page.mouse.wheel(40, 25);
+  await settled(page);
+  const after = await stats();
+  expect(after.framesMoved - before.framesMoved).toBe(0);
+  expect(after.levelChanges - before.levelChanges).toBe(0);
+  expect(after.tilesUploaded - before.tilesUploaded).toBe(0);
+  expect(after.composited - before.composited).toBe(0);
+  // And it still shows what's there.
+  await page.keyboard.press("Control+0");
+  await settled(page);
+  expectClose(await screenPixel(page, 1900, 1100), [0, 0, 0, 255]);
+});

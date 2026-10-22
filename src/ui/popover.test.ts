@@ -9,7 +9,7 @@ import { expect, it } from "vitest";
  * would forget to close — use `<Popover>` from ui/Popover.tsx instead.
  */
 it("anchors floating panels only through Popover", () => {
-  const dir = join(__dirname);
+  const dir = import.meta.dirname;
   const files = (function walk(d: string): string[] {
     return readdirSync(d, { withFileTypes: true }).flatMap((e) =>
       e.isDirectory() ? walk(join(d, e.name)) : e.name.endsWith(".tsx") ? [join(d, e.name)] : [],

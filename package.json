@@ -18,6 +18,7 @@
     "check": "pnpm typecheck && pnpm test"
   },
   "dependencies": {
+    "@expo-google-fonts/noto-sans-arabic": "0.4.3",
     "@solidjs/web": "2.0.0-rc.15",
     "ag-psd": "^31.0.3",
     "bidi-js": "1.1.0",

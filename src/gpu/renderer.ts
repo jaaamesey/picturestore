@@ -83,8 +83,19 @@ export interface Renderer {
   /** Tries full quality again (e.g. after closing documents). */
   resetLevel(): void;
   /** Work counters, for tests guarding the fast paths. */
-  readonly stats: { shapesRasterized: number; shapesMoved: number };
+  readonly stats: RenderStats;
   destroy(): void;
+}
+
+/** Work counters, for tests and profiling. */
+export interface RenderStats {
+  shapesRasterized: number;
+  shapesMoved: number;
+  /** Times the composited frame moved or changed level, and document pixels composited. */
+  framesMoved: number;
+  levelChanges: number;
+  composited: number;
+  tilesUploaded: number;
 }
 
 export interface RendererOptions {
@@ -117,6 +128,19 @@ const contains = (outer: Rect, inner: Rect) =>
   isEmpty(inner) || (inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h);
 
 
+
+/**
+ * GPU memory the composited frame may take, its textures and the layer
+ * tiles under it together. The frame is composited at the finest level
+ * within it — a 4K document whole at full resolution, so zooming and panning
+ * it never re-uploads or recomposites — and only huge canvases drop to
+ * coarser levels (see frameFor).
+ */
+const FRAME_BUDGET = 384 << 20;
+/** Bytes per frame pixel: the accumulator with its mips, its scratch copy, two mask textures and the selection. */
+const FRAME_BYTES_PER_PIXEL = 8 * (4 / 3) + 8 + 2 + 1;
+/** Frame pixels per lazily composited cell (see `stale`). */
+const CELL = 256;
 
 /** The tile atlas can't grow (device limit, or out of GPU memory). */
 class AtlasFull extends Error {}
@@ -335,7 +359,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   const presentPipeline = fullscreen(PRESENT_WGSL, output.format);
 
   const vectors = createVectorRasterizer(device);
-  const stats = { shapesRasterized: 0, shapesMoved: 0 };
+  const stats: RenderStats = { shapesRasterized: 0, shapesMoved: 0, framesMoved: 0, levelChanges: 0, composited: 0, tilesUploaded: 0 };
   const trilinear = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear" });
   const viewUniforms = device.createBuffer({ size: VIEW_UNIFORM_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   let drawUniforms = device.createBuffer({ size: UNIFORM_SLOT * 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -407,6 +431,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     const L = frame.level, n = TILE_SIZE >> L, mask = (1 << L) - 1;
     const [x, y, page] = slotOrigin(slot);
     const data = tile ? (reducedTile(tile, L) as Uint8ClampedArray<ArrayBuffer>) : ZEROS;
+    stats.tilesUploaded++;
     device.queue.writeTexture({ texture: atlas, origin: [x + (tx & mask) * n, y + (ty & mask) * n, page] }, data, { bytesPerRow: n * 4, rowsPerImage: n }, [n, n, 1]);
   }
 
@@ -447,9 +472,37 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     return intersect(rect(x0, y0, ((r.x + r.w - frame.x + k) >> L) - x0, ((r.y + r.h - frame.y + k) >> L) - y0), rect(0, 0, frame.w, frame.h));
   };
 
-  /** The frame a view needs, and the part of the document it shows. */
-  function frameFor(view: View): { frame: Frame; visible: Rect } {
-    const dpr = window.devicePixelRatio || 1;
+  /** Where visible pixel tiles are, per scene: what a frame's atlas share is estimated from. */
+  let tileCoords: { layers: readonly Layer[]; xs: Int32Array; ys: Int32Array; owner: Int32Array } | null = null;
+  function sceneTiles(scene: Scene) {
+    if (tileCoords?.layers === scene.layers) return tileCoords;
+    const xs: number[] = [], ys: number[] = [], owner: number[] = [];
+    let n = 0;
+    const add = (p: Pixels) => {
+      for (const key of p.keys()) xs.push(keyX(key)), ys.push(keyY(key)), owner.push(n);
+      n++;
+    };
+    for (const l of walk(scene.layers)) {
+      if (!l.visible) continue;
+      if (hasPixels(l)) add(l.pixels);
+      if (l.mask?.enabled) add(l.mask.pixels);
+    }
+    return (tileCoords = { layers: scene.layers, xs: Int32Array.from(xs), ys: Int32Array.from(ys), owner: Int32Array.from(owner) });
+  }
+
+  /** GPU memory a frame takes: its textures, and the atlas slots its layers' tiles fill at its level (Infinity past the atlas's limit). */
+  function frameCost(f: Frame, scene: Scene): number {
+    const { xs, ys, owner } = sceneTiles(scene);
+    const r = frameRect(f);
+    const x0 = Math.floor(r.x / TILE_SIZE), y0 = Math.floor(r.y / TILE_SIZE), x1 = Math.ceil((r.x + r.w) / TILE_SIZE), y1 = Math.ceil((r.y + r.h) / TILE_SIZE);
+    const L = f.level, slots = new Set<number>();
+    for (let i = 0; i < xs.length; i++) if (xs[i] >= x0 && xs[i] < x1 && ys[i] >= y0 && ys[i] < y1) slots.add(owner[i] * 2 ** 32 + tileKey(xs[i] >> L, ys[i] >> L));
+    if (slots.size > maxPages * SLOTS_PER_PAGE) return Infinity;
+    return f.w * f.h * FRAME_BYTES_PER_PIXEL + slots.size * TILE_SIZE * TILE_SIZE * 4;
+  }
+
+  /** The visible part of the document at a view. */
+  function visibleArea(view: View): Rect {
     const c = Math.cos(view.rotation ?? 0), s = Math.sin(view.rotation ?? 0);
     // Screen = R·doc·zoom + pan, so doc = Rᵀ(screen − pan) / zoom.
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -461,39 +514,111 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
       x1 = Math.max(x1, x);
       y1 = Math.max(y1, y);
     }
-    const doc = rect(0, 0, size.width, size.height);
-    const visible = intersect(roundOut({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }), doc);
-    const max = device.limits.maxTextureDimension2D;
-    let level = Math.min(MAX_LEVEL, Math.max(bias, Math.floor(1e-6 - Math.log2(view.zoom * dpr))));
-    for (;; level++) {
-      // A slot's worth of margin all round, so panning a little stays within it.
-      const unit = TILE_SIZE << level;
-      const fx = Math.max(0, (Math.floor(visible.x / unit) - 1) * unit), fy = Math.max(0, (Math.floor(visible.y / unit) - 1) * unit);
-      const fx1 = Math.min(size.width, (Math.ceil((visible.x + visible.w) / unit) + 1) * unit);
-      const fy1 = Math.min(size.height, (Math.ceil((visible.y + visible.h) / unit) + 1) * unit);
-      const w = isEmpty(visible) ? 0 : Math.ceil((fx1 - fx) / (1 << level)), h = isEmpty(visible) ? 0 : Math.ceil((fy1 - fy) / (1 << level));
-      if ((w <= max && h <= max) || level >= MAX_LEVEL) return { frame: { x: fx, y: fy, level, w, h }, visible };
+    return intersect(roundOut({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }), rect(0, 0, size.width, size.height));
+  }
+
+  /** The frame over `visible` at a level: on the grid of atlas slots, a slot's worth of margin all round (so panning a little stays within it). */
+  function frameAt(visible: Rect, level: number): Frame {
+    const unit = TILE_SIZE << level;
+    const fx = Math.max(0, (Math.floor(visible.x / unit) - 1) * unit), fy = Math.max(0, (Math.floor(visible.y / unit) - 1) * unit);
+    const fx1 = Math.min(size.width, (Math.ceil((visible.x + visible.w) / unit) + 1) * unit);
+    const fy1 = Math.min(size.height, (Math.ceil((visible.y + visible.h) / unit) + 1) * unit);
+    const w = isEmpty(visible) ? 0 : Math.ceil((fx1 - fx) / (1 << level)), h = isEmpty(visible) ? 0 : Math.ceil((fy1 - fy) / (1 << level));
+    return { x: fx, y: fy, level, w, h };
+  }
+
+  const fitsDevice = (f: Frame) => f.w <= device.limits.maxTextureDimension2D && f.h <= device.limits.maxTextureDimension2D;
+
+  /**
+   * The frame for a view: the finest level (no coarser than the screen's
+   * pixels need) whose frame fits the budget. Finer than needed is better
+   * than just enough: zooming then needn't change level, re-upload tiles and
+   * recomposite. A frame too big for the device or the budget at the needed
+   * level goes coarser still.
+   */
+  function frameFor(view: View, scene: Scene): { frame: Frame; visible: Rect } {
+    const dpr = window.devicePixelRatio || 1;
+    const visible = visibleArea(view);
+    const needed = Math.min(MAX_LEVEL, Math.max(bias, Math.floor(1e-6 - Math.log2(view.zoom * dpr))));
+    for (let level = bias; level < needed; level++) {
+      const f = frameAt(visible, level);
+      if (fitsDevice(f) && frameCost(f, scene) <= FRAME_BUDGET) return { frame: f, visible };
+    }
+    for (let level = needed; ; level++) {
+      const f = frameAt(visible, level);
+      if (fitsDevice(f) || level >= MAX_LEVEL) return { frame: f, visible };
     }
   }
 
   /** The whole document at the finest level memory allows (for reading the composite back). */
   const wholeFrame = (): Frame => ({ x: 0, y: 0, level: bias, w: Math.ceil(size.width / (1 << bias)), h: Math.ceil(size.height / (1 << bias)) });
 
-  /** Moves the frame if the view has left it or needs another level; returns whether it moved. */
-  function updateFrame(view: View, whole: boolean): boolean {
-    const want = whole ? { frame: wholeFrame(), visible: EMPTY_RECT } : frameFor(view);
+  /** What the last view showed of the document (composited before anything else). */
+  let visibleNow = EMPTY_RECT;
+
+  /**
+   * Moves the frame if the view has left it, needs a finer level, or it's
+   * grown past the budget; returns whether it moved. A frame finer than the
+   * view needs is kept, so zooming out and back in again costs nothing.
+   */
+  function updateFrame(view: View, scene: Scene, whole: boolean): boolean {
+    const want = whole ? { frame: wholeFrame(), visible: rect(0, 0, size.width, size.height) } : frameFor(view, scene);
     const next = want.frame, f = frame;
-    // Kept while it still covers the view and isn't much bigger than needed.
-    if (!whole && next.level === f.level && contains(frameRect(f), want.visible) && f.w * f.h <= 2 * next.w * next.h) return false;
+    visibleNow = want.visible;
+    const keep = !whole && f.level >= bias && f.level <= next.level && contains(frameRect(f), want.visible) && (f.level === next.level ? f.w * f.h <= 2 * next.w * next.h || frameCost(f, scene) <= FRAME_BUDGET : frameCost(f, scene) <= FRAME_BUDGET);
+    if (keep) return false;
     if (next.x === f.x && next.y === f.y && next.level === f.level && next.w === f.w && next.h === f.h) return false;
-    if (next.level !== f.level) dropResidency();
+    if (next.level !== f.level) {
+      dropResidency();
+      stats.levelChanges++;
+    }
+    stats.framesMoved++;
     frame = next;
     const r = frameRect();
     frameTiles = { x0: Math.floor(r.x / TILE_SIZE), y0: Math.floor(r.y / TILE_SIZE), x1: Math.ceil((r.x + r.w) / TILE_SIZE), y1: Math.ceil((r.y + r.h) / TILE_SIZE) };
     ensureCapacity(next.w, next.h);
     lastSelection = undefined;
     selectionWritten = rect(0, 0, capacity.width, capacity.height);
+    stale = new Uint8Array(Math.ceil(next.w / CELL) * Math.ceil(next.h / CELL)).fill(1);
     return true;
+  }
+
+  /**
+   * Cells of the frame whose composite is out of date. Only those near the
+   * view are composited each frame; the rest wait until they're scrolled
+   * into it, so a change to the whole document costs what's on screen.
+   */
+  let stale = new Uint8Array(0);
+  const cellsAcross = () => Math.ceil(frame.w / CELL);
+
+  /** Marks a document-space area as needing compositing. */
+  function markStale(r: Rect) {
+    const px = toPx(r);
+    if (isEmpty(px)) return;
+    const n = cellsAcross();
+    for (let cy = Math.floor(px.y / CELL); cy < Math.ceil((px.y + px.h) / CELL); cy++)
+      for (let cx = Math.floor(px.x / CELL); cx < Math.ceil((px.x + px.w) / CELL); cx++) stale[cy * n + cx] = 1;
+  }
+
+  /** The stale cells over a document-space area, cleared, as one document-space rectangle (empty if none). */
+  function takeStale(r: Rect): Rect {
+    const px = toPx(r);
+    if (isEmpty(px)) return EMPTY_RECT;
+    const n = cellsAcross();
+    let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+    const cx0 = Math.floor(px.x / CELL), cy0 = Math.floor(px.y / CELL), cx1 = Math.ceil((px.x + px.w) / CELL), cy1 = Math.ceil((px.y + px.h) / CELL);
+    for (let cy = cy0; cy < cy1; cy++)
+      for (let cx = cx0; cx < cx1; cx++)
+        if (stale[cy * n + cx]) {
+          x0 = Math.min(x0, cx);
+          y0 = Math.min(y0, cy);
+          x1 = Math.max(x1, cx);
+          y1 = Math.max(y1, cy);
+        }
+    if (x1 < 0) return EMPTY_RECT;
+    for (let cy = y0; cy <= y1; cy++) stale.fill(0, cy * n + x0, cy * n + x1 + 1);
+    const L = frame.level, unit = CELL << L;
+    return intersect(rect(frame.x + x0 * unit, frame.y + y0 * unit, (x1 - x0 + 1) * unit, (y1 - y0 + 1) * unit), frameRect());
   }
 
   // --- Frame textures ------------------------------------------------------------
@@ -1602,18 +1727,23 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
   /** Draws the scene: over the view's frame, or (`whole`) the entire document. */
   function draw(scene: Scene, view: View, time: number, whole: boolean) {
     if (scene.width !== size.width || scene.height !== size.height) resetDocument(scene.width, scene.height);
-    const moved = updateFrame(view, whole);
+    const moved = updateFrame(view, scene, whole);
     if (moved) {
       // Nothing of the last frame is kept; past the new one's edge stays clear (filtering reads up to it).
       const encoder = device.createCommandEncoder();
       encoder.beginRenderPass({ colorAttachments: [{ view: accum!.createView({ baseMipLevel: 0, mipLevelCount: 1 }), loadOp: "clear", storeOp: "store" }] }).end();
       device.queue.submit([encoder.finish()]);
     }
-    let dirty = union(syncLayers(scene), syncFloating(scene.floating));
-    if (moved) dirty = rect(0, 0, size.width, size.height);
+    markStale(union(syncLayers(scene), syncFloating(scene.floating)));
     syncSelection(scene.selection);
-    const area = intersect(dirty, frameRect());
-    if (!isEmpty(area)) composite(scene, area);
+    // What's in view (with a cell's margin, for filtering and small pans) is brought up to date; the rest waits.
+    const L = frame.level, margin = CELL << L;
+    const v = visibleNow;
+    const area = takeStale(whole ? frameRect() : rect(v.x - margin, v.y - margin, v.w + 2 * margin, v.h + 2 * margin));
+    if (!isEmpty(area)) {
+      composite(scene, area);
+      stats.composited += area.w * area.h;
+    }
     present(view, time, scene.selection !== null);
   }
 

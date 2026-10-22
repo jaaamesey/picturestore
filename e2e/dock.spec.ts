@@ -67,3 +67,13 @@ test("double-clicking a panel's tab minimizes it to the tab, and the others take
   near(h2, h1 + 40);
   near(l2, l1 - 40);
 });
+
+test("resizing panels only resizes them: their contents aren't rebuilt as the divider moves", async ({ page }) => {
+  await newDocument(page);
+  // Mark each panel's content; a rebuilt panel would lose the mark.
+  await page.evaluate(() => document.querySelectorAll("[data-panel]").forEach((el) => ((el.firstElementChild as HTMLElement & { mark?: boolean }).mark = true)));
+  const marked = () => page.evaluate(() => [...document.querySelectorAll("[data-panel]")].map((el) => !!(el.firstElementChild as HTMLElement & { mark?: boolean }).mark));
+  await dragBy(page, page.getByTestId("dock-divider").nth(1), 0, -50);
+  await dragBy(page, page.getByTestId("dock-divider").first(), 0, 30);
+  expect(await marked()).toEqual([true, true, true]);
+});

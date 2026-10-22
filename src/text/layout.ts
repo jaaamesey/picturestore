@@ -62,6 +62,12 @@ export interface LayoutLine {
   readonly descent: number;
   /** Inline position of each caret stop, start..end (length end - start + 1). */
   readonly carets: Float64Array;
+  /**
+   * Each character's extent along the line, [from, to) pairs, start..end:
+   * where right-to-left and left-to-right runs mix, a range of characters
+   * is drawn in several pieces (see `extents`).
+   */
+  readonly spans: Float64Array;
   /** Box and area type hide lines that don't fit (the frame overflows). */
   readonly visible: boolean;
   readonly hyphenated: boolean;
@@ -453,7 +459,8 @@ export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
 
       const carets = new Float64Array(end - start + 1);
       for (let k = 0; k <= end - start; k++) carets[k] = x0 + placed.carets[k];
-      lines.push({ start, end, paragraph: pi, block, ascent, descent, carets, visible, hyphenated: br.hyphenated });
+      const spans = placed.spans.map((v) => x0 + v);
+      lines.push({ start, end, paragraph: pi, block, ascent, descent, carets, spans, visible, hyphenated: br.hyphenated });
       if (!visible) return;
 
       for (const pg of placed.glyphs) {
@@ -510,13 +517,15 @@ export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
           const size = s.size * st.scale;
           const thickness = Math.max(size * m.underlineThickness, 0.5);
           const offset = dec === "underline" ? -m.underlinePosition * size + thickness / 2 : -m.strikeoutPosition * size;
-          const a = carets[i - start], b = carets[k - start];
           const t0 = block + offset - thickness / 2 - st.rise, t1 = t0 + thickness;
-          const quad = [vec(a, t0), vec(b, t0), vec(b, t1), vec(a, t1)];
-          if (vertical) {
-            const column = box ? box.width - block : -block;
-            decorations.push({ polygon: quad.map((q) => vec(column - (q.y - block), q.x)), color: s.color });
-          } else decorations.push({ polygon: quad, color: s.color });
+          // In visual pieces: a run crossing from left-to-right into right-to-left text isn't one stretch.
+          for (const [a, b] of extents(spans, i - start, k - start)) {
+            const quad = [vec(a, t0), vec(b, t0), vec(b, t1), vec(a, t1)];
+            if (vertical) {
+              const column = box ? box.width - block : -block;
+              decorations.push({ polygon: quad.map((q) => vec(column - (q.y - block), q.x)), color: s.color });
+            } else decorations.push({ polygon: quad, color: s.color });
+          }
           i = j;
         }
       }
@@ -543,6 +552,23 @@ export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
       : (s: number, t: number) => vec(s, t);
   const angle = path ? (s: number) => pointAlong(path, s).angle : vertical ? () => Math.PI / 2 : () => 0;
   return { glyphs: glyphsOut, lines, decorations, bounds: frameBounds, overflow, missing, vertical, onPath: !!path, place, angle };
+}
+
+/**
+ * The visual pieces characters [from, to) of a line cover: their extents
+ * (pairs, as in LayoutLine.spans) merged where they touch, left to right.
+ */
+export function extents(spans: Float64Array, from: number, to: number): [number, number][] {
+  const parts: [number, number][] = [];
+  for (let i = from; i < to; i++) parts.push([spans[2 * i], spans[2 * i + 1]]);
+  parts.sort((x, y) => x[0] - y[0]);
+  const out: [number, number][] = [];
+  for (const [a, b] of parts) {
+    const last = out[out.length - 1];
+    if (last && a <= last[1] + 0.01) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
 }
 
 function remapLevels(levels: Uint8Array, map: readonly number[], n: number): Uint8Array {
@@ -760,6 +786,23 @@ function placeLine(p: ShapedParagraph, a: number, b: number, hyphenated: boolean
   }
   carets[b - a] = b > a ? (p.levels[b - 1] & 1 ? carets[b - 1 - a] - (edges.get(p.start + b - 1)?.w ?? 0) : pen) : 0;
   if (b > a && !(p.levels[b - 1] & 1)) carets[b - a] = Math.max(pen, lastEdge);
+  // Each character's extent: its cluster's, shared out in order (reading direction) among its characters.
+  const spans = new Float64Array(2 * (b - a));
+  for (let i = a; i < b; ) {
+    const e = edges.get(p.start + i);
+    if (!e) {
+      spans[2 * (i - a)] = spans[2 * (i - a) + 1] = carets[i - a];
+      i++;
+      continue;
+    }
+    const n = Math.max(1, e.count);
+    for (let k = 0; k < n && i + k < b; k++) {
+      const lo = e.rtl ? e.x + e.w - (e.w * (k + 1)) / n : e.x + (e.w * k) / n;
+      spans[2 * (i + k - a)] = lo;
+      spans[2 * (i + k - a) + 1] = lo + e.w / n;
+    }
+    i += n;
+  }
   const hyphenGlyph = hyphenated ? hyphenOf(p, b - 1) : null;
   if (hyphenGlyph) {
     let at = 0;
@@ -767,7 +810,7 @@ function placeLine(p: ShapedParagraph, a: number, b: number, hyphenated: boolean
     placed.push({ glyph: hyphenGlyph, inline: at, scale: 1 });
   }
   const contentWidth = justify ? width : natural - hang;
-  return { glyphs: placed, width: contentWidth, carets, justified: justify };
+  return { glyphs: placed, width: contentWidth, carets, spans, justified: justify };
 }
 
 /** A hyphen glyph in the style of character `i`. */

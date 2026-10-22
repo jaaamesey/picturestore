@@ -1,5 +1,5 @@
 import { apply, invert, vec, type Vec2 } from "../core/geometry";
-import type { LayoutLine, TextLayout } from "./layout";
+import { extents, type LayoutLine, type TextLayout } from "./layout";
 import { paragraphRanges, type TextContent } from "./model";
 import { warpMap } from "./warp";
 
@@ -151,18 +151,48 @@ export function lineRange(layout: TextLayout, index: number): { start: number; e
 export type Motion = "left" | "right" | "up" | "down" | "word-left" | "word-right" | "line-start" | "line-end" | "start" | "end" | "paragraph-up" | "paragraph-down";
 
 /**
- * Where a caret moves. Up and down keep to the column where the caret
- * started (`goal`, inline); vertical type turns the arrows a quarter, as
- * its lines are columns.
+ * Left or right on screen: the nearest caret stop that way along the line
+ * (where right-to-left and left-to-right text mix, that isn't the next
+ * character in reading order). Past the line's end, the caret goes on in
+ * reading order, onto the next or previous line.
  */
-export function moveCaret(layout: TextLayout, text: string, index: number, motion: Motion, goal: number | null): { index: number; goal: number | null } {
+function visualStep(layout: TextLayout, text: string, index: number, dir: -1 | 1, rtl: boolean): number {
+  const logical = (dir > 0) !== rtl ? nextStop(text, index) : previousStop(text, index);
+  const l = layout.lines[lineOf(layout, index)];
+  if (!l || !l.visible) return logical;
+  const x = inlineAt(l, index);
+  let best = -1, bestD = Infinity;
+  for (let k = 0; k < l.carets.length; k++) {
+    const i = l.start + k;
+    const d = dir * (l.carets[k] - x);
+    // Whole characters only (a stop inside a cluster or a surrogate pair isn't one).
+    if (d <= 1e-3 || (i > 0 && i < text.length && nextStop(text, previousStop(text, i)) !== i)) continue;
+    if (d < bestD - 1e-3 || (Math.abs(d - bestD) <= 1e-3 && Math.abs(i - index) < Math.abs(best - index))) ((best = i), (bestD = d));
+  }
+  return best < 0 ? logical : best;
+}
+
+/** Where Left or Right puts the caret when there's a selection: at its end on that side of the screen. */
+export function collapseSide(layout: TextLayout, start: number, end: number, side: "left" | "right"): number {
+  const a = caretGeometry(layout, start, true), b = caretGeometry(layout, end);
+  const sameLine = lineOf(layout, start, true) === lineOf(layout, end);
+  if (!a || !b || !sameLine || layout.vertical) return side === "left" ? start : end;
+  return (a.top.x <= b.top.x) === (side === "left") ? start : end;
+}
+
+/**
+ * Where a caret moves. Left and right go that way on screen; up and down
+ * keep to the column where the caret started (`goal`, inline); vertical
+ * type turns the arrows a quarter, as its lines are columns.
+ */
+export function moveCaret(layout: TextLayout, text: string, index: number, motion: Motion, goal: number | null, rtl = false): { index: number; goal: number | null } {
   let m = motion;
   if (layout.vertical) m = ({ up: "left", down: "right", left: "down", right: "up" } as Record<string, Motion>)[m] ?? m;
   switch (m) {
     case "left":
-      return { index: previousStop(text, index), goal: null };
+      return { index: layout.vertical ? previousStop(text, index) : visualStep(layout, text, index, -1, rtl), goal: null };
     case "right":
-      return { index: nextStop(text, index), goal: null };
+      return { index: layout.vertical ? nextStop(text, index) : visualStep(layout, text, index, 1, rtl), goal: null };
     case "word-left":
       return { index: previousWord(text, index), goal: null };
     case "word-right":
@@ -206,28 +236,37 @@ export function moveCaret(layout: TextLayout, text: string, index: number, motio
   }
 }
 
-/** A selection's highlight: one quadrilateral per line it covers, in text space. */
+/**
+ * A selection's highlight, in text space: per line, a quadrilateral over
+ * each visual piece of it (a range crossing between right-to-left and
+ * left-to-right text is drawn in more than one).
+ */
 export function selectionPolygons(layout: TextLayout, start: number, end: number): Vec2[][] {
   if (start === end) return [];
   const out: Vec2[][] = [];
   for (const l of layout.lines) {
     if (!l.visible || l.end < start || l.start > end) continue;
     const a = Math.max(start, l.start), b = Math.min(end, l.end);
-    // A selected line break shows as a sliver past the line's end.
+    // A selected line break shows as a sliver past the line's end (its far end in reading order).
     const breakSelected = end > l.end && start <= l.end;
     if (b <= a && !breakSelected) continue;
-    const s0 = inlineAt(l, a), s1 = b > a ? inlineAt(l, b) : s0;
-    const lo = Math.min(s0, s1), hi = Math.max(s0, s1) + (breakSelected ? l.ascent * 0.3 : 0);
-    const t0 = l.block - l.ascent, t1 = l.block + l.descent;
-    // Path type: follow the path in steps.
-    const steps = isPath(layout) ? Math.max(1, Math.ceil((hi - lo) / 4)) : 1;
-    const top: Vec2[] = [], bottom: Vec2[] = [];
-    for (let k = 0; k <= steps; k++) {
-      const s = lo + ((hi - lo) * k) / steps;
-      top.push(layout.place(s, t0));
-      bottom.push(layout.place(s, t1));
+    const pieces = extents(l.spans, a - l.start, b - l.start);
+    if (breakSelected) {
+      const at = inlineAt(l, l.end), w = l.ascent * 0.3, before = l.end > l.start && inlineAt(l, l.end - 1) > at;
+      pieces.push(before ? [at - w, at] : [at, at + w]);
     }
-    out.push([...top, ...bottom.reverse()]);
+    const t0 = l.block - l.ascent, t1 = l.block + l.descent;
+    for (const [lo, hi] of pieces) {
+      // Path type: follow the path in steps.
+      const steps = isPath(layout) ? Math.max(1, Math.ceil((hi - lo) / 4)) : 1;
+      const top: Vec2[] = [], bottom: Vec2[] = [];
+      for (let k = 0; k <= steps; k++) {
+        const s = lo + ((hi - lo) * k) / steps;
+        top.push(layout.place(s, t0));
+        bottom.push(layout.place(s, t1));
+      }
+      out.push([...top, ...bottom.reverse()]);
+    }
   }
   return out;
 }
