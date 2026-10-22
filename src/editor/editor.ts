@@ -65,7 +65,6 @@ import { intersect, isEmpty, rect, roundOut, translation, type Rect, type Vec2 }
 import { transformFloatingCpu, type Floating } from "../core/raster";
 import type { Filter } from "../core/rasterize";
 import { renderDrawing, renderShape, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "../core/shape";
-import { isPlaced } from "../core/content";
 import { NO_PIXELS, contentBounds, pixelsFromImage, type Pixels } from "../core/pixels";
 import type { TransformMode, TransformState } from "../core/transform";
 import { mappingBounds, type Mapping } from "../core/warp";
@@ -244,11 +243,14 @@ export const isOutOfMemory = (err: unknown) =>
 
 export const OUT_OF_MEMORY = "Could not complete your request because there is not enough memory (RAM).";
 
-/** Photoshop's prompts before a pixel edit on a smart object or shape. */
+/** Photoshop's prompts before a pixel edit on a smart object, shape or type layer. */
 export const RASTERIZE_PROMPTS = {
   smart: "This Smart Object must be rasterized before proceeding. Its contents will no longer be directly editable. Rasterize the Smart Object?",
   shape: "This shape layer must be rasterized before proceeding. Its vector mask will no longer be editable. Rasterize the shape?",
+  text: "This type layer must be rasterized before proceeding. Its text will no longer be editable. Rasterize the type?",
 } as const;
+
+const rasterizable = (c: LayerContent): c is Extract<LayerContent, { kind: keyof typeof RASTERIZE_PROMPTS }> => c.kind in RASTERIZE_PROMPTS;
 
 /** What the editor uses the GPU renderer for, besides display. */
 type GpuRaster = Pick<Renderer, "resample" | "rasterizeShape" | "rasterizeDrawing" | "adjust">;
@@ -366,9 +368,9 @@ export function createEditor() {
 
     const raster: Rasterizers = { resample, shape: rasterizeShape, drawing: rasterizeDrawing };
 
-    /** Asks to rasterize a smart object or shape (Photoshop's prompt), does so as its own step, then carries on with `proceed`. */
+    /** Asks to rasterize a smart object, shape or type (Photoshop's prompt), does so as its own step, then carries on with `proceed`. */
     async function offerRasterize(s: SessionInternals, layer: Layer, proceed?: (ctx: ToolContext) => void) {
-      if (!isPlaced(layer.content)) return;
+      if (!rasterizable(layer.content)) return;
       if (!(await askConfirm(RASTERIZE_PROMPTS[layer.content.kind]))) return;
       if (pending !== 0 || !sessions().includes(s)) return;
       commitTo(s, "Rasterize Layer", rasterizeLayer(s.doc(), layer.id));

@@ -348,7 +348,7 @@ export function ungroup(d: Doc, id: string): Doc {
 /** Rasterize Layer: keeps the rendered pixels, drops the editable content. */
 export function rasterizeLayer(d: Doc, id: string): Doc {
   const l = findLayer(d.layers, id);
-  return l && (l.content.kind === "smart" || l.content.kind === "shape") ? updateLayer(d, id, { content: PIXELS }) : d;
+  return l && (l.content.kind === "smart" || l.content.kind === "shape" || l.content.kind === "text") ? updateLayer(d, id, { content: PIXELS }) : d;
 }
 
 /**

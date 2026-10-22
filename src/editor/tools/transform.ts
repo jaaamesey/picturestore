@@ -2,7 +2,9 @@ import { renderLayers } from "../../core/composite";
 import { framedState, isPlaced, placementState, sourceFloating, toPlacement, withContent, type PlacedContent } from "../../core/content";
 import { PIXELS, docRect, editTarget, updateLayer, type Doc, type Guide, type Layer, type LayerContent } from "../../core/document";
 import { transformLayer } from "../../core/documentTransform";
-import { EMPTY_RECT, boundsOf, intersect, isEmpty, union, vec, type Rect, type Vec2 } from "../../core/geometry";
+import { EMPTY_RECT, apply, boundsOf, intersect, isEmpty, rect, union, vec, type Mat, type Rect, type Vec2 } from "../../core/geometry";
+import { textLayout } from "../../text/engine";
+import type { TextContent } from "../../text/model";
 import { allLayers, childrenOf, hasPixels, isGroup, updateIn } from "../../core/layers";
 import { guidePosition } from "../snapping";
 import { RULER_PX } from "../view";
@@ -48,6 +50,8 @@ export interface Target {
   readonly moving: readonly string[];
   /** Groups transform projectively, without Warp (as in Photoshop, which needs a smart object for that). */
   readonly canWarp?: false;
+  /** Live type: scale, rotate, skew and flip only — Photoshop allows neither Distort nor Perspective on it (nor a custom warp: Warp Text instead). */
+  readonly affineOnly?: true;
   /** The untransformed state. */
   readonly initial: TransformState;
   /** Where the controls go: the content's frame, which can differ from `initial` (a warped placement as it is). */
@@ -162,6 +166,60 @@ function contentTarget(doc: Doc, layer: Layer, content: PlacedContent, framed: b
   };
 }
 
+/** The affine map taking `b` onto the parallelogram `q` (its first, second and fourth corners). */
+function boxToQuad(b: Rect, q: readonly Vec2[]): Mat {
+  const w = b.w || 1, h = b.h || 1;
+  const a = (q[1].x - q[0].x) / w, bb = (q[1].y - q[0].y) / w, c = (q[3].x - q[0].x) / h, d = (q[3].y - q[0].y) / h;
+  return [a, bb, c, d, q[0].x - a * b.x - c * b.y, q[0].y - bb * b.x - d * b.y];
+}
+
+/** The transform box of live type: its frame (the paragraph box, or the lines' extent) through its transform. */
+export function textState(c: TextContent): TransformState {
+  const b = textBox(c);
+  const t = c.transform;
+  const quad = quadOf(b).map((p) => apply(t, p)) as unknown as TransformState["quad"];
+  return { source: b, quad, angle: Math.atan2(t[1], t[0]), patch: null, reference: apply(t, vec(b.x + b.w / 2, b.y + b.h / 2)) };
+}
+
+/** The text's frame in text space, never degenerate (empty type still has a caret's height). */
+function textBox(c: TextContent): Rect {
+  const b = textLayout(c).bounds;
+  if (b.w > 0 && b.h > 0) return b;
+  const size = c.runs[0].style.size;
+  return rect(b.x, isEmpty(b) ? -size : b.y, Math.max(b.w, 1), Math.max(b.h, size));
+}
+
+/**
+ * Live type transforms as a whole, its linked mask with it: the transform
+ * box maps onto the type's affine transform, so it's laid out and drawn
+ * afresh, as vectors, every frame and on commit.
+ */
+function textTarget(doc: Doc, layer: Layer, content: TextContent): Target {
+  const clip = docRect(doc);
+  const initial = textState(content);
+  const at = (s: TransformState): TextContent => ({ ...content, transform: boxToQuad(initial.source, s.quad), stale: false });
+  const maskPixels = layer.mask?.linked ? layer.mask.pixels : null;
+  const maskFloat: Floating | null = maskPixels && !isEmpty(contentBounds(maskPixels)) ? { pixels: maskPixels, bounds: contentBounds(maskPixels) } : null;
+  const withMask = (d: Doc, pixels: Pixels) => (maskFloat ? updateLayer(d, layer.id, { mask: { ...layer.mask!, pixels } }) : d);
+  return {
+    layer,
+    moving: [layer.id],
+    canWarp: false,
+    affineOnly: true,
+    initial,
+    frame: initial,
+    show(ctx, s) {
+      const mask = maskFloat && { ...maskFloat, mapping: follow(initial, s, maskFloat.bounds) };
+      ctx.preview(updateLayer(withMask(doc, NO_PIXELS), layer.id, { content: at(s) }), mask && { layerId: layer.id, pixels: null, mask });
+    },
+    async place(ctx, s, filter) {
+      const { content: c, pixels } = await withContent(layer, at(s), clip, ctx.raster, filter);
+      const d = updateLayer(doc, layer.id, { content: c, pixels });
+      return maskFloat ? withMask(d, await land(ctx, maskFloat, follow(initial, s, maskFloat.bounds), filter, integerOffset(s))) : d;
+    },
+  };
+}
+
 /** A group's layers with content of their own (bounding what moves). */
 const contentsOf = (g: Layer) => allLayers(childrenOf(g)).filter(hasPixels);
 
@@ -213,6 +271,7 @@ export function transformTarget(doc: Doc, framed = true): Target | null {
   if (t.mask) return pixelTarget(doc, layer, true);
   if (isGroup(layer)) return groupTarget(doc, layer);
   if (isPlaced(layer.content)) return contentTarget(doc, layer, layer.content, framed);
+  if (layer.content.kind === "text") return textTarget(doc, layer, layer.content);
   return layer.content.kind === "pixels" ? pixelTarget(doc, layer, false) : null;
 }
 
@@ -227,6 +286,7 @@ export function moveFrame(doc: Doc): TransformState | null {
   const { layer } = t;
   let b: Rect;
   if (!t.mask && isPlaced(layer.content)) return framedState(layer.content.placement);
+  if (!t.mask && layer.content.kind === "text") return textState(layer.content);
   if (!t.mask && isGroup(layer)) b = contentsOf(layer).reduce((r, l) => union(r, contentBounds(l.pixels)), EMPTY_RECT);
   else if (!t.mask && layer.content.kind === "adjustment") return null;
   else b = contentBounds(t.pixels);
@@ -404,6 +464,7 @@ export function createTransformController(): TransformController {
       steps = [];
       placeLabel = place?.label ?? null;
       state = target.initial;
+      if (target.affineOnly && (m === "distort" || m === "perspective")) mode = "free";
       if (m === "warp" && target.canWarp === false) mode = "free";
       else if (m === "warp") state = { ...state, patch: state.patch ?? IDENTITY_PATCH };
       show(ctx);
@@ -414,7 +475,7 @@ export function createTransformController(): TransformController {
     mode: () => mode,
     setState: (ctx, s) => record(ctx, s),
     setMode(ctx, m) {
-      if (!state || (m === "warp" && target?.canWarp === false)) return;
+      if (!state || (m === "warp" && target?.canWarp === false) || (target?.affineOnly && (m === "distort" || m === "perspective"))) return;
       mode = m;
       if (m === "warp" && !state.patch) record(ctx, { ...state, patch: IDENTITY_PATCH });
       else show(ctx);
@@ -433,7 +494,9 @@ export function createTransformController(): TransformController {
     down: (ctx, e) => down(ctx, e),
     move(ctx, e) {
       if (!drag || !state || !target) return;
-      state = dragTransform(drag, snappedPointer(ctx, drag, e, target.moving), e);
+      // Live type can't be distorted: a corner with Ctrl scales, as without it.
+      const mods = target.affineOnly && drag.hit.kind === "corner" ? { ...e, mod: false } : e;
+      state = dragTransform(drag, snappedPointer(ctx, drag, e, target.moving), mods);
       show(ctx);
     },
     up() {
