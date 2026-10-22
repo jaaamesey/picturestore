@@ -15,7 +15,7 @@ export function GlyphsPanel() {
   const t = useTypeState();
   const [recent, setRecent] = createSignal<string[]>([]);
   const [shown, setShown] = createSignal(PAGE);
-  const font = () => t.char("font");
+  const font = () => t.font();
   const entry = createMemo(() => {
     const f = font();
     return f && fontFamilies().find((g) => g.family === f.family)?.fonts.find((g) => g.ref.style === f.style);

@@ -27,6 +27,12 @@ export function useTypeState() {
     editor,
     target,
     char: <K extends keyof CharStyle>(k: K) => common(chars(), k),
+    /** The font, by the name the library knows it by (type from a PSD may name it only by PostScript name). */
+    font: () => {
+      fontFamilies();
+      const f = common(chars(), "font", (a, b) => a.postScriptName === b.postScriptName);
+      return f && (fontLibrary().find(f)?.ref ?? f);
+    },
     para: <K extends keyof ParagraphStyle>(k: K) => common(paras(), k),
     setChar: (patch: Partial<CharStyle> | ((s: CharStyle) => Partial<CharStyle>), key?: string) => editor.type.formatCharacters(patch, key),
     setPara: (patch: Partial<ParagraphStyle>, key?: string) => editor.type.formatParagraphs(patch, key),

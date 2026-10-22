@@ -139,7 +139,7 @@ const contains = (outer: Rect, inner: Rect) =>
 const FRAME_BUDGET = 384 << 20;
 /** Bytes per frame pixel: the accumulator with its mips, its scratch copy, two mask textures and the selection. */
 const FRAME_BYTES_PER_PIXEL = 8 * (4 / 3) + 8 + 2 + 1;
-/** Frame pixels per lazily composited cell (see `stale`). */
+/** Frame pixels per lazily composited cell (see `staleCells`). */
 const CELL = 256;
 
 /** The tile atlas can't grow (device limit, or out of GPU memory). */
@@ -579,7 +579,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     ensureCapacity(next.w, next.h);
     lastSelection = undefined;
     selectionWritten = rect(0, 0, capacity.width, capacity.height);
-    stale = new Uint8Array(Math.ceil(next.w / CELL) * Math.ceil(next.h / CELL)).fill(1);
+    staleCells = new Uint8Array(Math.ceil(next.w / CELL) * Math.ceil(next.h / CELL)).fill(1);
     return true;
   }
 
@@ -588,7 +588,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
    * view are composited each frame; the rest wait until they're scrolled
    * into it, so a change to the whole document costs what's on screen.
    */
-  let stale = new Uint8Array(0);
+  let staleCells = new Uint8Array(0);
   const cellsAcross = () => Math.ceil(frame.w / CELL);
 
   /** Marks a document-space area as needing compositing. */
@@ -597,7 +597,7 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     if (isEmpty(px)) return;
     const n = cellsAcross();
     for (let cy = Math.floor(px.y / CELL); cy < Math.ceil((px.y + px.h) / CELL); cy++)
-      for (let cx = Math.floor(px.x / CELL); cx < Math.ceil((px.x + px.w) / CELL); cx++) stale[cy * n + cx] = 1;
+      for (let cx = Math.floor(px.x / CELL); cx < Math.ceil((px.x + px.w) / CELL); cx++) staleCells[cy * n + cx] = 1;
   }
 
   /** The stale cells over a document-space area, cleared, as one document-space rectangle (empty if none). */
@@ -609,14 +609,14 @@ export function createRenderer(device: GPUDevice, canvas: HTMLCanvasElement, opt
     const cx0 = Math.floor(px.x / CELL), cy0 = Math.floor(px.y / CELL), cx1 = Math.ceil((px.x + px.w) / CELL), cy1 = Math.ceil((px.y + px.h) / CELL);
     for (let cy = cy0; cy < cy1; cy++)
       for (let cx = cx0; cx < cx1; cx++)
-        if (stale[cy * n + cx]) {
+        if (staleCells[cy * n + cx]) {
           x0 = Math.min(x0, cx);
           y0 = Math.min(y0, cy);
           x1 = Math.max(x1, cx);
           y1 = Math.max(y1, cy);
         }
     if (x1 < 0) return EMPTY_RECT;
-    for (let cy = y0; cy <= y1; cy++) stale.fill(0, cy * n + x0, cy * n + x1 + 1);
+    for (let cy = y0; cy <= y1; cy++) staleCells.fill(0, cy * n + x0, cy * n + x1 + 1);
     const L = frame.level, unit = CELL << L;
     return intersect(rect(frame.x + x0 * unit, frame.y + y0 * unit, (x1 - x0 + 1) * unit, (y1 - y0 + 1) * unit), frameRect());
   }

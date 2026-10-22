@@ -12,6 +12,8 @@ import {
 import { isBlendMode } from "../core/blend";
 import type { RGB } from "../core/color";
 import { pathShape, placementMapping } from "../core/content";
+import type { TextContent } from "../text/model";
+import { exactContent, textFromPsd, textToPsd, typeFromXmp, typeXmp } from "./psdText";
 import { PIXELS, resolutionOf, createLayer, docRect, type Doc, type Layer, type LayerContent, type LayerMask, type SmartSource } from "../core/document";
 import { fromPsd, rgbOf, toPsd } from "./psdAdjustments";
 import { flatten } from "../core/composite";
@@ -164,9 +166,9 @@ function shapeContent(c: PsdLayer): LayerContent | null {
 /**
  * Reads a PSD into a document: groups (nested, pass-through or not),
  * clipping masks, layer masks and adjustment layers stay as they are.
- * Embedded smart objects (with custom warps) and solid-colour shape layers
- * stay live; text, fill layers and anything else import as their rendered
- * pixels.
+ * Embedded smart objects (with custom warps), solid-colour shape layers
+ * and type stay live (see ./psdText.ts); fill layers and anything else
+ * import as their rendered pixels.
  */
 export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: ImageDecoder = decodeImageBytes): Promise<Doc> {
   const psd = readPsd(buffer, { useImageData: true, skipThumbnail: true });
@@ -176,6 +178,8 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
     if (src) sources.set(f.id, src);
   }
   let count = 0;
+  const written = typeFromXmp(psd.imageResources?.xmpMetadata);
+  let typeIndex = 0;
   const read = (children: PsdLayer[]): Layer[] =>
     children.map((c) => {
       const common = {
@@ -197,7 +201,8 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
         pixels = pixelsFromImage(c.imageData.width, c.imageData.height, new Uint8ClampedArray(to8bit(c.imageData)), c.left ?? 0, c.top ?? 0);
       }
       // Photoshop's own rendering is kept as the layer's pixels; the content stays editable.
-      const content = smartContent(c, sources) ?? shapeContent(c) ?? PIXELS;
+      const text = c.text && textFromPsd(c.text);
+      const content = (text && (exactContent(text, written[typeIndex++]) ?? text)) || smartContent(c, sources) || shapeContent(c) || PIXELS;
       return createLayer({ ...common, pixels, content });
     });
   const layers = read(psd.children ?? []);
@@ -239,7 +244,10 @@ function linkedFile(src: SmartSource): LinkedFile {
 const psdColor = (c: RGB) => ({ r: c.r, g: c.g, b: c.b });
 const flatQuad = (q: Quad) => q.flatMap((p: Vec2) => [p.x, p.y]);
 
-function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): Partial<PsdLayer> {
+/** What writing collects across layers: smart objects' files, and type layers' exact content (for XMP). */
+type Written = Map<string, LinkedFile> & { typeLayers: TextContent[] };
+
+function contentFields(content: LayerContent, linked: Written): Partial<PsdLayer> {
   switch (content.kind) {
     case "pixels":
       return {};
@@ -248,7 +256,8 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
     case "adjustment":
       return { adjustment: toPsd(content.adjustment) };
     case "text":
-      return {};
+      linked.typeLayers.push(content);
+      return { text: textToPsd(content) };
     case "smart": {
       const { source, placement } = content;
       if (!linked.has(source.id)) linked.set(source.id, linkedFile(source));
@@ -307,7 +316,7 @@ function contentFields(content: LayerContent, linked: Map<string, LinkedFile>): 
   }
 }
 
-function layerOut(l: Layer, linked: Map<string, LinkedFile>): PsdLayer {
+function layerOut(l: Layer, linked: Written): PsdLayer {
   const base: PsdLayer = {
     name: l.name,
     opacity: l.opacity,
@@ -323,7 +332,7 @@ function layerOut(l: Layer, linked: Map<string, LinkedFile>): PsdLayer {
 }
 
 export function writePsdDocument(doc: Doc): ArrayBuffer {
-  const linked = new Map<string, LinkedFile>();
+  const linked: Written = Object.assign(new Map<string, LinkedFile>(), { typeLayers: [] as TextContent[] });
   const children = doc.layers.map((l) => layerOut(l, linked));
   const psd: Psd = {
     width: doc.width,
@@ -339,5 +348,6 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
   // Positions are stored in 1/32 px, unsigned (by ag-psd), so guides left of or above the canvas can't be.
   const guides = (doc.guides ?? []).filter((g) => g.position >= 0).map((g) => ({ location: Math.round(g.position * 32) / 32, direction: g.orientation }));
   if (guides.length) psd.imageResources.gridAndGuidesInformation = { guides };
+  if (linked.typeLayers.length) psd.imageResources.xmpMetadata = typeXmp(linked.typeLayers);
   return writePsd(psd, { generateThumbnail: false, noBackground: true });
 }

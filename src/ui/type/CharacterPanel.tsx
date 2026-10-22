@@ -72,7 +72,7 @@ export function ColorSwatch(props: { title: string; testId: string; color: RGB |
 
 /** Font family and style, shared by the Character panel and the options bar. */
 export function FontFields(props: { t: TypeState; testId: string }) {
-  const font = () => props.t.char("font");
+  const font = () => props.t.font();
   const pick = (f: { ref: CharStyle["font"] }) => props.t.setChar({ font: f.ref, variations: {} }, "font");
   return (
     <>
