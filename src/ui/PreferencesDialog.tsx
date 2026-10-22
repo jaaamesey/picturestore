@@ -11,7 +11,7 @@ import {
   type Preferences,
   type PreferencesPane,
 } from "../editor/preferences";
-import { GUIDE_COLORS, type LineStyle } from "../editor/preferences";
+import { FONT_PREVIEW_PX, GUIDE_COLORS, type FontPreviewSize, type LineStyle, type TypeUnit } from "../editor/preferences";
 import { LENGTH_UNITS, type LengthUnit } from "../editor/imageSize";
 import { AppContext } from "./context";
 import { Button, NumberField } from "./controls";
@@ -45,6 +45,13 @@ export function PreferencesDialog(props: { pane: PreferencesPane; onClose: () =>
   };
   const set = (patch: Partial<Preferences>) => setDraft(normalizePreferences({ ...current, ...patch }, current));
   const available = availableMemoryMB();
+  type Flag = { [K in keyof Preferences]: Preferences[K] extends boolean ? K : never }[keyof Preferences];
+  const check = (label: string, key: Flag, testId: string) => (
+    <label class="flex items-center gap-2">
+      <input type="checkbox" data-testid={testId} checked={draft()[key]} onChange={(e) => set({ [key]: e.currentTarget.checked })} />
+      <span>{label}</span>
+    </label>
+  );
   const range = memoryUsageRange(available);
 
   const ok = () => {
@@ -130,6 +137,36 @@ export function PreferencesDialog(props: { pane: PreferencesPane; onClose: () =>
                 <p class="text-dim">
                   Unsaved documents are kept in browser storage so they can be recovered if the tab crashes or runs out of memory.
                 </p>
+              </Group>
+            </Match>
+            <Match when={pane() === "units"}>
+              <Group title="Units">
+                <label class="flex items-center gap-2">
+                  <span class="w-16">Type:</span>
+                  <select data-testid="prefs-type-units" value={draft().typeUnits} onChange={(e) => set({ typeUnits: e.currentTarget.value as TypeUnit })}>
+                    <option value="points">Points</option>
+                    <option value="pixels">Pixels</option>
+                    <option value="millimeters">Millimeters</option>
+                  </select>
+                </label>
+                <p class="text-dim">Points are PostScript points: 72 to the inch, at the document's resolution.</p>
+              </Group>
+            </Match>
+            <Match when={pane() === "type"}>
+              <Group title="Type Options">
+                {check("Use Smart Quotes", "smartQuotes", "prefs-smart-quotes")}
+                {check("Enable Missing Glyph Protection", "missingGlyphProtection", "prefs-glyph-protection")}
+                {check("Show Font Names in English", "fontNamesInEnglish", "prefs-font-names-english")}
+                {check("Use ESC key to commit text", "escCommits", "prefs-esc-commits")}
+                {check("Fill new type layers with placeholder text", "placeholderText", "prefs-placeholder")}
+                <label class="flex items-center gap-2">
+                  <span>Font Preview Size:</span>
+                  <select data-testid="prefs-font-preview" value={draft().fontPreviewSize} onChange={(e) => set({ fontPreviewSize: e.currentTarget.value as FontPreviewSize })}>
+                    <For each={Object.keys(FONT_PREVIEW_PX) as FontPreviewSize[]}>
+                      {(s) => <option value={s}>{s === "none" ? "None" : s.replace(/(^|-)(\w)/g, (_, d, c: string) => (d ? " " : "") + c.toUpperCase())}</option>}
+                    </For>
+                  </select>
+                </label>
               </Group>
             </Match>
             <Match when={pane() === "guides"}>

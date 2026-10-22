@@ -44,6 +44,8 @@ import { GlyphsPanel } from "./type/GlyphsPanel";
 import { ParagraphPanel } from "./type/ParagraphPanel";
 import { WarpTextDialog } from "./type/WarpTextDialog";
 import { FontsDialog } from "./type/FontsDialog";
+import { HyphenationDialog, JustificationDialog } from "./type/ParagraphDialogs";
+import { formatTypeLength, parseTypeLength } from "../text/units";
 import { Popover, dismissable } from "./Popover";
 import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
@@ -54,7 +56,7 @@ import { PropertiesPanel } from "./panels/PropertiesPanel";
 import { TEST_CORE } from "./testHooks";
 import { AdjustmentDialog } from "./AdjustmentDialog";
 import type { AdjustmentKind } from "../core/adjustments";
-import type { TextWarp } from "../text/model";
+import type { ParagraphStyle, TextWarp } from "../text/model";
 import { Toolbar } from "./Toolbar";
 import { Viewport } from "./Viewport";
 
@@ -227,6 +229,7 @@ export function App() {
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
   const [newGuideFor, setNewGuideFor] = createSignal<DocumentSession | null>(null);
   const [managingFonts, setManagingFonts] = createSignal(false);
+  const [paragraphDialog, setParagraphDialog] = createSignal<{ which: "justification" | "hyphenation"; initial: ParagraphStyle } | null>(null);
   const addFonts = async () => {
     const files = await pickFontFiles();
     if (!files.length) return;
@@ -323,6 +326,8 @@ export function App() {
     togglePanel: (id) => panels.toggle(id),
     addFonts: () => void addFonts(),
     manageFonts: () => setManagingFonts(true),
+    // Shows the first selected paragraph's settings; OK applies them all to every selected paragraph.
+    paragraphDialog: (which) => setParagraphDialog({ which, initial: editor.type.paragraphStyles()[0] }),
     panelOpen: (id) => panels.isOpen(id),
     togglePanelGroup: (ids) => panels.toggleGroup(ids),
     warpText() {
@@ -537,6 +542,26 @@ export function App() {
             }}
           />
         )}
+      </Show>
+      <Show when={paragraphDialog()} keyed>
+        {(p) => {
+          const done = (patch: Partial<ParagraphStyle> | null) => {
+            setParagraphDialog(null);
+            if (patch) editor.type.formatParagraphs(patch);
+          };
+          const unit = editor.preferences().typeUnits, ppi = resolutionOf(editor.active()?.doc() ?? {});
+          return p.which === "justification" ? (
+            <JustificationDialog initial={p.initial} onOk={done} onCancel={() => done(null)} />
+          ) : (
+            <HyphenationDialog
+              initial={p.initial}
+              zoneLabel={(px) => formatTypeLength(px, unit, ppi)}
+              parseZone={(text) => parseTypeLength(text, unit, ppi)}
+              onOk={done}
+              onCancel={() => done(null)}
+            />
+          );
+        }}
       </Show>
       <Show when={managingFonts()}>
         <FontsDialog onAdd={() => void addFonts()} onUseInstalled={useInstalledFonts} onClose={() => setManagingFonts(false)} />

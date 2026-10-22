@@ -117,6 +117,9 @@ export const CHARACTER_MENU: readonly MenuItem[] = [
 export const PARAGRAPH_MENU: readonly MenuItem[] = [
   "para.hangingPunctuation",
   "-",
+  "para.justification",
+  "para.hyphenation",
+  "-",
   "para.composer.single",
   "para.composer.every",
   "-",

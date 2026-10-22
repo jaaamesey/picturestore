@@ -84,4 +84,39 @@ test.describe("Type panels, options bar and Type menu", () => {
     await expectHistory(page, "Convert to Shape");
     expect((await content(page)).kind).toBe("shape");
   });
+
+  test("Preferences: type in pixels, smart quotes off; Justification and Hyphenation dialogs set the paragraph", async ({ page }) => {
+    await newDocument(page, 400, 200);
+    await page.keyboard.press("Control+k");
+    await page.getByTestId("prefs-pane-units").click();
+    await page.getByTestId("prefs-type-units").selectOption("pixels");
+    await page.getByTestId("prefs-pane-type").click();
+    await page.getByTestId("prefs-smart-quotes").uncheck();
+    await page.getByTestId("prefs-ok").click();
+    await page.keyboard.press("t");
+    await expect(page.getByTestId("type-size")).toHaveValue("12 px");
+    await click(page, 40, 100);
+    await page.keyboard.type(`"q"`);
+    await page.keyboard.press("Control+Enter");
+    await expectHistory(page, "Type Layer");
+    expect((await content(page)).text).toBe(`"q"`);
+
+    await page.getByTestId("type-panels").click();
+    await page.getByTestId("panel-tab-paragraph").click();
+    await page.getByTestId("panel-menu-paragraph").click();
+    await page.locator("[data-command='para.justification']").click();
+    await page.getByTestId("justify-word-1").fill("120");
+    await page.getByTestId("justify-word-1").press("Tab");
+    await page.getByTestId("justification-ok").click();
+    await expectHistory(page, "Edit Type Layer");
+    await page.getByTestId("panel-menu-paragraph").click();
+    await page.locator("[data-command='para.hyphenation']").click();
+    await page.getByTestId("hyphen-minWord").fill("7");
+    await page.getByTestId("hyphen-minWord").press("Tab");
+    await page.getByTestId("hyphenation-ok").click();
+    await settled(page);
+    const p = (await page.evaluate(() => (window.__ps!.editor as { active(): { doc(): { layers: { content: { paragraphs: { style: { wordSpacing: number[]; hyphenation: { minWord: number } } }[] } }[] } } }).active().doc().layers[1].content.paragraphs[0].style));
+    expect(p.wordSpacing).toEqual([0.8, 1.2, 1.33]);
+    expect(p.hyphenation.minWord).toBe(7);
+  });
 });

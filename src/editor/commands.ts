@@ -51,6 +51,8 @@ export interface Shell {
   addFonts(): void;
   /** Type ▸ Manage Fonts dialog. */
   manageFonts(): void;
+  /** Paragraph panel ▸ Justification and Hyphenation dialogs. */
+  paragraphDialog(which: "justification" | "hyphenation"): void;
 }
 
 export interface CommandSpec {

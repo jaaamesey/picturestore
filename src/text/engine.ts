@@ -12,6 +12,7 @@ import { textDrawing } from "./render";
 
 let library = new FontLibrary();
 let version = 0;
+let glyphProtection = true;
 const listeners = new Set<() => void>();
 library.onChange(() => invalidateText());
 
@@ -37,11 +38,18 @@ export function onTextInvalidated(fn: () => void): () => void {
 
 export const textVersion = () => version;
 
+/** Preferences ▸ Type ▸ Enable Missing Glyph Protection. */
+export function setGlyphProtection(on: boolean) {
+  if (on === glyphProtection) return;
+  glyphProtection = on;
+  invalidateText();
+}
+
 const layouts = new WeakMap<TextContent, { version: number; layout: TextLayout; drawing?: VectorDrawing }>();
 
 function entry(c: TextContent) {
   let e = layouts.get(c);
-  if (!e || e.version !== version) layouts.set(c, (e = { version, layout: layoutText(c, { fonts: library }) }));
+  if (!e || e.version !== version) layouts.set(c, (e = { version, layout: layoutText(c, { fonts: library, glyphProtection }) }));
   return e;
 }
 

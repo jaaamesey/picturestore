@@ -214,6 +214,8 @@ export interface LayoutOptions {
   readonly fonts: FontLibrary;
   /** Fonts tried for characters the chosen one lacks. */
   readonly fallbacks?: readonly string[];
+  /** Missing Glyph Protection: characters a font lacks come from another font (else they show as its missing-glyph box). Default on. */
+  readonly glyphProtection?: boolean;
 }
 
 /** Lays out type content. */
@@ -232,7 +234,7 @@ export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
   };
   const fallbacks = [fallbackFace, ...(o.fallbacks ?? []).map((ps) => o.fonts.resolve({ postScriptName: ps, family: "", style: "" })).filter((f): f is LoadedFace => !!f)];
   const glyphFace = (face: LoadedFace, code: number): LoadedFace => {
-    if (code < 0x20 || isSpaceLike(code) || face.hasChar(code)) return face;
+    if (code < 0x20 || isSpaceLike(code) || face.hasChar(code) || o.glyphProtection === false) return face;
     return fallbacks.find((f) => f.hasChar(code)) ?? o.fonts.list().map((i) => o.fonts.face(i)).find((f) => f.hasChar(code)) ?? face;
   };
   const vertical = c.orientation === "vertical";

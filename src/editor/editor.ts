@@ -1,5 +1,5 @@
 import { DEFAULT_CHAR_STYLE, DEFAULT_FONT, DEFAULT_PARAGRAPH_STYLE, paragraphsIn, range, setCharStyle, setParagraphStyle, stylesIn, type CharStyle, type ParagraphStyle, type TextContent, type TextRange, type TextWarp } from "../text/model";
-import { drawText, fontLibrary } from "../text/engine";
+import { drawText, fontLibrary, setGlyphProtection } from "../text/engine";
 import { overflowLost, textOutlines, toParagraphText, toPointText, usesFauxBold } from "../text/convert";
 import type { Motion } from "../text/edit";
 import { createEffect, createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
@@ -301,6 +301,7 @@ export function createEditor() {
     const [viewportSize, setViewportSize] = createSignal({ width: 800, height: 600 });
     const [preferences, setPreferencesSignal] = createSignal<Preferences>(loadPreferences());
     let prefs = preferences();
+    setGlyphProtection(prefs.missingGlyphProtection);
     const [viewOptions, setViewOptionsSignal] = createSignal<ViewOptions>(loadViewOptions());
     let viewNow = viewOptions();
     const [memory, setMemory] = createSignal<MemoryStatus>({ ram: "ok", gpuLevel: 0 });
@@ -1220,6 +1221,7 @@ export function createEditor() {
       /** Applies and persists preferences; a lower History States limit trims history immediately. */
       setPreferences(p: Preferences) {
         prefs = p;
+        setGlyphProtection(p.missingGlyphProtection);
         setPreferencesSignal(p);
         savePreferences(p);
         for (const x of sessions()) x.setHistory((h) => limitSteps(h, p.historyStates));

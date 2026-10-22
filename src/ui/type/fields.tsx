@@ -3,7 +3,7 @@ import { For, Show, createMemo, createSignal, useContext } from "solid-js";
 import { runCommand } from "../../editor/commands";
 import { FONT_PREVIEW_PX } from "../../editor/preferences";
 import { cssFont, fontFamilies } from "../../fonts/service";
-import type { FontEntry } from "../../text/fonts";
+import type { FontEntry, FontInfo } from "../../text/fonts";
 import type { FontRef } from "../../text/model";
 import { AppContext } from "../context";
 import { Field } from "../controls";
@@ -104,11 +104,12 @@ export function ComboField(props: {
 }
 
 /** Families matching what's typed: those starting with it first, then those containing it. */
-export function matchFamilies<T extends { family: string }>(families: readonly T[], typed: string): T[] {
+export function matchFamilies<T extends { family: string; name?: string }>(families: readonly T[], typed: string): T[] {
   const q = typed.trim().toLowerCase();
   if (!q) return [...families];
-  const starts = families.filter((f) => f.family.toLowerCase().startsWith(q));
-  return [...starts, ...families.filter((f) => !starts.includes(f) && f.family.toLowerCase().includes(q))];
+  const names = (f: T) => [f.family, f.name ?? f.family].map((n) => n.toLowerCase());
+  const starts = families.filter((f) => names(f).some((n) => n.startsWith(q)));
+  return [...starts, ...families.filter((f) => !starts.includes(f) && names(f).some((n) => n.includes(q)))];
 }
 
 /** The style a family offers closest to `style`: the same name, else Regular, else its first. */
@@ -126,7 +127,10 @@ export function FontFamilyField(props: { font: FontRef | undefined; missing: boo
   const { editor, shell } = useContext(AppContext);
   const [query, setQuery] = createSignal<string | null>(null);
   let box!: HTMLDivElement, input!: HTMLInputElement;
-  const families = createMemo(() => fontFamilies());
+  // Show Font Names in English (Preferences ▸ Type), else each family's name in the user's language where it has one.
+  const families = createMemo(() =>
+    fontFamilies().map((f) => ({ ...f, name: editor.preferences().fontNamesInEnglish ? f.family : ((f.fonts[0] as Partial<FontInfo>).localFamily ?? f.family) })),
+  );
   const shown = createMemo(() => matchFamilies(families(), query() ?? ""));
   const preview = () => FONT_PREVIEW_PX[editor.preferences().fontPreviewSize];
   const pick = (fonts: readonly FontEntry[]) => {
@@ -176,7 +180,7 @@ export function FontFamilyField(props: { font: FontRef | undefined; missing: boo
               onPointerDown={(e) => e.preventDefault()}
               onClick={() => pick(f.fonts)}
             >
-              <span class="whitespace-nowrap">{f.family}</span>
+              <span class="whitespace-nowrap">{f.name}</span>
               <Show when={preview()}>
                 <span class="whitespace-nowrap" style={{ ...cssFont(closestStyle(f.fonts, "Regular")), "font-size": `${preview()}px` }}>
                   Sample

@@ -47,6 +47,8 @@ export interface FontInfo {
   readonly origin: FontOrigin;
   /** Other PostScript names that mean this font (a static family's names for a variable instance). */
   readonly aliases: readonly string[];
+  /** The family's name in the user's language, where the font has one (shown unless Show Font Names in English). */
+  readonly localFamily?: string;
 }
 
 export interface FontFile {
@@ -155,6 +157,14 @@ function nameOf(face: HB.Face, id: number): string {
   return en ? face.getName(id, en.language) : "";
 }
 
+/** A name in the user's language (by its primary subtag), if the font has one besides English. */
+function localNameOf(face: HB.Face, id: number): string | undefined {
+  const lang = typeof navigator !== "undefined" ? navigator.language.split("-")[0].toLowerCase() : "en";
+  if (lang === "en") return undefined;
+  const n = face.listNames().find((n) => n.nameId === id && n.language.toLowerCase().split("-")[0] === lang);
+  return n ? face.getName(id, n.language) : undefined;
+}
+
 const os2 = (face: HB.Face) => {
   const t = face.referenceTable("OS/2");
   if (!t || t.length < 64) return { weight: 400, italic: false };
@@ -174,13 +184,14 @@ export function fontsIn(file: FontFile): FontInfo[] {
   for (let index = 0; index < faceCount(file.bytes); index++) {
     const face = new hb.Face(blob, index);
     const family = file.family ?? (nameOf(face, 16) || nameOf(face, 1));
+    const localFamily = localNameOf(face, 16) ?? localNameOf(face, 1);
     const subfamily = nameOf(face, 17) || nameOf(face, 2) || "Regular";
     const { weight, italic } = os2(face);
     const axes = Object.values(face.getAxisInfos())
       .sort((a, b) => a.axisIndex - b.axisIndex)
       .map((a) => ({ tag: a.tag, name: nameOf(face, a.nameId) || a.tag, min: a.min, default: a.default, max: a.max, hidden: (a.flags & 1) !== 0 }));
     const instances = namedInstances(face);
-    const base = { fileId: file.id, index, axes, origin: file.origin };
+    const base = { fileId: file.id, index, axes, origin: file.origin, ...(localFamily && localFamily !== family && { localFamily }) };
     if (!instances.length) {
       const ps = nameOf(face, 6) || `${compact(family)}-${compact(subfamily)}`;
       out.push({ ...base, ref: { postScriptName: file.psPrefix ? `${file.psPrefix}-${adobeStyle(subfamily)}` : ps, family, style: subfamily }, coords: {}, weight, italic, aliases: [ps] });

@@ -134,6 +134,8 @@ export const TYPE_COMMANDS = {
     run: (ed) => ed.type.formatParagraphs({ hangingPunctuation: para(ed, "hangingPunctuation") !== true }),
     checked: (ed) => para(ed, "hangingPunctuation") === true,
   },
+  "para.justification": { label: "Justification…", run: (_, s) => s.paragraphDialog("justification") },
+  "para.hyphenation": { label: "Hyphenation…", run: (_, s) => s.paragraphDialog("hyphenation") },
   "para.composer.single": paraChoice("Adobe Single-line Composer", "composer", "single"),
   "para.composer.every": paraChoice("Adobe Every-line Composer", "composer", "every"),
   "para.direction.ltr": paraChoice("Left-to-Right Paragraph Direction", "direction", "ltr"),
