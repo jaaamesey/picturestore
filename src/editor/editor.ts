@@ -107,6 +107,7 @@ import { createPreviewWorker } from "../preview/client";
 import { SHAPE_TOOLS, createTools } from "./tools";
 import { shapeGeometry, shapeStyle } from "./tools/shape";
 import type { TransformCommand } from "./tools/transform";
+import { componentCounts, runPathAction, type PathAction } from "./tools/pathActions";
 import { createSnapper, guidePosition } from "./snapping";
 import { activeSnapTo, loadViewOptions, saveViewOptions, shown, type ViewOptions } from "./viewOptions";
 import type { SmartGuide } from "../core/snap";
@@ -1441,6 +1442,13 @@ export function createEditor() {
       /** Enter: commits the current tool's operation (e.g. Free Transform). */
       commitTool: whenIdle(() => withTool((ctx) => tools.byId[currentTool].commit?.(ctx))),
       cancelTool,
+      /** The Path Selection tools' options: operations, alignment, arrangement and Merge Shape Components. */
+      pathAction: whenIdle((a: PathAction) => withTool((ctx) => runPathAction(ctx, a))),
+      /** The components selected and in the path being edited (what enables those options). */
+      componentCounts: () => {
+        const s = active();
+        return s ? componentCounts({ doc: s.doc(), paths: s.paths() }) : { selected: 0, total: 0 };
+      },
 
       undo: whenIdle(() => {
         // Inside Free Transform, Ctrl+Z steps back through the session first.

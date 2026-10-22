@@ -20,6 +20,7 @@ import { convertToSmartObject, createLayer } from "../../core/document";
 import { IDENTITY_PATCH, quadOf } from "../../core/warp";
 import { cornerKnot, smoothKnot, type VectorPath } from "../../core/path";
 import { flattenKnots } from "../../core/bezier";
+import { componentCounts, runPathAction } from "./pathActions";
 
 const settings: ToolSettings = {
   ...DEFAULT_SETTINGS,
@@ -1373,6 +1374,52 @@ describe("pen tools", () => {
       t.keyDown!(h.ctx(), { key: "[", shift: false, alt: false, mod: false });
       t.keyDown!(h.ctx(), { key: "[", shift: false, alt: false, mod: false });
       expect(h.s.settings.pen.magneticWidth).toBe(11);
+    });
+  });
+
+  describe("Path Selection options", () => {
+    const box = (x: number, y: number, size: number) => ({ closed: true, op: "combine" as const, knots: [cornerKnot(P(x, y)), cornerKnot(P(x + size, y)), cornerKnot(P(x + size, y + size)), cornerKnot(P(x, y + size))] });
+    const three: VectorPath = { subpaths: [box(10, 10, 20), box(50, 30, 20), box(90, 60, 20)] };
+    const all = [0, 1, 2].flatMap((sub) => [0, 1, 2, 3].map((knot) => ({ sub, knot })));
+    const left = (h: ReturnType<typeof harness>, sub: number) => h.s.doc.workPath!.subpaths[sub].knots[0].anchor.x;
+    const top = (h: ReturnType<typeof harness>, sub: number) => h.s.doc.workPath!.subpaths[sub].knots[0].anchor.y;
+
+    it("counts the selected components", () => {
+      const h = withWork(three, all.slice(0, 8));
+      expect(componentCounts(h.ctx())).toEqual({ selected: 2, total: 3 });
+    });
+
+    it("changes the operation of the selected components", () => {
+      const h = withWork(three, all.slice(4, 8));
+      runPathAction(h.ctx(), { kind: "operation", op: "subtract" });
+      expect(h.s.doc.workPath!.subpaths.map((s) => s.op)).toEqual(["combine", "subtract", "combine"]);
+      expect(h.s.history).toEqual(["Change Path Operation"]);
+    });
+
+    it("aligns two or more components and distributes three or more", () => {
+      const h = withWork(three, all);
+      runPathAction(h.ctx(), { kind: "align", how: "left" });
+      expect([0, 1, 2].map((i) => left(h, i))).toEqual([10, 10, 10]);
+      runPathAction(h.ctx(), { kind: "distribute", how: "top" });
+      expect([0, 1, 2].map((i) => top(h, i))).toEqual([10, 35, 60]);
+      // Two components can't be distributed.
+      const two = withWork(three, all.slice(0, 8));
+      runPathAction(two.ctx(), { kind: "distribute", how: "top" });
+      expect(two.s.history).toEqual([]);
+    });
+
+    it("arranges the selected components and keeps them selected", () => {
+      const h = withWork(three, all.slice(0, 4));
+      runPathAction(h.ctx(), { kind: "arrange", how: "front" });
+      expect(left(h, 2)).toBe(10);
+      expect(h.s.paths.selected.every((r) => r.sub === 2)).toBe(true);
+    });
+
+    it("Merge Shape Components joins overlapping components into one outline", () => {
+      const h = withWork({ subpaths: [box(10, 10, 40), box(30, 30, 40)] }, []);
+      runPathAction(h.ctx(), { kind: "merge" });
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(1);
+      expect(h.s.history).toEqual(["Merge Shape Components"]);
     });
   });
 });

@@ -4,6 +4,7 @@ import { BLACK, toHex, type RGB } from "../core/color";
 import { activeLayer } from "../core/document";
 import type { StrokeAlign } from "../core/shape";
 import { SHAPE_TOOLS } from "../editor/tools";
+import type { Alignment, Distribution, PathOp } from "../core/path";
 import type { PenSettings, ShapeOptionsPatch, ShapeSettings, ShapeStroke } from "../editor/types";
 import { ColorPicker } from "./ColorPicker";
 import { Popover } from "./Popover";
@@ -401,8 +402,76 @@ function PenOptions() {
       </Show>
       <Show when={tool() === "pen"}>{check("Auto Add/Delete", "pen-auto", o().autoAddDelete, (autoAddDelete) => set({ autoAddDelete }))}</Show>
       <Show when={tool() === "path-select" || tool() === "direct-select"}>
+        <PathComponentOptions />
         {check("Constrain Path Dragging", "pen-constrain", o().constrainDragging, (constrainDragging) => set({ constrainDragging }))}
       </Show>
+    </>
+  );
+}
+
+const COMPONENT_OPS: readonly { op: PathOp; label: string }[] = [
+  { op: "combine", label: "Combine Shapes" },
+  { op: "subtract", label: "Subtract Front Shape" },
+  { op: "intersect", label: "Intersect Shape Areas" },
+  { op: "exclude", label: "Exclude Overlapping Shapes" },
+];
+const ALIGNMENTS: readonly { how: Alignment; label: string }[] = [
+  { how: "left", label: "Left Edges" },
+  { how: "hcenter", label: "Horizontal Centers" },
+  { how: "right", label: "Right Edges" },
+  { how: "top", label: "Top Edges" },
+  { how: "vcenter", label: "Vertical Centers" },
+  { how: "bottom", label: "Bottom Edges" },
+];
+const DISTRIBUTIONS: readonly { how: Distribution; label: string }[] = [
+  { how: "top", label: "Top Edges" },
+  { how: "vcenter", label: "Vertical Centers" },
+  { how: "bottom", label: "Bottom Edges" },
+  { how: "left", label: "Left Edges" },
+  { how: "hcenter", label: "Horizontal Centers" },
+  { how: "right", label: "Right Edges" },
+];
+const ARRANGEMENTS = [
+  { how: "front", label: "Bring to Front" },
+  { how: "forward", label: "Bring Forward" },
+  { how: "backward", label: "Send Backward" },
+  { how: "back", label: "Send to Back" },
+] as const;
+
+/**
+ * What the Path Selection tools do to the selected components: the shape-area
+ * operation they combine with, Path Alignment (two or more), distribution
+ * (three or more), Path Arrangement, and Merge Shape Components.
+ */
+function PathComponentOptions() {
+  const { editor } = useContext(AppContext);
+  const counts = () => editor.componentCounts();
+  /** A menu that acts when an item is picked, then goes back to its title. */
+  const menu = <T extends string>(title: string, testId: string, items: readonly { how?: T; op?: T; label: string }[], run: (v: T) => void, enabled: boolean) => (
+    <select
+      data-testid={testId}
+      title={title}
+      disabled={!enabled}
+      value=""
+      onChange={(e) => {
+        const v = e.currentTarget.value as T;
+        e.currentTarget.value = "";
+        if (v) run(v);
+      }}
+    >
+      <option value="">{title}</option>
+      <For each={items}>{(i) => <option value={(i.how ?? i.op) as string}>{i.label}</option>}</For>
+    </select>
+  );
+  return (
+    <>
+      {menu<PathOp>("Operation", "path-operation", COMPONENT_OPS, (op) => editor.pathAction({ kind: "operation", op }), counts().selected >= 1)}
+      {menu<Alignment>("Align", "path-align", ALIGNMENTS, (how) => editor.pathAction({ kind: "align", how }), counts().selected >= 2)}
+      {menu<Distribution>("Distribute", "path-distribute", DISTRIBUTIONS, (how) => editor.pathAction({ kind: "distribute", how }), counts().selected >= 3)}
+      {menu<(typeof ARRANGEMENTS)[number]["how"]>("Arrange", "path-arrange", ARRANGEMENTS, (how) => editor.pathAction({ kind: "arrange", how }), counts().selected >= 1)}
+      <button type="button" data-testid="path-merge" disabled={counts().total < 2} class="rounded-sm border border-line px-2 py-0.5 enabled:hover:bg-raised disabled:opacity-40" onClick={() => editor.pathAction({ kind: "merge" })}>
+        Combine
+      </button>
     </>
   );
 }
