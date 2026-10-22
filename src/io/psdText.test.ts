@@ -95,6 +95,19 @@ describe("type in PSD", () => {
     expect(psd.children![2].text).toMatchObject({ shapeType: "box", boxBounds: [70, 40, 230, 160] });
   });
 
+  it("keeps the document's named type styles, and text with <, > and & in it", async () => {
+    const { doc } = typeDoc();
+    const textStyles = {
+      character: [{ id: "c1", name: "Emphasis <em>", attributes: { fauxItalic: true, color: { r: 1, g: 2, b: 3 } } }],
+      paragraph: [{ id: "p1", name: "Body & co", attributes: { align: "justify-left" as const, character: { size: 11 } } }],
+    };
+    const odd = textContent("a < b && c > d ]]>", DEFAULT_CHAR_STYLE, DEFAULT_PARAGRAPH_STYLE, { kind: "point" }, [1, 0, 0, 1, 10, 30]);
+    const withStyles = addLayer({ ...doc, textStyles }, createLayer({ name: "Odd", content: odd }));
+    const back = await readPsdDocument(writePsdDocument(withStyles));
+    expect(back.textStyles).toEqual(textStyles);
+    expect(texts(back).at(-1)).toEqual({ ...odd, stale: false });
+  });
+
   it("guesses a font's family and style from its PostScript name", () => {
     expect(fontFromName("MyriadPro-BoldIt")).toEqual({ postScriptName: "MyriadPro-BoldIt", family: "Myriad Pro", style: "Bold Italic" });
     expect(fontFromName("Arial")).toEqual({ postScriptName: "Arial", family: "Arial", style: "Regular" });

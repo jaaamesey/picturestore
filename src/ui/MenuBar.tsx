@@ -130,7 +130,7 @@ export const PARAGRAPH_MENU: readonly MenuItem[] = [
 ];
 
 const TYPE_MENU: readonly MenuItem[] = [
-  { submenu: "Panels", items: ["type.panels.character", "type.panels.paragraph", "type.panels.glyphs"] },
+  { submenu: "Panels", items: ["type.panels.character", "type.panels.characterStyles", "type.panels.glyphs", "type.panels.paragraph", "type.panels.paragraphStyles"] },
   {
     submenu: "Anti-Alias",
     items: ["type.antiAlias.none", "type.antiAlias.sharp", "type.antiAlias.crisp", "type.antiAlias.strong", "type.antiAlias.smooth", "-", "type.antiAlias.platformLCD", "type.antiAlias.platform"],
@@ -155,7 +155,13 @@ const TYPE_MENU: readonly MenuItem[] = [
   "type.replaceMissing",
   "-",
   "type.pasteLorem",
+  "-",
+  "type.loadDefaultStyles",
+  "type.saveDefaultStyles",
 ];
+
+export const CHARACTER_STYLES_MENU: readonly MenuItem[] = ["charStyles.new", "-", "charStyles.redefine", "charStyles.clearOverride", "-", "type.loadDefaultStyles", "type.saveDefaultStyles"];
+export const PARAGRAPH_STYLES_MENU: readonly MenuItem[] = ["paraStyles.new", "-", "paraStyles.redefine", "paraStyles.clearOverride", "-", "type.loadDefaultStyles", "type.saveDefaultStyles"];
 
 const MENUS: readonly { readonly title: string; readonly items: readonly MenuItem[] }[] = [
   {
@@ -233,7 +239,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "view.newGuide",
     ],
   },
-  { title: "Window", items: ["window.character", "window.glyphs", "window.history", "window.layers", "window.paragraph", "window.properties"] },
+  { title: "Window", items: ["window.character", "window.characterStyles", "window.glyphs", "window.history", "window.layers", "window.paragraph", "window.paragraphStyles", "window.properties"] },
 ];
 
 /** A dropdown list of commands; used by the menu bar and context menus. */

@@ -11,6 +11,7 @@ import {
   type FontRef,
   type ParagraphStyle,
   type TextContent,
+  type TextStyles,
   type TextWarp,
   type WarpStyle,
 } from "../text/model";
@@ -266,12 +267,15 @@ export function textFromPsd(t: LayerTextData): TextContent {
 
 const NS = "https://picturestore.app/ns/type/1.0/";
 
-/** Our type layers (in document order) as written, for the XMP packet. */
-export function typeXmp(contents: readonly TextContent[]): string {
-  // JSON with no <, > or &: plain XML text.
-  const json = JSON.stringify(contents.map(({ stale: _, ...c }) => c)).replace(/[<>&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+/** JSON with no <, > or &: plain XML text. */
+const xmlJson = (v: unknown) => JSON.stringify(v).replace(/[<>&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
+/** Our type layers (in document order) as written, and the document's named type styles, for the XMP packet. */
+export function typeXmp(contents: readonly TextContent[], styles: TextStyles | undefined): string {
+  const json = xmlJson(contents.map(({ stale: _, ...c }) => c));
+  const st = styles && (styles.character.length || styles.paragraph.length) ? `<picturestore:typeStyles>${xmlJson(styles)}</picturestore:typeStyles>` : "";
   return `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:picturestore="${NS}"><picturestore:typeLayers>${json}</picturestore:typeLayers></rdf:Description></rdf:RDF></x:xmpmeta>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:picturestore="${NS}"><picturestore:typeLayers>${json}</picturestore:typeLayers>${st}</rdf:Description></rdf:RDF></x:xmpmeta>
 <?xpacket end="w"?>`;
 }
 
@@ -284,6 +288,18 @@ export function typeFromXmp(xmp: string | undefined): TextContent[] {
     return Array.isArray(out) ? out : [];
   } catch {
     return [];
+  }
+}
+
+/** The named type styles an XMP packet holds, if any. */
+export function typeStylesFromXmp(xmp: string | undefined): TextStyles | undefined {
+  const m = xmp && /<picturestore:typeStyles>([\s\S]*?)<\/picturestore:typeStyles>/.exec(xmp);
+  if (!m) return undefined;
+  try {
+    const s = JSON.parse(m[1]) as TextStyles;
+    return Array.isArray(s.character) && Array.isArray(s.paragraph) ? s : undefined;
+  } catch {
+    return undefined;
   }
 }
 

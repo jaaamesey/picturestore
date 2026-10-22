@@ -34,11 +34,13 @@ export const PANEL_TITLES: Record<PanelId, string> = {
   layers: "Layers",
   character: "Character",
   paragraph: "Paragraph",
+  characterStyles: "Character Styles",
+  paragraphStyles: "Paragraph Styles",
   glyphs: "Glyphs",
 };
 
 /** Photoshop's groupings, for panels opened from the Window menu. */
-const USUAL_GROUPS: readonly (readonly PanelId[])[] = [["history"], ["properties"], ["layers"], ["character", "paragraph"], ["glyphs"]];
+const USUAL_GROUPS: readonly (readonly PanelId[])[] = [["history"], ["properties"], ["layers"], ["character", "paragraph"], ["characterStyles", "paragraphStyles"], ["glyphs"]];
 
 const group = (tabs: readonly PanelId[], size: number, active = tabs[0]): DockGroup => ({ id: tabs[0], tabs, active, size, minimized: false });
 

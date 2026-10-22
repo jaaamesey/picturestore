@@ -2,13 +2,14 @@ import { common, LOREM_IPSUM, DEFAULT_CHAR_STYLE, DEFAULT_PARAGRAPH_STYLE, type 
 import type { CommandSpec } from "./commands";
 import type { Editor } from "./editor";
 import type { FontPreviewSize } from "./preferences";
+import { loadDefaultStyles, saveDefaultStyles } from "./defaultStyles";
 
 /**
  * The Window menu's panels, the Type menu, and the Character and Paragraph
  * panels' menus, as in Photoshop.
  */
 
-export type PanelName = "history" | "properties" | "layers" | "character" | "paragraph" | "glyphs";
+export type PanelName = "history" | "properties" | "layers" | "character" | "paragraph" | "characterStyles" | "paragraphStyles" | "glyphs";
 
 const panel = (label: string, id: PanelName): CommandSpec => ({
   label,
@@ -67,6 +68,8 @@ const resetCharacter = (s: CharStyle): Partial<CharStyle> => ({ ...DEFAULT_CHAR_
 export const TYPE_COMMANDS = {
   "window.character": panel("Character", "character"),
   "window.paragraph": panel("Paragraph", "paragraph"),
+  "window.characterStyles": panel("Character Styles", "characterStyles"),
+  "window.paragraphStyles": panel("Paragraph Styles", "paragraphStyles"),
   "window.glyphs": panel("Glyphs", "glyphs"),
   "window.history": panel("History", "history"),
   "window.layers": panel("Layers", "layers"),
@@ -74,6 +77,8 @@ export const TYPE_COMMANDS = {
 
   "type.panels.character": panel("Character Panel", "character"),
   "type.panels.paragraph": panel("Paragraph Panel", "paragraph"),
+  "type.panels.characterStyles": panel("Character Styles Panel", "characterStyles"),
+  "type.panels.paragraphStyles": panel("Paragraph Styles Panel", "paragraphStyles"),
   "type.panels.glyphs": panel("Glyphs Panel", "glyphs"),
   "type.antiAlias.none": antiAlias("None", "none"),
   "type.antiAlias.sharp": antiAlias("Sharp", "sharp"),
@@ -103,6 +108,14 @@ export const TYPE_COMMANDS = {
   "type.manageFonts": { label: "Manage Fonts…", run: (_, s) => s.manageFonts() },
   "type.updateAll": { label: "Update All Text Layers", run: (ed) => ed.type.updateAll(), enabled: (ed) => !!ed.active() },
   "type.replaceMissing": { label: "Replace All Missing Fonts", run: (ed) => ed.type.replaceMissingFonts(), enabled: (ed) => !!ed.active() },
+  "type.loadDefaultStyles": { label: "Load Default Type Styles", run: (ed) => ed.type.styles.loadDefaults(loadDefaultStyles()), enabled: (ed) => !!ed.active() },
+  "type.saveDefaultStyles": { label: "Save Default Type Styles", run: (ed) => saveDefaultStyles(ed.type.styles.list()), enabled: (ed) => !!ed.active() },
+  "charStyles.new": { label: "New Character Style…", run: (ed) => void ed.type.styles.create("character") },
+  "charStyles.redefine": { label: "Redefine Character Style", run: (ed) => ed.type.styles.redefine("character"), enabled: (ed) => !!ed.type.styles.selection("character").id },
+  "charStyles.clearOverride": { label: "Clear Override", run: (ed) => ed.type.styles.clearOverride("character"), enabled: (ed) => !!ed.type.styles.selection("character").overridden },
+  "paraStyles.new": { label: "New Paragraph Style…", run: (ed) => void ed.type.styles.create("paragraph") },
+  "paraStyles.redefine": { label: "Redefine Paragraph Style", run: (ed) => ed.type.styles.redefine("paragraph"), enabled: (ed) => !!ed.type.styles.selection("paragraph").id },
+  "paraStyles.clearOverride": { label: "Clear Override", run: (ed) => ed.type.styles.clearOverride("paragraph"), enabled: (ed) => !!ed.type.styles.selection("paragraph").overridden },
   "type.pasteLorem": { label: "Paste Lorem Ipsum", run: (ed) => ed.type.input(LOREM_IPSUM), enabled: editing },
 
   // The Character panel's menu.

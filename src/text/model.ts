@@ -513,6 +513,21 @@ export interface TextStyles {
 
 export const NO_TEXT_STYLES: TextStyles = { character: [], paragraph: [] };
 
+/** The attributes every item shares (what a new style captures from a selection). */
+export function commonAttributes<T extends object>(items: readonly T[]): Partial<T> {
+  if (!items.length) return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(items[0])) if (items.every((i) => sameValue((i as Record<string, unknown>)[k], v))) out[k] = v;
+  return out as Partial<T>;
+}
+
+/** The next free "Character Style n" / "Paragraph Style n" name. */
+export function nextStyleName(base: string, styles: readonly NamedStyle<unknown>[]): string {
+  let n = 1;
+  while (styles.some((s) => s.name === `${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
 /** Where a run differs from its style: Photoshop's "+" overrides. */
 export function charOverrides(run: CharRun, styles: TextStyles): Partial<CharStyle> {
   const def = styles.character.find((s) => s.id === run.styleId);

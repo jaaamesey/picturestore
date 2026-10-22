@@ -13,7 +13,7 @@ import { isBlendMode } from "../core/blend";
 import type { RGB } from "../core/color";
 import { pathShape, placementMapping } from "../core/content";
 import type { TextContent } from "../text/model";
-import { exactContent, textFromPsd, textToPsd, typeFromXmp, typeXmp } from "./psdText";
+import { exactContent, textFromPsd, textToPsd, typeFromXmp, typeStylesFromXmp, typeXmp } from "./psdText";
 import { PIXELS, resolutionOf, createLayer, docRect, type Doc, type Layer, type LayerContent, type LayerMask, type SmartSource } from "../core/document";
 import { fromPsd, rgbOf, toPsd } from "./psdAdjustments";
 import { flatten } from "../core/composite";
@@ -216,7 +216,8 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
   // Guides: ag-psd's "vertical" is a guide at x, as ours.
   const stored = psd.imageResources?.gridAndGuidesInformation?.guides ?? [];
   const guides = stored.length ? stored.map((g) => ({ orientation: g.direction, position: g.location })) : undefined;
-  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null, resolution, guides };
+  const textStyles = typeStylesFromXmp(psd.imageResources?.xmpMetadata);
+  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null, resolution, guides, ...(textStyles && { textStyles }) };
 }
 
 const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
@@ -348,6 +349,6 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
   // Positions are stored in 1/32 px, unsigned (by ag-psd), so guides left of or above the canvas can't be.
   const guides = (doc.guides ?? []).filter((g) => g.position >= 0).map((g) => ({ location: Math.round(g.position * 32) / 32, direction: g.orientation }));
   if (guides.length) psd.imageResources.gridAndGuidesInformation = { guides };
-  if (linked.typeLayers.length) psd.imageResources.xmpMetadata = typeXmp(linked.typeLayers);
+  if (linked.typeLayers.length || doc.textStyles?.character.length || doc.textStyles?.paragraph.length) psd.imageResources.xmpMetadata = typeXmp(linked.typeLayers, doc.textStyles);
   return writePsd(psd, { generateThumbnail: false, noBackground: true });
 }

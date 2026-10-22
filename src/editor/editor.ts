@@ -1,4 +1,31 @@
-import { DEFAULT_CHAR_STYLE, DEFAULT_FONT, DEFAULT_PARAGRAPH_STYLE, paragraphsIn, range, setCharStyle, setParagraphStyle, stylesIn, type CharStyle, type ParagraphStyle, type TextContent, type TextRange, type TextWarp } from "../text/model";
+import {
+  DEFAULT_CHAR_STYLE,
+  DEFAULT_FONT,
+  DEFAULT_PARAGRAPH_STYLE,
+  NO_TEXT_STYLES,
+  applyCharacterStyle,
+  applyParagraphStyle,
+  charOverrides,
+  common,
+  commonAttributes,
+  nextStyleName,
+  paragraphOverrides,
+  paragraphsIn,
+  range,
+  redefineCharacterStyle,
+  redefineParagraphStyle,
+  setCharStyle,
+  setParagraphStyle,
+  stylesIn,
+  type CharStyle,
+  type NamedStyle,
+  type ParagraphStyle,
+  type ParagraphStyleAttributes,
+  type TextContent,
+  type TextRange,
+  type TextStyles,
+  type TextWarp,
+} from "../text/model";
 import { drawText, fontLibrary, setGlyphProtection } from "../text/engine";
 import { overflowLost, textOutlines, toParagraphText, toPointText, usesFauxBold } from "../text/convert";
 import type { Motion } from "../text/edit";
@@ -83,6 +110,7 @@ import type { SmartGuide } from "../core/snap";
 import type { ShapeOptionsPatch, ShapeStroke } from "./types";
 import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolKey, ToolSettings, Writable } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
+import { loadDefaultStyles } from "./defaultStyles";
 import { fitView, followRemap, nextZoomStep, placeAt, prevZoomStep, screenToDoc, zoomAt } from "./view";
 
 /** One open document (a tab): its history, transient preview state and viewport. */
@@ -991,6 +1019,130 @@ export function createEditor() {
       });
     }
 
+    // --- Named type styles: the Character Styles and Paragraph Styles panels ---
+
+    const stylesOf = (d: Doc): TextStyles => d.textStyles ?? NO_TEXT_STYLES;
+    type StyleKind = "character" | "paragraph";
+
+    /** What a style made from the selection sets: what the selected text has in common (a paragraph style, its text's too). */
+    const captureCharacter = (): Partial<CharStyle> => commonAttributes(targetCharStyles());
+    const captureParagraph = (): ParagraphStyleAttributes => ({ ...commonAttributes(targetParagraphStyles()), character: captureCharacter() });
+
+    /** The style the selection has (null: None, or mixed: undefined), and whether it's overridden there. */
+    function selectionStyle(kind: StyleKind): { id: string | null | undefined; overridden: boolean } {
+      const t = textTarget();
+      if (!t) return { id: null, overridden: false };
+      const styles = stylesOf(active()!.doc());
+      if (kind === "character") {
+        const runs = stylesIn(t.content, t.range);
+        const id = common(runs, "styleId");
+        return { id, overridden: runs.some((r) => Object.keys(charOverrides(r, styles)).length > 0) };
+      }
+      const p = paragraphsIn(t.content.text, t.range);
+      const paras = t.content.paragraphs.slice(p.start, p.end);
+      return { id: common(paras, "styleId"), overridden: paras.some((q) => Object.keys(paragraphOverrides(q, styles)).length > 0) };
+    }
+
+    /** Applies a style (null: None) to the selection, or all of the active type layer; for new type, it's what's typed. */
+    function applyTextStyle(kind: StyleKind, id: string | null) {
+      const t = textTarget();
+      if (!t) return;
+      const styles = stylesOf(active()!.doc());
+      const range = t.range;
+      if (kind === "character") {
+        const style = id ? (styles.character.find((s) => s.id === id) ?? null) : null;
+        const f = (c: TextContent) => applyCharacterStyle(c, range, style);
+        if (t.editing) {
+          // At a caret, it's what's typed next.
+          if (range.start === range.end) return typing((ctx) => tools.type.format(ctx, style?.attributes ?? {}));
+          return typing((ctx) => tools.type.update(ctx, f));
+        }
+        return typeLayerEdit("Apply Character Style", (c) => applyCharacterStyle(c, { start: 0, end: c.text.length }, style));
+      }
+      const style = id ? (styles.paragraph.find((s) => s.id === id) ?? null) : null;
+      if (t.editing) return typing((ctx) => tools.type.update(ctx, (c) => applyParagraphStyle(c, range, style)));
+      typeLayerEdit("Apply Paragraph Style", (c) => applyParagraphStyle(c, { start: 0, end: c.text.length }, style));
+    }
+
+    /** Changes the document's styles; with `content`, every type layer's text too (re-rendered). */
+    function editStyles(label: string, f: (st: TextStyles) => TextStyles, content?: (c: TextContent) => TextContent) {
+      edit(label, (d) => {
+        let out: Doc = { ...d, textStyles: f(stylesOf(d)) };
+        if (content)
+          for (const l of allLayers(d.layers)) {
+            if (l.content.kind !== "text") continue;
+            const next = content(l.content);
+            if (next !== l.content) out = updateLayer(out, l.id, { content: { ...next, stale: false }, pixels: renderDrawing(drawText(next), docRect(d)) });
+          }
+        return out;
+      });
+    }
+
+    const textStylesApi = {
+      list: () => stylesOf(active()?.doc() ?? ({} as Doc)),
+      selection: selectionStyle,
+      apply: applyTextStyle,
+      /** New style from the selection's formatting (Photoshop's Create New Style button). */
+      create(kind: StyleKind) {
+        const st = stylesOf(active()?.doc() ?? ({} as Doc));
+        const id = crypto.randomUUID();
+        if (kind === "character") editStyles("New Character Style", (s) => ({ ...s, character: [...s.character, { id, name: nextStyleName("Character Style", st.character), attributes: captureCharacter() }] }));
+        else editStyles("New Paragraph Style", (s) => ({ ...s, paragraph: [...s.paragraph, { id, name: nextStyleName("Paragraph Style", st.paragraph), attributes: captureParagraph() }] }));
+        return id;
+      },
+      /** Clear Override: the selection takes its style's attributes again. */
+      clearOverride(kind: StyleKind) {
+        const id = selectionStyle(kind).id;
+        if (id) applyTextStyle(kind, id);
+      },
+      /** Redefine by Merging Overrides: the selection's style takes its formatting, and so does all text using the style (where not overridden). */
+      redefine(kind: StyleKind) {
+        const id = selectionStyle(kind).id;
+        if (!id) return;
+        const st = stylesOf(active()!.doc());
+        if (kind === "character") {
+          const before = st.character.find((s) => s.id === id)!.attributes, after = captureCharacter();
+          editStyles(
+            "Redefine Character Style",
+            (s) => ({ ...s, character: s.character.map((x) => (x.id === id ? { ...x, attributes: after } : x)) }),
+            (c) => redefineCharacterStyle(c, id, before, after),
+          );
+        } else {
+          const before = st.paragraph.find((s) => s.id === id)!.attributes, after = captureParagraph();
+          editStyles(
+            "Redefine Paragraph Style",
+            (s) => ({ ...s, paragraph: s.paragraph.map((x) => (x.id === id ? { ...x, attributes: after } : x)) }),
+            (c) => redefineParagraphStyle(c, id, before, after),
+          );
+        }
+      },
+      rename(kind: StyleKind, id: string, name: string) {
+        if (!name.trim()) return;
+        const named = <T>(list: readonly NamedStyle<T>[]) => list.map((x) => (x.id === id ? { ...x, name: name.trim() } : x));
+        editStyles(`Rename ${kind === "character" ? "Character" : "Paragraph"} Style`, (s) => (kind === "character" ? { ...s, character: named(s.character) } : { ...s, paragraph: named(s.paragraph) }));
+      },
+      /** Deletes a style; text using it keeps its formatting, with no style (None). */
+      remove(kind: StyleKind, id: string) {
+        editStyles(
+          `Delete ${kind === "character" ? "Character" : "Paragraph"} Style`,
+          (s) => (kind === "character" ? { ...s, character: s.character.filter((x) => x.id !== id) } : { ...s, paragraph: s.paragraph.filter((x) => x.id !== id) }),
+          (c) =>
+            kind === "character"
+              ? c.runs.some((r) => r.styleId === id)
+                ? { ...c, runs: c.runs.map((r) => (r.styleId === id ? { ...r, styleId: null } : r)) }
+                : c
+              : c.paragraphs.some((p) => p.styleId === id)
+                ? { ...c, paragraphs: c.paragraphs.map((p) => (p.styleId === id ? { ...p, styleId: null } : p)) }
+                : c,
+        );
+      },
+      /** Load Default Type Styles: the saved defaults added to the document (by name, replacing its own of the same name). */
+      loadDefaults(defaults: TextStyles) {
+        const merge = <T>(mine: readonly NamedStyle<T>[], theirs: readonly NamedStyle<T>[]) => [...mine.filter((m) => !theirs.some((t) => t.name === m.name)), ...theirs];
+        editStyles("Load Default Type Styles", (s) => ({ character: merge(s.character, defaults.character), paragraph: merge(s.paragraph, defaults.paragraph) }));
+      },
+    };
+
     /** Type ▸ Convert Text Shape Type: point type to paragraph type and back (asking first if overflowing text would be lost). */
     async function convertTextShapeType() {
       if (tools.type.session()) typing((ctx) => tools.type.commit(ctx));
@@ -1022,7 +1174,8 @@ export function createEditor() {
         setActiveId(id);
       },
       openDocument,
-      newDocument: (opts: NewDocumentOptions, name = "Untitled") => openDocument(createDocument(opts), name, "New"),
+      // New documents start with the default type styles (Type ▸ Save Default Type Styles).
+      newDocument: (opts: NewDocumentOptions, name = "Untitled") => openDocument({ ...createDocument(opts), textStyles: loadDefaultStyles() }, name, "New"),
       closeDocument: (id: string) => {
         closeDocument(id);
         enforceMemoryBudget();
@@ -1069,6 +1222,7 @@ export function createEditor() {
         formatParagraphs,
         update: updateType,
         convertShapeType: convertTextShapeType,
+        styles: textStylesApi,
         /** Type ▸ Warp Text's preview: the active type layer drawn with `warp` until it's set or the preview ends (undefined). */
         previewWarp(warp: TextWarp | null | undefined) {
           const s = active();

@@ -54,6 +54,7 @@ const PATHS = {
   "justify-all": "M4 6h16M4 10h16M4 14h16M4 18h16",
   "orientation": "M4 6V4h9v2M8.5 4v9M14 11h6M17 11v9M15 20h4",
   warning: "M12 3l10 18H2zM12 10v5M12 18v.01",
+  undo: "M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3",
 } as const;
 
 export type IconName = keyof typeof PATHS;

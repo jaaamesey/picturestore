@@ -38,7 +38,8 @@ import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
 import { Icon } from "./icons";
-import { CHARACTER_MENU, MenuBar, MenuList, PARAGRAPH_MENU, type MenuItem } from "./MenuBar";
+import { CHARACTER_MENU, CHARACTER_STYLES_MENU, MenuBar, MenuList, PARAGRAPH_MENU, PARAGRAPH_STYLES_MENU, type MenuItem } from "./MenuBar";
+import { StylesPanel } from "./type/StylesPanel";
 import { CharacterPanel } from "./type/CharacterPanel";
 import { GlyphsPanel } from "./type/GlyphsPanel";
 import { ParagraphPanel } from "./type/ParagraphPanel";
@@ -493,8 +494,10 @@ export function App() {
               character: () => <CharacterPanel />,
               paragraph: () => <ParagraphPanel />,
               glyphs: () => <GlyphsPanel />,
+              characterStyles: () => <StylesPanel kind="character" />,
+              paragraphStyles: () => <StylesPanel kind="paragraph" />,
             }}
-            menus={{ character: CHARACTER_MENU, paragraph: PARAGRAPH_MENU }}
+            menus={{ character: CHARACTER_MENU, paragraph: PARAGRAPH_MENU, characterStyles: CHARACTER_STYLES_MENU, paragraphStyles: PARAGRAPH_STYLES_MENU }}
           />
         </div>
       </div>

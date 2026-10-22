@@ -4,6 +4,7 @@ import type { RGB } from "./color";
 import { intersect, isEmpty, rect, type Rect } from "./geometry";
 import { allLayers, childrenOf, findLayer, hasPixels, insertAt, isGroup, locate, removeFrom, treeShape, updateIn, type Placement as TreePlacement } from "./layers";
 import type { Mask } from "./selection";
+import type { TextStyles } from "../text/model";
 import type { ShapeGeometry, ShapeStyle } from "./shape";
 import type { TextContent } from "../text/model";
 import type { TransformState } from "./transform";
@@ -100,6 +101,8 @@ export interface Doc {
   readonly resolution?: number;
   /** Ruler guides (View ▸ Guides): part of the document, saved with it and undoable. */
   readonly guides?: readonly Guide[];
+  /** Named character and paragraph styles (the Character Styles and Paragraph Styles panels). */
+  readonly textStyles?: TextStyles;
 }
 
 /** Photoshop's default for screen documents. */
