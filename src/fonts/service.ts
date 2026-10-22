@@ -35,6 +35,16 @@ const URLS: Record<string, string> = {
 let ready: Promise<void> | null = null;
 
 const [fontsVersion, setFontsVersion] = createSignal(0);
+
+/** A font file the user added: its name as uploaded, and the fonts in it. */
+export interface UploadedFont {
+  readonly id: string;
+  readonly name: string;
+  readonly fonts: readonly FontInfo[];
+}
+const [uploaded, setUploaded] = createSignal<readonly UploadedFont[]>([]);
+/** The fonts the user has added (kept in IndexedDB), oldest first. */
+export const uploadedFonts = uploaded;
 let watching: (() => void) | null = null;
 
 /** The font families, for menus: kept current as fonts come and go. */
@@ -58,9 +68,10 @@ export function initFonts(): Promise<void> {
       })),
     );
     for (const f of bundled) add(f);
-    for (const s of await storedFonts()) {
+    for (const s of (await storedFonts()).sort((a, b) => a.added - b.added)) {
       try {
-        add({ id: s.id, bytes: s.bytes, origin: "uploaded" });
+        const fonts = add({ id: s.id, bytes: s.bytes, origin: "uploaded" });
+        setUploaded((u) => [...u, { id: s.id, name: s.name, fonts }]);
       } catch (err) {
         console.warn(`Stored font ${s.name} couldn't be read:`, err);
       }
@@ -115,8 +126,10 @@ export async function uploadFonts(files: readonly File[]): Promise<AddedFonts> {
       const id = `uploaded:${crypto.randomUUID()}`;
       // Read it before keeping it: a broken file never reaches storage.
       if (!fontsIn({ id, bytes, origin: "uploaded" }).length) throw new Error("It has no fonts in it.");
-      fonts.push(...add({ id, bytes, origin: "uploaded" }));
+      const added = add({ id, bytes, origin: "uploaded" });
+      fonts.push(...added);
       await storeFont({ id, name: f.name, bytes, added: Date.now() });
+      setUploaded((u) => [...u, { id, name: f.name, fonts: added }]);
     } catch (err) {
       errors.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -127,7 +140,24 @@ export async function uploadFonts(files: readonly File[]): Promise<AddedFonts> {
 /** Removes an uploaded font file. */
 export async function removeFont(fileId: string): Promise<void> {
   fontLibrary().remove(fileId);
+  setUploaded((u) => u.filter((f) => f.id !== fileId));
   await deleteStoredFont(fileId);
+}
+
+/** The font formats that can be added. */
+export const FONT_FILE_TYPES = [".ttf", ".otf", ".ttc", ".woff"];
+
+/** Asks for font files (the browser's file picker). */
+export function pickFontFiles(): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = FONT_FILE_TYPES.join(",");
+    input.multiple = true;
+    input.onchange = () => resolve([...(input.files ?? [])]);
+    input.oncancel = () => resolve([]);
+    input.click();
+  });
 }
 
 interface LocalFontData {

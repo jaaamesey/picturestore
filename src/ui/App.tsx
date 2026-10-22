@@ -8,7 +8,7 @@ import { placementMapping } from "../core/content";
 import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
 import { createEditor, type DocumentSession } from "../editor/editor";
 import { MAX_LEVEL, requestDevice } from "../gpu/renderer";
-import { initFonts } from "../fonts/service";
+import { initFonts, pickFontFiles, uploadFonts, useLocalFonts } from "../fonts/service";
 import {
   EXTENSIONS,
   download,
@@ -43,6 +43,7 @@ import { CharacterPanel } from "./type/CharacterPanel";
 import { GlyphsPanel } from "./type/GlyphsPanel";
 import { ParagraphPanel } from "./type/ParagraphPanel";
 import { WarpTextDialog } from "./type/WarpTextDialog";
+import { FontsDialog } from "./type/FontsDialog";
 import { Popover, dismissable } from "./Popover";
 import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
@@ -225,6 +226,19 @@ export function App() {
   const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
   const [newGuideFor, setNewGuideFor] = createSignal<DocumentSession | null>(null);
+  const [managingFonts, setManagingFonts] = createSignal(false);
+  const addFonts = async () => {
+    const files = await pickFontFiles();
+    if (!files.length) return;
+    const { fonts, errors } = await uploadFonts(files);
+    const families = [...new Set(fonts.map((f) => f.ref.family))];
+    notify([families.length ? `Added ${families.join(", ")}.` : "", errors.length ? `Couldn't add ${errors.join("; ")}` : ""].filter(Boolean).join(" "));
+  };
+  const useInstalledFonts = () =>
+    void useLocalFonts().then(
+      (n) => notify(`${n} installed fonts are available.`),
+      (err) => notify(`Couldn't use installed fonts: ${errorText(err)}`),
+    );
   const [warping, setWarping] = createSignal<{ session: DocumentSession; initial: TextWarp | null } | null>(null);
 
   // --- Recovery information ------------------------------------------------------
@@ -307,6 +321,8 @@ export function App() {
     imageSize: () => setImageSizeFor(editor.active() as DocumentSession | null),
     newGuide: () => setNewGuideFor(editor.active() as DocumentSession | null),
     togglePanel: (id) => panels.toggle(id),
+    addFonts: () => void addFonts(),
+    manageFonts: () => setManagingFonts(true),
     panelOpen: (id) => panels.isOpen(id),
     togglePanelGroup: (ids) => panels.toggleGroup(ids),
     warpText() {
@@ -521,6 +537,9 @@ export function App() {
             }}
           />
         )}
+      </Show>
+      <Show when={managingFonts()}>
+        <FontsDialog onAdd={() => void addFonts()} onUseInstalled={useInstalledFonts} onClose={() => setManagingFonts(false)} />
       </Show>
       <Show when={warping()} keyed>
         {(w) => (

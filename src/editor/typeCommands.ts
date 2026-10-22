@@ -99,6 +99,8 @@ export const TYPE_COMMANDS = {
   "type.previewSize.large": previewSize("Large", "large"),
   "type.previewSize.extraLarge": previewSize("Extra Large", "extra-large"),
   "type.previewSize.huge": previewSize("Huge", "huge"),
+  "type.addFonts": { label: "Add Fonts…", run: (_, s) => s.addFonts() },
+  "type.manageFonts": { label: "Manage Fonts…", run: (_, s) => s.manageFonts() },
   "type.updateAll": { label: "Update All Text Layers", run: (ed) => ed.type.updateAll(), enabled: (ed) => !!ed.active() },
   "type.replaceMissing": { label: "Replace All Missing Fonts", run: (ed) => ed.type.replaceMissingFonts(), enabled: (ed) => !!ed.active() },
   "type.pasteLorem": { label: "Paste Lorem Ipsum", run: (ed) => ed.type.input(LOREM_IPSUM), enabled: editing },

@@ -1,5 +1,6 @@
 import type { JSX } from "@solidjs/web";
 import { For, Show, createMemo, createSignal, useContext } from "solid-js";
+import { runCommand } from "../../editor/commands";
 import { FONT_PREVIEW_PX } from "../../editor/preferences";
 import { cssFont, fontFamilies } from "../../fonts/service";
 import type { FontEntry } from "../../text/fonts";
@@ -122,7 +123,7 @@ export function closestStyle(fonts: readonly FontEntry[], style: string | undefi
  * as Photoshop marks missing fonts.
  */
 export function FontFamilyField(props: { font: FontRef | undefined; missing: boolean; testId: string; onPick: (f: FontEntry) => void }) {
-  const { editor } = useContext(AppContext);
+  const { editor, shell } = useContext(AppContext);
   const [query, setQuery] = createSignal<string | null>(null);
   let box!: HTMLDivElement, input!: HTMLInputElement;
   const families = createMemo(() => fontFamilies());
@@ -184,6 +185,19 @@ export function FontFamilyField(props: { font: FontRef | undefined; missing: boo
             </button>
           )}
         </For>
+        <div class="my-1 h-px bg-line" />
+        <button
+          type="button"
+          class="block w-full px-3 py-0.5 text-left hover:bg-accent hover:text-white"
+          data-testid={`${props.testId}-add`}
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={() => {
+            setQuery(null);
+            runCommand("type.addFonts", editor, shell);
+          }}
+        >
+          Add Fonts…
+        </button>
       </DropList>
     </div>
   );

@@ -47,6 +47,10 @@ export interface Shell {
   togglePanelGroup(ids: readonly PanelName[]): void;
   /** Type ▸ Warp Text dialog. */
   warpText(): void;
+  /** Type ▸ Add Fonts: picks font files and keeps them in this browser. */
+  addFonts(): void;
+  /** Type ▸ Manage Fonts dialog. */
+  manageFonts(): void;
 }
 
 export interface CommandSpec {
