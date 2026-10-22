@@ -7,10 +7,11 @@ import { rect } from "../../core/geometry";
 import { AdjustmentEditor, Slider } from "../AdjustmentControls";
 import { Button } from "../controls";
 import { AppContext } from "../context";
+import { TypeProperties } from "../type/TypeProperties";
 
 /**
  * Properties (Window ▸ Properties): the selected adjustment layer's
- * settings, or the targeted layer mask's options.
+ * settings, the targeted layer mask's options, or a type layer's.
  */
 export function PropertiesPanel() {
   const { editor } = useContext(AppContext);
@@ -39,7 +40,14 @@ export function PropertiesPanel() {
         <Show
           when={adjustment()}
           fallback={
-            <Show when={layer()?.mask && (doc()?.maskTargeted || layer()?.content.kind === "group")} fallback={<p class="text-dim">No properties</p>}>
+            <Show
+              when={layer()?.mask && (doc()?.maskTargeted || layer()?.content.kind === "group")}
+              fallback={
+                <Show when={editor.type.target()} fallback={<p class="text-dim">No properties</p>}>
+                  <TypeProperties />
+                </Show>
+              }
+            >
               <div class="space-y-2" data-testid="mask-properties">
                 <div class="font-semibold">Layer Mask</div>
                 <Slider

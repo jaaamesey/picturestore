@@ -119,4 +119,29 @@ test.describe("Type panels, options bar and Type menu", () => {
     expect(p.wordSpacing).toEqual([0.8, 1.2, 1.33]);
     expect(p.hyphenation.minWord).toBe(7);
   });
+
+  test("Properties shows a type layer's settings, with a slider for each axis of a variable font", async ({ page }) => {
+    await newDocument(page, 400, 200);
+    await page.keyboard.press("t");
+    await page.getByTestId("type-size").fill("40");
+    await page.getByTestId("type-size").press("Enter");
+    await pointType(page, "Axes");
+    const props = page.getByTestId("type-properties");
+    await expect(props).toBeVisible();
+    const ink = () => page.evaluate(() => {
+      let n = 0;
+      for (let y = 60; y < 110; y++) for (let x = 30; x < 200; x++) if (window.__ps!.pixel!(x, y)[0] < 128) n++;
+      return n;
+    });
+    const before = await ink();
+    // Source Sans 3 is variable: Weight, from its Regular instance (400).
+    const weight = props.getByTestId("slider-weight").locator("input[type=number]");
+    await expect(weight).toHaveValue("400");
+    await weight.fill("900");
+    await weight.press("Enter");
+    await expectHistory(page, "Edit Type Layer");
+    await settled(page);
+    expect(((await content(page)).runs[0].style as unknown as { variations: Record<string, number> }).variations).toEqual({ wght: 900 });
+    expect(await ink()).toBeGreaterThan(before * 1.3);
+  });
 });
