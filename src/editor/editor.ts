@@ -16,6 +16,7 @@ import {
   redefineParagraphStyle,
   setCharStyle,
   setParagraphStyle,
+  styleAt,
   stylesIn,
   type CharStyle,
   type NamedStyle,
@@ -28,6 +29,8 @@ import {
 } from "../text/model";
 import { drawText, fontLibrary, setGlyphProtection } from "../text/engine";
 import { overflowLost, textOutlines, toParagraphText, toPointText, usesFauxBold } from "../text/convert";
+import { findAll, findFrom, replaceAll, wordsIn, type FindOptions } from "../text/search";
+import { textLayerName } from "../text/edit";
 import type { Motion } from "../text/edit";
 import { createEffect, createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
@@ -424,7 +427,10 @@ export function createEditor() {
 
     function context(s: SessionInternals): ToolContext {
       return {
-        doc: s.doc(),
+        // Live: a tool that commits and carries on (ending one type session to start another) sees what it committed.
+        get doc() {
+          return s.doc();
+        },
         view: s.view(),
         settings: snapshot(settings),
         foreground: foreground(),
@@ -1143,6 +1149,88 @@ export function createEditor() {
       },
     };
 
+    // --- Edit ▸ Find and Replace Text, Check Spelling ---
+
+    /** Type layers in search order (top of the Layers panel first), and where the search starts: the text being edited, else the active type layer. */
+    function searchPlaces(allLayers: boolean) {
+      const d = active()?.doc();
+      if (!d) return null;
+      const all = [...walk(d.layers)].filter((l) => l.content.kind === "text" && l.visible).reverse();
+      const t = textTarget();
+      const at = Math.max(0, all.findIndex((l) => l.id === t?.layerId));
+      const order = allLayers ? [...all.slice(at), ...all.slice(0, at)] : all.slice(at, at + 1);
+      return { order, from: t?.editing ? t.range : { start: 0, end: 0 }, current: t?.layerId };
+    }
+
+    /** Selects text in a type layer for editing (starting to edit it if needed). */
+    function selectText(layerId: string, r: TextRange) {
+      if (tools.type.session()?.layerId !== layerId) {
+        if (!currentTool.startsWith("type-")) setTool("type-horizontal");
+        typing((ctx) => tools.type.edit(ctx, layerId, "end"));
+      }
+      typing((ctx) => tools.type.select(ctx, r.start, r.end));
+    }
+
+    /**
+     * Walks text from the selection onwards (then the other type layers,
+     * then back round to where it started) for the first range `match`
+     * finds; selects it and returns the text found (null if none).
+     */
+    function seek(allLayers: boolean, match: (text: string, from: TextRange, c: TextContent) => TextRange | null): string | null {
+      const p = searchPlaces(allLayers);
+      if (!p) return null;
+      const found = (id: string, c: TextContent, m: TextRange) => (selectText(id, m), c.text.slice(m.start, m.end));
+      // The text being edited as it is now, else the layer's.
+      const contentOf = (l: Layer) => (tools.type.session()?.layerId === l.id ? tools.type.session()!.content : l.content) as TextContent;
+      for (const [i, l] of p.order.entries()) {
+        const c = contentOf(l);
+        const m = match(c.text, i === 0 && l.id === p.current ? p.from : { start: 0, end: 0 }, c);
+        if (m) return found(l.id, c, m);
+      }
+      // Wrapped back to the start of the first layer.
+      const first = p.order[0];
+      if (first && p.from.start > 0) {
+        const c = contentOf(first);
+        const m = match(c.text.slice(0, p.from.start), { start: 0, end: 0 }, c);
+        if (m) return found(first.id, c, m);
+      }
+      return null;
+    }
+
+    const searchApi = {
+      findNext: (query: string, o: FindOptions, allLayers: boolean) => seek(allLayers, (text, from) => findFrom(text, query, from, o)),
+      /** Change: replaces the selection if it's a match. */
+      change(query: string, replacement: string, o: FindOptions): boolean {
+        const t = textTarget();
+        if (!t?.editing || t.range.start === t.range.end) return false;
+        const m = findAll(t.content.text.slice(t.range.start, t.range.end), query, o);
+        if (m.length !== 1 || m[0].start !== 0 || m[0].end !== t.range.end - t.range.start) return false;
+        typing((ctx) => tools.type.input(ctx, replacement));
+        return true;
+      },
+      /** Change All: every match in the type layers (or just the active one), as one step; how many. */
+      changeAll(query: string, replacement: string, o: FindOptions, everyLayer: boolean): number {
+        if (tools.type.session()) typing((ctx) => tools.type.commit(ctx));
+        const t = textTarget();
+        let count = 0;
+        edit("Replace All", (d) => {
+          let out = d;
+          for (const l of allLayers(d.layers)) {
+            if (l.content.kind !== "text" || (!everyLayer && l.id !== t?.layerId)) continue;
+            const r = replaceAll(l.content, query, replacement, o);
+            if (!r.count) continue;
+            count += r.count;
+            out = updateLayer(out, l.id, { content: { ...r.content, stale: false }, pixels: renderDrawing(drawText(r.content), docRect(d)), name: textLayerName(r.content.text) });
+          }
+          return out;
+        });
+        return count;
+      },
+      /** Check Spelling: the next word (in a language `known` covers) that `ok` rejects, selected. */
+      nextMisspelling: (ok: (word: string) => boolean, known: (language: string) => boolean, allLayers: boolean) =>
+        seek(allLayers, (text, from, c) => wordsIn(text).find((w) => w.start >= from.end && known(styleAt(c, w.start + 1).style.language) && !ok(w.word)) ?? null),
+    };
+
     /** Type ▸ Convert Text Shape Type: point type to paragraph type and back (asking first if overflowing text would be lost). */
     async function convertTextShapeType() {
       if (tools.type.session()) typing((ctx) => tools.type.commit(ctx));
@@ -1223,6 +1311,7 @@ export function createEditor() {
         update: updateType,
         convertShapeType: convertTextShapeType,
         styles: textStylesApi,
+        search: searchApi,
         /** Type ▸ Warp Text's preview: the active type layer drawn with `warp` until it's set or the preview ends (undefined). */
         previewWarp(warp: TextWarp | null | undefined) {
           const s = active();

@@ -120,12 +120,42 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
 - **Image ▸ Adjustments**: the same 16 as destructive dialogs with live Preview (Ctrl+L Levels, Ctrl+M Curves,
   Ctrl+U Hue/Saturation, Ctrl+B Color Balance, Alt+Shift+Ctrl+B Black & White, Ctrl+I Invert), plus Desaturate
   (Shift+Ctrl+U) and Equalize; applied within the selection, on the GPU.
+- **Type**, following Photoshop's manual:
+  - Horizontal and Vertical Type tools and Type Mask tools (T, Shift+T cycles): click for point type, drag (or
+    Alt-click for exact sizes) for paragraph type in a box; click inside the active shape layer for area type,
+    on its outline for type on a path. New type starts as selected Lorem Ipsum (Preferences ▸ Type).
+  - On-canvas editing through the browser's own text input (IME, dead keys, emoji, clipboard with styles):
+    click/drag/double/triple-click selection, arrows (on screen, so bidi text moves as it reads), Ctrl+arrows,
+    Home/End, undo within the edit, Ctrl to transform the frame, drag box handles to reflow, Esc or Ctrl+Enter
+    to commit. Photoshop's formatting shortcuts (Ctrl+Shift+B/I/U/K/H, size and leading steps, Alt+arrows for
+    kerning and tracking…).
+  - Layout: HarfBuzz shaping (ligatures, kerning, all the Character panel's OpenType features, variable fonts),
+    bidi (Arabic and Hebrew, right-to-left paragraphs), Knuth–Plass Every-line and Single-line composers,
+    hyphenation in Photoshop's languages, justification with word/letter spacing and glyph scaling, indents,
+    paragraph spacing, leading, hanging punctuation, faux bold/italic, caps, small caps, super/subscript,
+    underline, strikethrough, baseline shift, scaling, tracking, metrics/optical/manual kerning, vertical type
+    with upright and Tate-Chu-Yoko runs.
+  - Character, Paragraph, Character Styles, Paragraph Styles and Glyphs panels (Window menu, or the options
+    bar's panel button), with Photoshop's panel menus; the Type tools' options bar; Properties for type layers
+    with a slider per variable-font axis; Justification and Hyphenation dialogs.
+  - Type menu: anti-aliasing (None/Sharp/Crisp/Strong/Smooth), orientation, Convert to Shape, Rasterize Type
+    Layer, Convert to Point/Paragraph Text, Warp Text (all 15 styles, live), Font Preview Size, Update All Text
+    Layers, Replace All Missing Fonts, Paste Lorem Ipsum, Load/Save Default Type Styles, Add/Manage Fonts.
+    Edit ▸ Find and Replace Text and Check Spelling.
+  - Type stays type: it's drawn live as vector art on the GPU, so Image Size and Free Transform (scale, rotate,
+    skew) keep it sharp and editable; Distort, Perspective and Warp ask to rasterize it, as Photoshop does.
+  - Fonts: Source Sans 3, Source Serif 4 and Source Code Pro (variable) and Noto Sans Arabic are bundled; add
+    TrueType/OpenType/WOFF files (kept in the browser's IndexedDB) or, where the browser allows, use the fonts
+    installed on the device. Missing fonts show in brackets with a warning; characters a font lacks come from
+    another (Missing Glyph Protection).
 - **History**: undo/redo with a clickable History panel, limited by History States (default 50) and Memory Usage.
-- **Panel dock**, as in Photoshop: drag its edge to widen it and the divider between two panels to trade height
-  between them (down to a minimum); double-click a panel's tab to minimize it to the tab, the others taking the
-  room. The layout is remembered. Panels are a list in one layout model, ready for moving them.
+- **Panel dock**, as in Photoshop: panels in tabbed groups (Character with Paragraph…), opened and closed from the
+  Window menu; drag the dock's edge to widen it and the divider between two groups to trade height between them
+  (down to a minimum); click a tab to bring it to the front, double-click to minimize its group. The layout is
+  remembered.
 - **Preferences** (Ctrl+K, Edit ▸ Preferences), organised as Photoshop's: General (reset), File Handling (recovery
-  interval) and Performance (Memory Usage, History States, display quality). Kept in the browser.
+  interval), Performance (Memory Usage, History States, display quality), Units & Rulers (type units), Type and
+  Guides, Grid & Slices. Kept in the browser.
 - **Running out of memory** is handled rather than fatal:
   - *RAM*: open documents and their history share the Memory Usage budget; past it the oldest history states
     are freed. If an allocation fails anyway, the operation is abandoned, undo history is cleared to free memory
@@ -139,8 +169,10 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
 - **PSD**: groups (nested, pass-through, open/closed), clipping, layer masks (with their default colour and
   enabled state) and all 16 adjustment layers round-trip with Photoshop's own settings records; smart objects
   round-trip as placed layers with their embedded files (and custom warps); solid-colour shape layers
-  round-trip as vector masks with fill and stroke.
-- **View**: zoom (Ctrl +/−/0/1, Ctrl/Alt+wheel about the cursor), pan (wheel, Space-drag, Hand tool).
+  round-trip as vector masks with fill and stroke; type layers round-trip as Photoshop type (see below).
+- **View**: zoom (Ctrl +/−/0/1, Ctrl/Alt+wheel about the cursor), pan (wheel, Space-drag, Hand tool). Within a GPU
+  memory budget the composite is kept at the finest resolution that fits (a whole 4K document at 100%), so zooming
+  and panning only redraw; huge canvases composite what's in view at the screen's resolution.
 - **Snapping, guides and grid**, following Photoshop's manual (and Photopea's behaviour for what it leaves
   open): with View ▸ Snap (Shift+Ctrl+;) on, dragged points and moving boxes are pulled, within 8 screen pixels,
   onto guides, the grid (its subdivisions), other layers' edges and centres, and the document's edges and centre
@@ -155,6 +187,28 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   Grid (Ctrl+'), Smart Guides; Extras (Ctrl+H) hides them all and selection edges. Guides belong to the document
   (undoable, saved in PSD, carried through Canvas/Image Size and crops); Preferences ▸ Guides, Grid & Slices sets
   colours, styles, Gridline Every (any unit) and Subdivisions.
+
+## Where type differs from Photoshop
+
+- **Warp Text**: Adobe doesn't publish its warp formulas; the 15 styles are designed to match their shapes and
+  parameters, not pixel for pixel.
+- **Fonts**: the default is Source Sans 3 (Myriad Pro's open sibling) rather than Myriad Pro. Adobe Fonts,
+  Match Font and live font preview on hover aren't available. WOFF2 files can't be added (no decoder yet).
+  Installed fonts need the Local Font Access API (Chromium browsers).
+- **Anti-aliasing**: Windows and Windows LCD draw as Sharp.
+- **Paths**: there's no Pen tool or Paths panel yet, so Create Work Path isn't available, path and area type are
+  made from shape layers, and path type can't yet be dragged along or flipped across its path.
+- **Styles**: styles are made from formatted text and redefined by merging overrides; there's no
+  attribute-by-attribute Style Options dialog.
+- **Spelling**: English only (Hunspell's en-US dictionary); words in other languages are skipped.
+- **World-Ready features**: East Asian composition (mojikumi, kinsoku sets, rubi, warichu) and Middle Eastern
+  kashida and diacritic positioning aren't implemented; their panel controls are always shown rather than
+  behind Text Engine Options.
+- **PSD**: ag-psd can't write type-on-a-path data, so Photoshop sees path type as point type and area type as
+  paragraph type in the shape's bounds; Photoshop's type data also lacks optical kerning, most OpenType features,
+  digits and variable-font axes. Our exact type, and the named styles, are kept in the file's XMP and used while
+  the layer still matches; type edited in Photoshop is read from Photoshop's data and shown with Photoshop's
+  pixels until it's edited here.
 
 ## Architecture
 
@@ -257,7 +311,8 @@ readback presentation path, enabled with `?present=readback`.
 ## Roadmap
 
 Roughly in Photopea's order: filters (GPU: blurs, sharpen, noise…, and Smart Filters), fill layers, multiple
-layer selection, mask density/feather, Blend If and Fill opacity, text, custom shapes and path editing, warp grids
+layer selection, mask density/feather, Blend If and Fill opacity, custom shapes and path editing (with the Pen
+tool: type on any path), warp grids
 beyond the single patch (splits, 3×3–5×5) and warp presets, snapping while transforming, more selection tools
 (polygonal lasso, quick select, feather/modify), brush presets and smoothing, and GPU painting for very large
 brushes.

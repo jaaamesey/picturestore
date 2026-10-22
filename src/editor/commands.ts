@@ -51,6 +51,8 @@ export interface Shell {
   addFonts(): void;
   /** Type ▸ Manage Fonts dialog. */
   manageFonts(): void;
+  /** Edit ▸ Find and Replace Text and Check Spelling dialogs. */
+  searchDialog(which: "find" | "spelling"): void;
   /** Paragraph panel ▸ Justification and Hyphenation dialogs. */
   paragraphDialog(which: "justification" | "hyphenation"): void;
 }
@@ -183,6 +185,8 @@ export const COMMANDS = {
     enabled: hasDoc,
   },
   "edit.clear": { label: "Clear", shortcuts: ["Delete", "Backspace"], run: (ed) => ed.clear(), enabled: hasDoc },
+  "edit.findReplace": { label: "Find and Replace Text…", run: (_, s) => s.searchDialog("find"), enabled: hasDoc },
+  "edit.checkSpelling": { label: "Check Spelling…", run: (_, s) => s.searchDialog("spelling"), enabled: hasDoc },
   "edit.preferences": { label: "General…", shortcuts: ["Mod+K"], run: (_, s) => s.preferences("general") },
   "edit.preferences.fileHandling": { label: "File Handling…", run: (_, s) => s.preferences("fileHandling") },
   "edit.preferences.performance": { label: "Performance…", run: (_, s) => s.preferences("performance") },

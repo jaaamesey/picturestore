@@ -45,6 +45,7 @@ import { GlyphsPanel } from "./type/GlyphsPanel";
 import { ParagraphPanel } from "./type/ParagraphPanel";
 import { WarpTextDialog } from "./type/WarpTextDialog";
 import { FontsDialog } from "./type/FontsDialog";
+import { FindReplaceDialog, SpellingDialog } from "./type/SearchDialogs";
 import { HyphenationDialog, JustificationDialog } from "./type/ParagraphDialogs";
 import { formatTypeLength, parseTypeLength } from "../text/units";
 import { Popover, dismissable } from "./Popover";
@@ -230,6 +231,7 @@ export function App() {
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
   const [newGuideFor, setNewGuideFor] = createSignal<DocumentSession | null>(null);
   const [managingFonts, setManagingFonts] = createSignal(false);
+  const [searching, setSearching] = createSignal<"find" | "spelling" | null>(null);
   const [paragraphDialog, setParagraphDialog] = createSignal<{ which: "justification" | "hyphenation"; initial: ParagraphStyle } | null>(null);
   const addFonts = async () => {
     const files = await pickFontFiles();
@@ -327,6 +329,7 @@ export function App() {
     togglePanel: (id) => panels.toggle(id),
     addFonts: () => void addFonts(),
     manageFonts: () => setManagingFonts(true),
+    searchDialog: (which) => setSearching(which),
     // Shows the first selected paragraph's settings; OK applies them all to every selected paragraph.
     paragraphDialog: (which) => setParagraphDialog({ which, initial: editor.type.paragraphStyles()[0] }),
     panelOpen: (id) => panels.isOpen(id),
@@ -565,6 +568,12 @@ export function App() {
             />
           );
         }}
+      </Show>
+      <Show when={searching() === "find"}>
+        <FindReplaceDialog onClose={() => setSearching(null)} />
+      </Show>
+      <Show when={searching() === "spelling"}>
+        <SpellingDialog onClose={() => setSearching(null)} />
       </Show>
       <Show when={managingFonts()}>
         <FontsDialog onAdd={() => void addFonts()} onUseInstalled={useInstalledFonts} onClose={() => setManagingFonts(false)} />
