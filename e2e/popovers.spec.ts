@@ -1,9 +1,9 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { newDocument } from "./helpers";
 
-/** Presses somewhere neutral: the Layers panel's title (above any menu opened from a layer). */
+/** Presses somewhere neutral: the History panel's tab, atop the dock (above any menu opened from a layer). */
 const pressOutside = async (page: Page) => {
-  const header = (await page.getByTestId("layers-panel").locator("header").boundingBox())!;
+  const header = (await page.getByTestId("history-panel").locator("header").boundingBox())!;
   await page.mouse.click(header.x + header.width - 20, header.y + header.height / 2);
 };
 

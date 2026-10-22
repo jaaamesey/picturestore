@@ -5,9 +5,7 @@ export function HistoryPanel() {
   const { editor } = useContext(AppContext);
   const history = () => editor.active()?.history();
   return (
-    <section class="flex h-48 shrink-0 flex-col border-b border-line" data-testid="history-panel">
-      <header class="border-b border-line bg-panel-2 px-2 py-1 font-semibold">History</header>
-      <div class="min-h-0 flex-1 overflow-y-auto" role="listbox" aria-label="History">
+    <div class="min-h-0 flex-1 overflow-y-auto" role="listbox" aria-label="History">
         <For each={history()?.entries ?? []}>
           {(entry, i) => (
             <button
@@ -26,7 +24,6 @@ export function HistoryPanel() {
             </button>
           )}
         </For>
-      </div>
-    </section>
+    </div>
   );
 }

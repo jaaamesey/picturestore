@@ -35,9 +35,7 @@ export function PropertiesPanel() {
     return cache.h;
   });
   return (
-    <section class="flex max-h-[45%] min-h-0 flex-col border-b border-line" data-testid="properties-panel">
-      <header class="border-b border-line bg-panel-2 px-2 py-1 font-semibold">Properties</header>
-      <div class="min-h-0 overflow-y-auto p-2">
+    <div class="min-h-0 flex-1 overflow-y-auto p-2">
         <Show
           when={adjustment()}
           fallback={
@@ -73,8 +71,7 @@ export function PropertiesPanel() {
             </div>
           )}
         </Show>
-      </div>
-    </section>
+    </div>
   );
 }
 

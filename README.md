@@ -121,6 +121,9 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   Ctrl+U Hue/Saturation, Ctrl+B Color Balance, Alt+Shift+Ctrl+B Black & White, Ctrl+I Invert), plus Desaturate
   (Shift+Ctrl+U) and Equalize; applied within the selection, on the GPU.
 - **History**: undo/redo with a clickable History panel, limited by History States (default 50) and Memory Usage.
+- **Panel dock**, as in Photoshop: drag its edge to widen it and the divider between two panels to trade height
+  between them (down to a minimum); double-click a panel's tab to minimize it to the tab, the others taking the
+  room. The layout is remembered. Panels are a list in one layout model, ready for moving them.
 - **Preferences** (Ctrl+K, Edit ▸ Preferences), organised as Photoshop's: General (reset), File Handling (recovery
   interval) and Performance (Memory Usage, History States, display quality). Kept in the browser.
 - **Running out of memory** is handled rather than fatal:

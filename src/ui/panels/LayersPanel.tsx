@@ -286,8 +286,7 @@ export function LayersPanel() {
   });
 
   return (
-    <section class="flex min-h-0 flex-1 flex-col" data-testid="layers-panel">
-      <header class="border-b border-line bg-panel-2 px-2 py-1 font-semibold">Layers</header>
+    <>
       <Show when={current()}>
         {(l) => (
           <div class="flex items-center gap-2 border-b border-line p-1.5">
@@ -357,6 +356,6 @@ export function LayersPanel() {
         <IconButton icon="merge" title="Merge down" disabled={!doc()} onClick={() => editor.mergeDown()} />
         <IconButton icon="trash" title="Delete layer" testId="delete-layer" disabled={!canDelete()} onClick={() => shell.deleteLayer(true)} />
       </footer>
-    </section>
+    </>
   );
 }

@@ -40,6 +40,7 @@ import { MenuBar, MenuList, type MenuItem } from "./MenuBar";
 import { Popover, dismissable } from "./Popover";
 import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
+import { Dock } from "./Dock";
 import { HistoryPanel } from "./panels/HistoryPanel";
 import { LayersPanel } from "./panels/LayersPanel";
 import { PropertiesPanel } from "./panels/PropertiesPanel";
@@ -444,11 +445,7 @@ export function App() {
               </Show>
             </div>
           </main>
-          <aside class="flex w-64 flex-col border-l border-line bg-panel">
-            <HistoryPanel />
-            <PropertiesPanel />
-            <LayersPanel />
-          </aside>
+          <Dock panels={{ history: () => <HistoryPanel />, properties: () => <PropertiesPanel />, layers: () => <LayersPanel /> }} />
         </div>
       </div>
       <Show when={showNew()}>
