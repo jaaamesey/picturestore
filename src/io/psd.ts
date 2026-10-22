@@ -22,6 +22,7 @@ import { documentPath, type Knot, type ShapeStyle } from "../core/shape";
 import { isSmooth, type VectorPath } from "../core/path";
 import { NO_PIXELS, contentBounds, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
 import { isIdentityPatch, type Patch, type Quad } from "../core/warp";
+import { readPathResources, writePathResources } from "./psdPaths";
 
 // ag-psd allocates pixel buffers through these hooks. Plain buffers avoid canvas
 // premultiplication losses and work outside the browser (tests, workers).
@@ -221,7 +222,19 @@ export async function readPsdDocument(buffer: ArrayBuffer | Uint8Array, decode: 
   const stored = psd.imageResources?.gridAndGuidesInformation?.guides ?? [];
   const guides = stored.length ? stored.map((g) => ({ orientation: g.direction, position: g.location })) : undefined;
   const textStyles = typeStylesFromXmp(psd.imageResources?.xmpMetadata);
-  return { width: psd.width, height: psd.height, layers, activeLayerId: layers[layers.length - 1].id, selection: null, resolution, guides, ...(textStyles && { textStyles }) };
+  const paths = readPathResources(buffer);
+  return {
+    width: psd.width,
+    height: psd.height,
+    layers,
+    activeLayerId: layers[layers.length - 1].id,
+    selection: null,
+    resolution,
+    guides,
+    ...(textStyles && { textStyles }),
+    ...(paths.saved.length && { paths: paths.saved }),
+    ...(paths.work && { workPath: paths.work }),
+  };
 }
 
 const EXT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
@@ -354,5 +367,6 @@ export function writePsdDocument(doc: Doc): ArrayBuffer {
   const guides = (doc.guides ?? []).filter((g) => g.position >= 0).map((g) => ({ location: Math.round(g.position * 32) / 32, direction: g.orientation }));
   if (guides.length) psd.imageResources.gridAndGuidesInformation = { guides };
   if (linked.typeLayers.length || doc.textStyles?.character.length || doc.textStyles?.paragraph.length) psd.imageResources.xmpMetadata = typeXmp(linked.typeLayers, doc.textStyles);
-  return writePsd(psd, { generateThumbnail: false, noBackground: true });
+  const bytes = writePsd(psd, { generateThumbnail: false, noBackground: true });
+  return writePathResources(bytes, doc.width, doc.height, doc.paths ?? [], doc.workPath);
 }

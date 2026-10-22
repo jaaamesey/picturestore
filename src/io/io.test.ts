@@ -14,6 +14,7 @@ import { quadOf } from "../core/warp";
 import { readPsdDocument, writePsdDocument } from "./psd";
 
 const cpu = CPU_RASTERIZERS;
+const corner = (x: number, y: number) => ({ anchor: { x, y }, in: { x, y }, out: { x, y }, smooth: false });
 
 function sampleDoc(): Doc {
   const d = createDocument({ width: 300, height: 200, background: { r: 10, g: 20, b: 30 } });
@@ -145,5 +146,43 @@ describe("PSD", () => {
     const b = flatten({ ...doc, layers: [{ ...doc.layers[1], pixels: again }] });
     for (let i = 0; i < a.length; i++) maxDiff = Math.max(maxDiff, Math.abs(a[i] - b[i]));
     expect(maxDiff).toBeLessThanOrEqual(2);
+  });
+
+  it("keeps the work path and saved paths in the Paths resources, and Photoshop's own tools can still read the file", async () => {
+    const square = (x: number, y: number, s: number, op: "combine" | "subtract" = "combine") => ({
+      closed: true,
+      op,
+      knots: [corner(x, y), corner(x + s, y), corner(x + s, y + s), corner(x, y + s)],
+    });
+    const curve = {
+      closed: false,
+      op: "combine" as const,
+      knots: [{ anchor: { x: 10, y: 100 }, in: { x: 10, y: 100 }, out: { x: 40, y: 20 }, smooth: false }, { anchor: { x: 120, y: 100 }, in: { x: 90, y: 180 }, out: { x: 150, y: 20 }, smooth: true }],
+    };
+    const doc: Doc = {
+      ...sampleDoc(),
+      paths: [
+        { id: "a", name: "Outline", path: { subpaths: [square(20, 20, 100), square(50, 50, 30, "subtract")] } },
+        { id: "b", name: "Curve ünï", path: { subpaths: [curve] } },
+      ],
+      workPath: { subpaths: [square(5, 5, 10)] },
+    };
+    const bytes = writePsdDocument(doc);
+    // Still a valid PSD for other readers.
+    expect(readPsd(bytes, { useImageData: true }).children!.map((c) => c.name)).toEqual(["Background", "Circle"]);
+    const back = await readPsdDocument(new Uint8Array(bytes));
+    expect(back.paths!.map((p) => p.name)).toEqual(["Outline", "Curve ünï"]);
+    const [outline, open] = back.paths!;
+    expect(outline.path.subpaths.map((s) => [s.closed, s.op, s.knots.length])).toEqual([[true, "combine", 4], [true, "subtract", 4]]);
+    expect(outline.path.subpaths[0].knots[1].anchor.x).toBeCloseTo(120, 3);
+    expect(open.path.subpaths[0].closed).toBe(false);
+    expect(open.path.subpaths[0].knots[1].out.x).toBeCloseTo(150, 3);
+    expect(open.path.subpaths[0].knots[1].smooth).toBe(true);
+    expect(open.path.subpaths[0].knots[0].smooth).toBe(false);
+    expect(back.workPath!.subpaths).toHaveLength(1);
+    // A document without paths has no resources for them.
+    const none = await readPsdDocument(new Uint8Array(writePsdDocument(sampleDoc())));
+    expect(none.paths).toBeUndefined();
+    expect(none.workPath).toBeUndefined();
   });
 });
