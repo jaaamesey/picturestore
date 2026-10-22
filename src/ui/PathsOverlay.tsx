@@ -3,7 +3,8 @@ import { toHex } from "../core/color";
 import { activeLayer, type Doc } from "../core/document";
 import type { Vec2 } from "../core/geometry";
 import { relaxKnots } from "../core/curvature";
-import { activeEndpoint, hasHandles, reverseKnots, sameRef, type Knot, type Subpath } from "../core/path";
+import { subpathData } from "../core/pathSvg";
+import { activeEndpoint, hasHandles, reverseKnots, sameRef, type Knot } from "../core/path";
 import { effectiveTarget, pathOf, validRefs } from "../editor/tools/pathEdit";
 import { docToScreen } from "../editor/view";
 import type { PathDisplay, PathState, PathToolId, ToolEvent, ToolId } from "../editor/types";
@@ -11,20 +12,6 @@ import type { View } from "../gpu/renderer";
 
 const PATH_TOOLS: readonly ToolId[] = ["pen", "freeform-pen", "curvature-pen", "add-anchor", "delete-anchor", "convert-point", "path-select", "direct-select"] satisfies readonly PathToolId[];
 export const isPathTool = (t: ToolId) => PATH_TOOLS.includes(t);
-
-/** An SVG path through a component's knots, in screen space. */
-function outline(s: Subpath, at: (p: Vec2) => Vec2): string {
-  const n = s.knots.length;
-  if (!n) return "";
-  const pt = (p: Vec2) => `${at(p).x},${at(p).y}`;
-  let d = `M${pt(s.knots[0].anchor)}`;
-  const last = s.closed ? n : n - 1;
-  for (let i = 0; i < last; i++) {
-    const a = s.knots[i], b = s.knots[(i + 1) % n];
-    d += ` C${pt(a.out)} ${pt(b.in)} ${pt(b.anchor)}`;
-  }
-  return s.closed && n > 1 ? `${d}Z` : d;
-}
 
 /**
  * The target path over the canvas, as Photoshop draws it: a line of the
@@ -91,7 +78,7 @@ export function PathsOverlay(props: {
     <Show when={path()}>
       {(p) => (
         <g data-testid="path-overlay" data-tool={props.tool} fill="none" stroke={color()} stroke-width={props.display.thickness} stroke-linejoin="round">
-          <For each={p().subpaths}>{(s) => <path d={outline(s, at)} data-testid="path-component" />}</For>
+          <For each={p().subpaths}>{(s) => <path d={subpathData(s, at)} data-testid="path-component" />}</For>
           <Show when={rubber()}>{(d) => <path d={d()} stroke-dasharray="4 3" data-testid="rubber-band" />}</Show>
           <Show when={anchors()}>
             <For each={withHandles()}>

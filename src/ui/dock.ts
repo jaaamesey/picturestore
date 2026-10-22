@@ -32,6 +32,7 @@ export const PANEL_TITLES: Record<PanelId, string> = {
   history: "History",
   properties: "Properties",
   layers: "Layers",
+  paths: "Paths",
   character: "Character",
   paragraph: "Paragraph",
   characterStyles: "Character Styles",
@@ -40,13 +41,13 @@ export const PANEL_TITLES: Record<PanelId, string> = {
 };
 
 /** Photoshop's groupings, for panels opened from the Window menu. */
-const USUAL_GROUPS: readonly (readonly PanelId[])[] = [["history"], ["properties"], ["layers"], ["character", "paragraph"], ["characterStyles", "paragraphStyles"], ["glyphs"]];
+const USUAL_GROUPS: readonly (readonly PanelId[])[] = [["history"], ["properties"], ["layers", "paths"], ["character", "paragraph"], ["characterStyles", "paragraphStyles"], ["glyphs"]];
 
 const group = (tabs: readonly PanelId[], size: number, active = tabs[0]): DockGroup => ({ id: tabs[0], tabs, active, size, minimized: false });
 
 export const DEFAULT_DOCK: DockLayout = {
   width: 256,
-  groups: [group(["history"], 192), group(["properties"], 240), group(["layers"], 420)],
+  groups: [group(["history"], 192), group(["properties"], 240), group(["layers", "paths"], 420, "layers")],
 };
 
 export const DOCK_MIN_WIDTH = 200;

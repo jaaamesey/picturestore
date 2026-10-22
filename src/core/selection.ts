@@ -236,3 +236,46 @@ export function translateMask(m: Mask, dx: number, dy: number): Mask | null {
   }
   return toMask(out, clipped, m.width, m.height);
 }
+
+/** One pass of a box blur of half-width `r` along rows (`stride` 1) or columns (`stride` = row length), zero beyond the edges. */
+function boxBlur(src: Float32Array, dst: Float32Array, w: number, h: number, r: number, horizontal: boolean) {
+  const lines = horizontal ? h : w, len = horizontal ? w : h;
+  const step = horizontal ? 1 : w, lineStep = horizontal ? w : 1;
+  const norm = 1 / (2 * r + 1);
+  for (let l = 0; l < lines; l++) {
+    const base = l * lineStep;
+    let sum = 0;
+    for (let i = 0; i <= Math.min(r, len - 1); i++) sum += src[base + i * step];
+    for (let i = 0; i < len; i++) {
+      dst[base + i * step] = sum * norm;
+      const add = i + r + 1, drop = i - r;
+      if (add < len) sum += src[base + add * step];
+      if (drop >= 0) sum -= src[base + drop * step];
+    }
+  }
+}
+
+/**
+ * Feathers a selection's edge: the mask blurred with a Gaussian of standard
+ * deviation `radius / 2` (three box blurs approximate it), so the edge fades
+ * over about `radius` pixels either side. The selection grows to hold it.
+ */
+export function featherMask(m: Mask | null, radius: number): Mask | null {
+  if (!m || radius <= 0) return m;
+  const sigma = radius / 2;
+  // Three boxes of this half-width have the Gaussian's variance.
+  const r = Math.max(1, Math.round((Math.sqrt((12 * sigma * sigma) / 3 + 1) - 1) / 2));
+  const grow = 3 * r + 1;
+  const region = intersect(rect(m.bounds.x - grow, m.bounds.y - grow, m.bounds.w + 2 * grow, m.bounds.h + 2 * grow), docRect(m.width, m.height));
+  const { w, h } = region;
+  const a = new Float32Array(w * h), b = new Float32Array(w * h);
+  const bytes = blit(m, region);
+  for (let i = 0; i < a.length; i++) a[i] = bytes[i];
+  for (let pass = 0; pass < 3; pass++) {
+    boxBlur(a, b, w, h, r, true);
+    boxBlur(b, a, w, h, r, false);
+  }
+  const out = new Uint8Array(w * h);
+  for (let i = 0; i < out.length; i++) out[i] = Math.round(a[i]);
+  return toMask(out, region, m.width, m.height);
+}

@@ -53,6 +53,10 @@ export interface Shell {
   manageFonts(): void;
   /** Edit ▸ Find and Replace Text and Check Spelling dialogs. */
   searchDialog(which: "find" | "spelling"): void;
+  /** The Paths panel's dialogs (Make Selection, Make Work Path, Fill Path, Stroke Path, Panel Options). */
+  pathDialog(kind: "makeSelection" | "makeWorkPath" | "fillPath" | "strokePath" | "panelOptions"): void;
+  /** Runs a path operation with the settings it was last given. */
+  pathOperation(kind: "makeSelection" | "makeWorkPath" | "fillPath" | "strokePath"): void;
   /** Paragraph panel ▸ Justification and Hyphenation dialogs. */
   paragraphDialog(which: "justification" | "hyphenation"): void;
 }
@@ -273,6 +277,30 @@ export const COMMANDS = {
     run: (ed) => ed.rasterizeLayer(),
     enabled: (ed) => layerKind(ed) === "smart" || layerKind(ed) === "shape" || layerKind(ed) === "text",
   },
+  "paths.new": { label: "New Path", run: (ed) => ed.paths.newPath(), enabled: hasDoc },
+  "paths.save": { label: "Save Path", run: (ed) => ed.paths.savePath(), enabled: (ed) => !!ed.active()?.doc().workPath },
+  "paths.duplicate": {
+    label: "Duplicate Path",
+    run: (ed) => {
+      const t = ed.paths.current()?.target;
+      if (t?.kind === "saved") ed.paths.duplicate(t.id);
+    },
+    enabled: (ed) => ed.paths.current()?.target.kind === "saved",
+  },
+  "paths.delete": {
+    label: "Delete Path",
+    run: (ed) => {
+      const t = ed.paths.current()?.target;
+      if (t) ed.paths.remove(t);
+    },
+    enabled: (ed) => (ed.paths.current()?.target.kind ?? "layer") !== "layer",
+  },
+  "paths.makeWorkPath": { label: "Make Work Path…", run: (_, s) => s.pathDialog("makeWorkPath"), enabled: hasSelection },
+  "paths.makeSelection": { label: "Make Selection…", run: (_, s) => s.pathDialog("makeSelection"), enabled: (ed) => !!ed.paths.current() },
+  "paths.loadAsSelection": { label: "Load Path as Selection", shortcuts: ["Mod+Enter"], run: (_, s) => s.pathOperation("makeSelection"), enabled: (ed) => !!ed.paths.current() },
+  "paths.fill": { label: "Fill Path…", run: (_, s) => s.pathDialog("fillPath"), enabled: (ed) => !!ed.paths.current() },
+  "paths.stroke": { label: "Stroke Path…", run: (_, s) => s.pathDialog("strokePath"), enabled: (ed) => !!ed.paths.current() },
+  "paths.panelOptions": { label: "Panel Options…", run: (_, s) => s.pathDialog("panelOptions") },
   ...TYPE_COMMANDS,
 
   // Select

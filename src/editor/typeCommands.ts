@@ -9,7 +9,7 @@ import { loadDefaultStyles, saveDefaultStyles } from "./defaultStyles";
  * panels' menus, as in Photoshop.
  */
 
-export type PanelName = "history" | "properties" | "layers" | "character" | "paragraph" | "characterStyles" | "paragraphStyles" | "glyphs";
+export type PanelName = "history" | "properties" | "layers" | "paths" | "character" | "paragraph" | "characterStyles" | "paragraphStyles" | "glyphs";
 
 const panel = (label: string, id: PanelName): CommandSpec => ({
   label,
@@ -73,6 +73,7 @@ export const TYPE_COMMANDS = {
   "window.glyphs": panel("Glyphs", "glyphs"),
   "window.history": panel("History", "history"),
   "window.layers": panel("Layers", "layers"),
+  "window.paths": panel("Paths", "paths"),
   "window.properties": panel("Properties", "properties"),
 
   "type.panels.character": panel("Character Panel", "character"),

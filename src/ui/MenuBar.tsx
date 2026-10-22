@@ -84,6 +84,21 @@ export const SELECTION_MENU: readonly MenuItem[] = [
   "edit.freeTransform",
 ];
 
+/** The Paths panel's menu. */
+export const PATHS_MENU: readonly MenuItem[] = [
+  "paths.new",
+  "paths.duplicate",
+  "paths.delete",
+  "-",
+  "paths.makeWorkPath",
+  "paths.makeSelection",
+  "paths.fill",
+  "paths.stroke",
+  "-",
+  "paths.save",
+  "paths.panelOptions",
+];
+
 /** Window ▸ Character panel's menu. */
 export const CHARACTER_MENU: readonly MenuItem[] = [
   "type.orientation.horizontal",
@@ -242,7 +257,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "view.newGuide",
     ],
   },
-  { title: "Window", items: ["window.character", "window.characterStyles", "window.glyphs", "window.history", "window.layers", "window.paragraph", "window.paragraphStyles", "window.properties"] },
+  { title: "Window", items: ["window.character", "window.characterStyles", "window.glyphs", "window.history", "window.layers", "window.paragraph", "window.paragraphStyles", "window.paths", "window.properties"] },
 ];
 
 /** A dropdown list of commands; used by the menu bar and context menus. */

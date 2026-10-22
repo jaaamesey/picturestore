@@ -38,7 +38,7 @@ import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
 import { Button } from "./controls";
 import { Icon } from "./icons";
-import { CHARACTER_MENU, CHARACTER_STYLES_MENU, MenuBar, MenuList, PARAGRAPH_MENU, PARAGRAPH_STYLES_MENU, type MenuItem } from "./MenuBar";
+import { CHARACTER_MENU, CHARACTER_STYLES_MENU, MenuBar, MenuList, PARAGRAPH_MENU, PATHS_MENU, PARAGRAPH_STYLES_MENU, type MenuItem } from "./MenuBar";
 import { StylesPanel } from "./type/StylesPanel";
 import { CharacterPanel } from "./type/CharacterPanel";
 import { GlyphsPanel } from "./type/GlyphsPanel";
@@ -53,6 +53,8 @@ import { NewDocumentDialog } from "./NewDocumentDialog";
 import { OptionsBar } from "./OptionsBar";
 import { Dock, panels } from "./Dock";
 import { HistoryPanel } from "./panels/HistoryPanel";
+import { PathsPanel } from "./panels/PathsPanel";
+import { PathDialog, runPathOperation, type PathDialogKind } from "./PathDialogs";
 import { LayersPanel } from "./panels/LayersPanel";
 import { PropertiesPanel } from "./panels/PropertiesPanel";
 import { TEST_CORE } from "./testHooks";
@@ -228,6 +230,7 @@ export function App() {
   editor.onAskBoxSize(() => new Promise((resolve) => setBoxSizeAsk(() => resolve)));
   const [prefsPane, setPrefsPane] = createSignal<PreferencesPane | null>(null);
   const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
+  const [pathDialog, setPathDialog] = createSignal<PathDialogKind | null>(null);
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
   const [newGuideFor, setNewGuideFor] = createSignal<DocumentSession | null>(null);
   const [managingFonts, setManagingFonts] = createSignal(false);
@@ -332,6 +335,8 @@ export function App() {
     searchDialog: (which) => setSearching(which),
     // Shows the first selected paragraph's settings; OK applies them all to every selected paragraph.
     paragraphDialog: (which) => setParagraphDialog({ which, initial: editor.type.paragraphStyles()[0] }),
+    pathDialog: (kind) => setPathDialog(kind),
+    pathOperation: (kind) => runPathOperation[kind](editor),
     panelOpen: (id) => panels.isOpen(id),
     togglePanelGroup: (ids) => panels.toggleGroup(ids),
     warpText() {
@@ -381,7 +386,7 @@ export function App() {
     const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor() || newGuideFor() || boxSizeAsk()) return;
+      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || pathDialog() || imageSizeFor() || newGuideFor() || boxSizeAsk()) return;
       // The current tool gets Delete, the arrows, Enter and Escape before commands do (the path tools use them).
       if (editor.toolKeyDown({ key: e.key, shift: e.shiftKey, alt: e.altKey, mod: e.ctrlKey || e.metaKey })) return e.preventDefault();
       const id = findCommand(e);
@@ -496,13 +501,14 @@ export function App() {
               history: () => <HistoryPanel />,
               properties: () => <PropertiesPanel />,
               layers: () => <LayersPanel />,
+              paths: () => <PathsPanel onDialog={setPathDialog} />,
               character: () => <CharacterPanel />,
               paragraph: () => <ParagraphPanel />,
               glyphs: () => <GlyphsPanel />,
               characterStyles: () => <StylesPanel kind="character" />,
               paragraphStyles: () => <StylesPanel kind="paragraph" />,
             }}
-            menus={{ character: CHARACTER_MENU, paragraph: PARAGRAPH_MENU, characterStyles: CHARACTER_STYLES_MENU, paragraphStyles: PARAGRAPH_STYLES_MENU }}
+            menus={{ paths: PATHS_MENU, character: CHARACTER_MENU, paragraph: PARAGRAPH_MENU, characterStyles: CHARACTER_STYLES_MENU, paragraphStyles: PARAGRAPH_STYLES_MENU }}
           />
         </div>
       </div>
@@ -538,6 +544,9 @@ export function App() {
             onClose={() => setCanvasSize(null)}
           />
         )}
+      </Show>
+      <Show when={pathDialog()} keyed>
+        {(kind) => <PathDialog kind={kind} editor={editor} hasSelection={!!editor.active()?.doc().selection} onClose={() => setPathDialog(null)} />}
       </Show>
       <Show when={boxSizeAsk()}>
         {(answer) => (

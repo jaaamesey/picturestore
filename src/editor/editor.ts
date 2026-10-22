@@ -36,7 +36,11 @@ import { createEffect, createMemo, createRoot, createSignal, createStore, snapsh
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
 import { pathShape, placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
 import { affine3, canvasOffset, imageSize, resizeCanvas, setResolution, transformDocument, type Anchor, type ImageSizeOptions } from "../core/documentTransform";
-import { DEFAULT_BRUSH } from "../core/brush";
+import { DEFAULT_BRUSH, beginStroke as beginBrushStroke } from "../core/brush";
+import { flattenSubpath } from "../core/path";
+import { addPath, deleteSavedPath, duplicateSavedPath, renamePath, reorderSavedPath, saveWorkPath, selectionFromPath, workPathFromSelection, type MakeSelectionOptions } from "../core/paths";
+import { pathToMask } from "../core/pathMask";
+import { effectiveTarget, pathOf } from "./tools/pathEdit";
 import { BLACK, WHITE, type RGB } from "../core/color";
 import {
   activeLayer,
@@ -112,7 +116,7 @@ import { createSnapper, guidePosition } from "./snapping";
 import { activeSnapTo, loadViewOptions, saveViewOptions, shown, type ViewOptions } from "./viewOptions";
 import type { SmartGuide } from "../core/snap";
 import type { ShapeOptionsPatch, ShapeStroke } from "./types";
-import { NO_PATH_STATE, type Overlay, type PathState, type ShapeSettings, type ShapeToolId, type ToolContext, type ToolEvent, type ToolId, type ToolKey, type ToolKeyDown, type ToolSettings, type Writable } from "./types";
+import { NO_PATH_STATE, type Overlay, type PathState, type PathTarget, type ShapeSettings, type ShapeToolId, type ToolContext, type ToolEvent, type ToolId, type ToolKey, type ToolKeyDown, type ToolSettings, type Writable } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
 import { loadDefaultStyles } from "./defaultStyles";
 import { fitView, followRemap, nextZoomStep, placeAt, prevZoomStep, screenToDoc, zoomAt } from "./view";
@@ -736,6 +740,15 @@ export function createEditor() {
       });
 
     /** A pixel edit of the edit target (the active layer, or its mask); smart objects and shapes must be rasterized first. */
+    /** The path the Paths panel's operations act on. */
+    function currentPath() {
+      const s = active();
+      const d = s?.doc();
+      const t = d && s && effectiveTarget(d, s.paths());
+      const path = t && d ? pathOf(d, t) : null;
+      return t && path ? { target: t, path } : null;
+    }
+
     function pixelEdit(label: string, fn: (d: Doc, t: EditTarget) => Doc) {
       const s = active();
       if (!s || !editableTarget(s, () => pixelEdit(label, fn))) return;
@@ -1553,6 +1566,95 @@ export function createEditor() {
       /** Numeric entry for an active Free Transform. */
       setTransform: (state: TransformState) => withTool((ctx) => tools.transform.setState(ctx, state)),
       setTransformMode: (mode: TransformMode) => withTool((ctx) => tools.transform.setMode(ctx, mode)),
+      /** The Paths panel's operations (see core/paths.ts); the path acted on is the panel's selected one. */
+      paths: {
+        /** The target path now and where it is. */
+        current: currentPath,
+        select: (target: PathTarget | null) => active()?.setPaths(() => ({ target, selected: [] })),
+        newPath: whenIdle(() => {
+          const s = active();
+          if (!s) return;
+          cancelTool();
+          const r = addPath(s.doc());
+          commitTo(s, "New Path", r.doc);
+          s.setPaths(() => ({ target: { kind: "saved", id: r.id }, selected: [] }));
+        }),
+        /** Save Path: the work path is kept under a name. */
+        savePath: whenIdle((name?: string) => {
+          const s = active();
+          if (!s) return;
+          cancelTool();
+          const r = saveWorkPath(s.doc(), name);
+          if (!r) return;
+          commitTo(s, "Save Path", r.doc);
+          s.setPaths(() => ({ target: { kind: "saved", id: r.id }, selected: [] }));
+        }),
+        rename: whenIdle((id: string, name: string) => edit("Rename Path", (d) => (name.trim() ? renamePath(d, id, name.trim()) : d))),
+        remove: whenIdle((target: PathTarget) => {
+          const s = active();
+          if (!s || target.kind === "layer") return;
+          edit("Delete Path", (d) => (target.kind === "work" ? { ...d, workPath: null } : deleteSavedPath(d, target.id)));
+          s.setPaths((st) => (st.target?.kind === target.kind && (target.kind === "work" || (st.target as { id?: string }).id === (target as { id: string }).id) ? { target: null, selected: [] } : st));
+        }),
+        duplicate: whenIdle((id: string) => {
+          const s = active();
+          const r = s && duplicateSavedPath(s.doc(), id);
+          if (!s || !r) return;
+          cancelTool();
+          commitTo(s, "Duplicate Path", r.doc);
+          s.setPaths(() => ({ target: { kind: "saved", id: r.id }, selected: [] }));
+        }),
+        reorder: whenIdle((id: string, to: number) => edit("Arrange Paths", (d) => reorderSavedPath(d, id, to))),
+        /** Make Selection / Load Path as Selection. */
+        makeSelection: whenIdle((o: MakeSelectionOptions) => {
+          const cur = currentPath();
+          if (cur) edit("Make Selection", (d) => selectionFromPath(d, cur.path, o));
+        }),
+        /** Make Work Path: from the selection; the work path becomes the target. */
+        makeWorkPath: whenIdle((tolerance: number) => {
+          const s = active();
+          if (!s) return;
+          cancelTool();
+          const d = workPathFromSelection(s.doc(), tolerance);
+          if (!d) return reportError("Could not make a work path because nothing is selected.");
+          commitTo(s, "Make Work Path", d);
+          s.setPaths(() => ({ target: { kind: "work" }, selected: [] }));
+        }),
+        /** Fill Path: the area the path covers, with a colour, at an opacity. */
+        fill: whenIdle((o: { color: RGB; opacity: number; feather: number; antiAlias: boolean }) => {
+          const cur = currentPath();
+          if (!cur) return;
+          pixelEdit("Fill Path", (d, t) => {
+            const mask = pathToMask(cur.path, d.width, d.height, o);
+            // A selection limits where the fill goes.
+            const limited = mask && d.selection ? combine(mask, d.selection, "intersect") : mask;
+            return limited ? withTargetPixels(d, t, fillPixels(t.pixels, limited.bounds, t.mask ? maskTone(o.color) : o.color, limited, o.opacity)) : d;
+          });
+        }),
+        /** Stroke Path: the Brush (or Eraser) tool's current settings, stamped along the path. */
+        stroke: whenIdle((tool: "brush" | "eraser") => {
+          const cur = currentPath();
+          if (!cur) return;
+          pixelEdit("Stroke Path", (d, t) => {
+            const eraser = tool === "eraser";
+            let pixels = t.pixels;
+            for (const sub of cur.path.subpaths) {
+              const pts = flattenSubpath(sub);
+              if (!pts.length) continue;
+              const stroke = beginBrushStroke(pixels, {
+                brush: eraser ? settings.eraser : settings.brush,
+                color: !t.mask ? foreground() : maskTone(eraser ? background() : foreground()),
+                erase: eraser && !t.mask,
+                selection: d.selection,
+                clip: docRect(d),
+              });
+              for (const p of sub.closed ? [...pts, pts[0]] : pts) stroke.add({ x: p.x, y: p.y, pressure: 1 });
+              pixels = stroke.finish();
+            }
+            return withTargetPixels(d, t, pixels);
+          });
+        }),
+      },
       fill: whenIdle((color: RGB) =>
         pixelEdit("Fill", (d, t) => withTargetPixels(d, t, fillPixels(t.pixels, docRect(d), t.mask ? maskTone(color) : color, d.selection))),
       ),
