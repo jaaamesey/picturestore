@@ -26,7 +26,25 @@ export interface Preferences {
   readonly gridEvery: number;
   readonly gridUnit: LengthUnit;
   readonly gridSubdivisions: number;
+  /** Units & Rulers ▸ Type: the unit type sizes are shown in. */
+  readonly typeUnits: TypeUnit;
+  /** Type ▸ Use Smart Quotes: typed straight quotes become curly. */
+  readonly smartQuotes: boolean;
+  /** Type ▸ Enable Missing Glyph Protection: characters a font lacks come from another font. */
+  readonly missingGlyphProtection: boolean;
+  /** Type ▸ Fill new type layers with placeholder text (Lorem Ipsum, selected). */
+  readonly placeholderText: boolean;
+  /** Type ▸ Use Esc key to commit text (else Esc cancels). */
+  readonly escCommits: boolean;
+  /** Type ▸ Show Font Names in English. */
+  readonly fontNamesInEnglish: boolean;
+  /** Type ▸ Font Preview Size: names in font menus drawn in their font, at this size (none: plain). */
+  readonly fontPreviewSize: FontPreviewSize;
 }
+
+export type TypeUnit = "points" | "pixels" | "millimeters";
+export type FontPreviewSize = "none" | "small" | "medium" | "large" | "extra-large" | "huge";
+export const FONT_PREVIEW_PX: Record<FontPreviewSize, number> = { none: 0, small: 11, medium: 13, large: 16, "extra-large": 20, huge: 26 };
 
 export type LineStyle = "lines" | "dashed" | "dots";
 
@@ -76,6 +94,13 @@ export const defaultPreferences = (): Preferences => ({
   gridEvery: 25,
   gridUnit: "millimeters",
   gridSubdivisions: 4,
+  typeUnits: "points",
+  smartQuotes: true,
+  missingGlyphProtection: true,
+  placeholderText: true,
+  escCommits: true,
+  fontNamesInEnglish: true,
+  fontPreviewSize: "medium",
 });
 
 const clampInt = (v: unknown, min: number, max: number, fallback: number) =>
@@ -91,6 +116,7 @@ export function normalizePreferences(raw: unknown, defaults = defaultPreferences
   const color = (v: unknown, fallback: string) => (typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : fallback);
   const oneOf = <T extends string>(v: unknown, options: readonly T[], fallback: T) => (options.includes(v as T) ? (v as T) : fallback);
   const styles: readonly LineStyle[] = ["lines", "dashed", "dots"];
+  const bool = (v: unknown, fallback: boolean) => (typeof v === "boolean" ? v : fallback);
   return {
     historyStates: clampInt(p.historyStates, HISTORY_STATES_RANGE.min, HISTORY_STATES_RANGE.max, defaults.historyStates),
     memoryUsageMB: clampInt(p.memoryUsageMB, mem.min, mem.max, defaults.memoryUsageMB),
@@ -103,6 +129,13 @@ export function normalizePreferences(raw: unknown, defaults = defaultPreferences
     gridEvery: typeof p.gridEvery === "number" && p.gridEvery > 0 && Number.isFinite(p.gridEvery) ? p.gridEvery : defaults.gridEvery,
     gridUnit: oneOf(p.gridUnit, LENGTH_UNITS.map((u) => u.id), defaults.gridUnit),
     gridSubdivisions: clampInt(p.gridSubdivisions, 1, 100, defaults.gridSubdivisions),
+    typeUnits: oneOf(p.typeUnits, ["points", "pixels", "millimeters"], defaults.typeUnits),
+    smartQuotes: bool(p.smartQuotes, defaults.smartQuotes),
+    missingGlyphProtection: bool(p.missingGlyphProtection, defaults.missingGlyphProtection),
+    placeholderText: bool(p.placeholderText, defaults.placeholderText),
+    escCommits: bool(p.escCommits, defaults.escCommits),
+    fontNamesInEnglish: bool(p.fontNamesInEnglish, defaults.fontNamesInEnglish),
+    fontPreviewSize: oneOf(p.fontPreviewSize, Object.keys(FONT_PREVIEW_PX) as FontPreviewSize[], defaults.fontPreviewSize),
   };
 }
 
@@ -137,10 +170,10 @@ export const PREFERENCES_PANES = [
   { id: "scratchDisks", label: "Scratch Disks", available: false },
   { id: "cursors", label: "Cursors", available: false },
   { id: "transparency", label: "Transparency & Gamut", available: false },
-  { id: "units", label: "Units & Rulers", available: false },
+  { id: "units", label: "Units & Rulers", available: true },
   { id: "guides", label: "Guides, Grid & Slices", available: true },
   { id: "plugins", label: "Plugins", available: false },
-  { id: "type", label: "Type", available: false },
+  { id: "type", label: "Type", available: true },
   { id: "technologyPreviews", label: "Technology Previews", available: false },
   { id: "productImprovement", label: "Product Improvement", available: false },
 ] as const;

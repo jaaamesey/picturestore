@@ -84,6 +84,8 @@ export interface TextLayout {
   /** PostScript names of fonts that weren't available (drawn in the default font). */
   readonly missing: ReadonlySet<string>;
   readonly vertical: boolean;
+  /** Path type's lines follow a path. */
+  readonly onPath: boolean;
   /** Inline/block → text space, and the inline direction there (radians). */
   readonly place: (inline: number, block: number) => Vec2;
   readonly angle: (inline: number) => number;
@@ -212,8 +214,10 @@ export interface LayoutOptions {
 export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
   const engine = c.engine ?? DEFAULT_ENGINE;
   const missing = new Set<string>();
-  const fallbackFace = o.fonts.resolve(DEFAULT_FONT);
-  if (!fallbackFace) throw new Error("The default font isn't loaded");
+  const anyFont = o.fonts.list()[0];
+  const fallbackFace = o.fonts.resolve(DEFAULT_FONT) ?? (anyFont ? o.fonts.face(anyFont) : null);
+  // No fonts yet (they're still loading): nothing to draw; layout runs again once they're in.
+  if (!fallbackFace) return { glyphs: [], lines: [], decorations: [], bounds: EMPTY_RECT, overflow: false, missing: new Set(), vertical: c.orientation === "vertical", onPath: false, place: (s, t) => vec(s, t), angle: () => 0 };
   const faceOf = (s: CharStyle): LoadedFace => {
     const f = o.fonts.resolve(s.font);
     if (f) return f;
@@ -538,7 +542,7 @@ export function layoutText(c: TextContent, o: LayoutOptions): TextLayout {
       ? (s: number, t: number) => vec(box ? box.width - t : -t, s)
       : (s: number, t: number) => vec(s, t);
   const angle = path ? (s: number) => pointAlong(path, s).angle : vertical ? () => Math.PI / 2 : () => 0;
-  return { glyphs: glyphsOut, lines, decorations, bounds: frameBounds, overflow, missing, vertical, place, angle };
+  return { glyphs: glyphsOut, lines, decorations, bounds: frameBounds, overflow, missing, vertical, onPath: !!path, place, angle };
 }
 
 function remapLevels(levels: Uint8Array, map: readonly number[], n: number): Uint8Array {

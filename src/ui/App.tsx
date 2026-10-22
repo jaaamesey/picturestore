@@ -8,6 +8,7 @@ import { placementMapping } from "../core/content";
 import { findCommand, runCommand, stepBrushSize, toolForKey, type Shell } from "../editor/commands";
 import { createEditor, type DocumentSession } from "../editor/editor";
 import { MAX_LEVEL, requestDevice } from "../gpu/renderer";
+import { initFonts } from "../fonts/service";
 import {
   EXTENSIONS,
   download,
@@ -31,6 +32,7 @@ import { listRecovery, newRecoveryKey, removeRecovery, saveRecovery } from "../i
 import { PreferencesDialog } from "./PreferencesDialog";
 import { CanvasSizeDialog } from "./CanvasSizeDialog";
 import { NewGuideDialog } from "./NewGuideDialog";
+import { ParagraphSizeDialog } from "./ParagraphSizeDialog";
 import { ImageSizeDialog } from "./ImageSizeDialog";
 import type { Floating } from "../core/raster";
 import { AppContext, type App as AppValue } from "./context";
@@ -212,6 +214,8 @@ export function App() {
   const [confirmation, setConfirmation] = createSignal<{ message: string; resolve: (ok: boolean) => void } | null>(null);
   const confirmDialog = (message: string) => new Promise<boolean>((resolve) => setConfirmation({ message, resolve }));
   editor.onConfirm(confirmDialog);
+  const [boxSizeAsk, setBoxSizeAsk] = createSignal<((size: { width: number; height: number } | null) => void) | null>(null);
+  editor.onAskBoxSize(() => new Promise((resolve) => setBoxSizeAsk(() => resolve)));
   const [prefsPane, setPrefsPane] = createSignal<PreferencesPane | null>(null);
   const [canvasSize, setCanvasSize] = createSignal<DocumentSession | null>(null);
   const [imageSizeFor, setImageSizeFor] = createSignal<DocumentSession | null>(null);
@@ -339,7 +343,7 @@ export function App() {
     const recoveryTimer = window.setInterval(() => void recoveryTick(), 15_000);
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor() || newGuideFor()) return;
+      if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor() || newGuideFor() || boxSizeAsk()) return;
       const id = findCommand(e);
       if (id === "edit.paste" || id === "edit.pasteInPlace") {
         // Let the browser deliver a paste event with the clipboard's contents.
@@ -408,9 +412,11 @@ export function App() {
   const [deviceEpoch, setDeviceEpoch] = createSignal(0);
   let lastLoss = -Infinity;
   const readback = new URLSearchParams(location.search).get("present") === "readback";
+  // Fonts load alongside the GPU, so type can be set as soon as there's a canvas.
+  const fonts = initFonts().catch((err) => notify(`Fonts couldn't be loaded: ${err instanceof Error ? err.message : err}`));
   const device = createMemo(() => {
     const epoch = deviceEpoch();
-    return requestDevice().then((d) => {
+    return Promise.all([requestDevice(), fonts]).then(([d]) => {
       void d.lost.then((info) => {
         if (info.reason === "destroyed" || epoch !== deviceEpoch()) return;
         console.warn("WebGPU device lost:", info.message);
@@ -478,6 +484,18 @@ export function App() {
             height={s.doc().height}
             onApply={(w, h, anchor) => editor.active() === s && editor.canvasSize(w, h, anchor)}
             onClose={() => setCanvasSize(null)}
+          />
+        )}
+      </Show>
+      <Show when={boxSizeAsk()}>
+        {(answer) => (
+          <ParagraphSizeDialog
+            unit={editor.preferences().typeUnits}
+            resolution={resolutionOf(editor.active()?.doc() ?? { resolution: 72 })}
+            onAnswer={(size) => {
+              setBoxSizeAsk(null);
+              answer()(size);
+            }}
           />
         )}
       </Show>

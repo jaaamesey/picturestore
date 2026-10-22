@@ -43,6 +43,8 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     snapTo: null as SnapToOptions | null,
     smartGuides: [] as readonly SmartGuide[],
     lockGuides: false,
+    /** What the Paragraph Text Size dialog answers. */
+    boxSize: null as { width: number; height: number } | null,
     settings: structuredClone({ ...settings, ...options }) as Writable<ToolSettings>,
   };
   const ctx = (): ToolContext => ({
@@ -78,6 +80,8 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     viewOptions: { ...DEFAULT_VIEW_OPTIONS, snap: !!s.snapTo, lockGuides: s.lockGuides },
     snap: createSnapper(s.doc, s.view.zoom, s.snapTo, defaultPreferences(), (g) => (s.smartGuides = g)),
     updateSettings: (fn) => fn(s.settings),
+    preferences: defaultPreferences(),
+    askBoxSize: async () => s.boxSize,
   });
   const ev = (x: number, y: number, mods: Partial<ToolEvent> = {}): ToolEvent => ({
     x, y, screenX: x, screenY: y, pressure: 1, shift: false, alt: false, mod: false, clicks: 1, ...mods,

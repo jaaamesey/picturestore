@@ -10,6 +10,8 @@ import type { Filter } from "../core/rasterize";
 import type { TransformMode, TransformState } from "../core/transform";
 import type { FloatingLayer, View } from "../gpu/renderer";
 import type { Snapper } from "./snapping";
+import type { Preferences } from "./preferences";
+import type { AntiAlias, CharStyle, ParagraphStyle, TextContent } from "../text/model";
 import type { ViewOptions } from "./viewOptions";
 
 export type ToolId =
@@ -31,7 +33,20 @@ export type ToolId =
   | "line"
   | "crop"
   | "perspective-crop"
+  | "type-horizontal"
+  | "type-vertical"
+  | "type-mask-horizontal"
+  | "type-mask-vertical"
   | "transform";
+
+export type TypeToolId = "type-horizontal" | "type-vertical" | "type-mask-horizontal" | "type-mask-vertical";
+
+/** The Type tools' settings: the character and paragraph attributes new type takes (its colour is the foreground's). */
+export interface TypeSettings {
+  readonly char: CharStyle;
+  readonly paragraph: ParagraphStyle;
+  readonly antiAlias: AntiAlias;
+}
 
 export type ShapeToolId = "rectangle" | "ellipse" | "triangle" | "polygon" | "line";
 
@@ -102,6 +117,7 @@ export interface ToolSettings {
   readonly crop: CropSettings;
   readonly perspectiveCrop: PerspectiveCropSettings;
   readonly shape: ShapeSettings;
+  readonly type: TypeSettings;
   readonly brush: BrushSettings;
   readonly eraser: BrushSettings;
   readonly selectionMode: SelectionMode;
@@ -124,6 +140,22 @@ export type Overlay =
       readonly drag: "resize" | "move" | "rotate" | "draw" | "straighten" | null;
       /** The Straighten tool's line, in document space. */
       readonly line?: readonly [Vec2, Vec2];
+    }
+  /** Type being edited: its caret, selection and frame. */
+  | {
+      readonly kind: "text";
+      readonly layerId: string;
+      readonly content: TextContent;
+      readonly anchor: number;
+      readonly focus: number;
+      /** Type Mask tools: the text becomes a selection. */
+      readonly mask: boolean;
+      /** Ctrl+H: the selection highlight is hidden. */
+      readonly hideSelection: boolean;
+      /** Ctrl is held: the frame shows transform handles (drag to scale, rotate). */
+      readonly transforming: boolean;
+      /** An IME composition is in progress. */
+      readonly composing: boolean;
     }
   | {
       readonly kind: "perspective-crop";
@@ -198,6 +230,9 @@ export interface ToolContext {
   setForeground(c: RGB): void;
   /** Activates another tool (e.g. leaving Free Transform). */
   setTool(id: ToolId): void;
+  readonly preferences: Preferences;
+  /** Alt-click with a Type tool: Photoshop's Paragraph Text Size dialog (null if cancelled). */
+  askBoxSize(): Promise<{ width: number; height: number } | null>;
 }
 
 export interface Tool {
@@ -232,4 +267,4 @@ export interface ToolKey {
 }
 
 /** Deeply mutable, for store setters. */
-export type Writable<T> = { -readonly [K in keyof T]: T[K] extends object ? Writable<T[K]> : T[K] };
+export type Writable<T> = { -readonly [K in keyof T]: T[K] extends readonly unknown[] ? T[K] : T[K] extends object ? Writable<T[K]> : T[K] };

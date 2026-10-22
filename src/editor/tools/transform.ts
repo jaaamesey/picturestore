@@ -167,7 +167,7 @@ function contentTarget(doc: Doc, layer: Layer, content: PlacedContent, framed: b
 }
 
 /** The affine map taking `b` onto the parallelogram `q` (its first, second and fourth corners). */
-function boxToQuad(b: Rect, q: readonly Vec2[]): Mat {
+export function boxToQuad(b: Rect, q: readonly Vec2[]): Mat {
   const w = b.w || 1, h = b.h || 1;
   const a = (q[1].x - q[0].x) / w, bb = (q[1].y - q[0].y) / w, c = (q[3].x - q[0].x) / h, d = (q[3].y - q[0].y) / h;
   return [a, bb, c, d, q[0].x - a * b.x - c * b.y, q[0].y - bb * b.x - d * b.y];

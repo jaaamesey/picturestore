@@ -14,6 +14,12 @@
   --text-xxs: 11px;
   --animate-fade-in: fade-in 120ms ease-out;
 
+  @keyframes caret-blink {
+    50% {
+      opacity: 0;
+    }
+  }
+
   @keyframes fade-in {
     from {
       opacity: 0;
@@ -98,4 +104,9 @@
   stroke-width: 1;
   stroke-dasharray: 4 4;
   animation: march 0.6s linear infinite;
+}
+
+/* The type caret blinks as the system's does. */
+.caret-blink {
+  animation: caret-blink 1.06s steps(1) infinite;
 }

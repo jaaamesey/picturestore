@@ -2,6 +2,8 @@
 import { CPU_RASTERIZERS } from "../core/content";
 import { imageSizePreview } from "../core/documentTransform";
 import type { Tile } from "../core/pixels";
+import { fontLibrary } from "../text/engine";
+import { loadHarfBuzz } from "../text/fonts";
 import { fromWire, type Request, type Response } from "./wire";
 
 /**
@@ -11,6 +13,8 @@ import { fromWire, type Request, type Response } from "./wire";
  */
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 const tiles = new Map<number, Tile>();
+/** Fonts arrive before the renders that need them; renders wait for them to be added. */
+let fonts: Promise<void> = Promise.resolve();
 
 scope.onmessage = async ({ data: req }: MessageEvent<Request>) => {
   if (req.op === "tiles") {
@@ -21,7 +25,15 @@ scope.onmessage = async ({ data: req }: MessageEvent<Request>) => {
     tiles.clear();
     return;
   }
+  if (req.op === "fonts") {
+    fonts = fonts.then(async () => {
+      await loadHarfBuzz();
+      for (const f of req.files) fontLibrary().add(f);
+    });
+    return;
+  }
   try {
+    await fonts;
     const doc = fromWire(req.doc, (id) => {
       const t = tiles.get(id);
       if (!t) throw new Error(`Preview worker is missing tile ${id}`);

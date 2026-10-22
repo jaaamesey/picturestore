@@ -38,6 +38,22 @@ const PATHS = {
   mask: "M4 4h16v16H4zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
   link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
   clip: "M8 4v9a3 3 0 0 0 3 3h8M16 13l3 3-3 3",
+  "type-horizontal": "M5 6V4h14v2M12 4v16M9 20h6",
+  "type-vertical": "M4 6V4h10v2M9 4v14M7 18h4M19 8v12M17 18l2 2 2-2",
+  "type-mask-horizontal": "M5 6V4h3M11 4h2M16 4h3v2M12 7v2M12 12v2M12 17v3M9 20h1M14 20h1",
+  "type-mask-vertical": "M4 6V4h3M10 4h1M13 4h1v2M9 7v2M9 12v2M9 17v1M7 18h1M10 18h1M19 8v12M17 18l2 2 2-2",
+  text: "M4 4h16v16H4zM8 8h8M12 8v9",
+  warp: "M4 9c4-4 12-4 16 0M4 16c4-4 12-4 16 0M8 6.5V14M12 5v8M16 6.5V14",
+  panels: "M4 6h10M4 10h16M4 14h16M4 18h12",
+  "align-left": "M4 6h16M4 10h10M4 14h16M4 18h10",
+  "align-center": "M4 6h16M7 10h10M4 14h16M7 18h10",
+  "align-right": "M4 6h16M10 10h10M4 14h16M10 18h10",
+  "justify-left": "M4 6h16M4 10h16M4 14h16M4 18h9",
+  "justify-center": "M4 6h16M4 10h16M4 14h16M7.5 18h9",
+  "justify-right": "M4 6h16M4 10h16M4 14h16M11 18h9",
+  "justify-all": "M4 6h16M4 10h16M4 14h16M4 18h16",
+  "orientation": "M4 6V4h9v2M8.5 4v9M14 11h6M17 11v9M15 20h4",
+  warning: "M12 3l10 18H2zM12 10v5M12 18v.01",
 } as const;
 
 export type IconName = keyof typeof PATHS;

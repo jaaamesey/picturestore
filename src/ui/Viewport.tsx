@@ -11,6 +11,7 @@ import { moveFrame } from "../editor/tools/transform";
 import { boxCorners, boxToDoc, overlayLines } from "../core/crop";
 import { toHex } from "../core/color";
 import type { Overlay, ToolEvent } from "../editor/types";
+import { TextInput, TextOverlayView } from "./TextEditing";
 import { RULER_PX, docToScreen, rulerStep, screenToDoc, zoomAt } from "../editor/view";
 import { shown } from "../editor/viewOptions";
 import { gridSpacing } from "../editor/preferences";
@@ -303,6 +304,9 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
           </svg>
         )}
       </Show>
+      <Show when={editor.active()?.overlay()?.kind === "text" && editor.active()}>
+        {(s) => <TextInput overlay={s().overlay() as Extract<Overlay, { kind: "text" }>} view={s().view()} />}
+      </Show>
       <Show when={editor.viewOptions().rulers && editor.active()}>{(s) => <Rulers view={s().view()} size={size()} />}</Show>
       <StatusBar hover={hover()} />
     </div>
@@ -343,6 +347,7 @@ function OverlayShape(props: { overlay: Overlay; view: View; showReference: bool
       </Match>
       <Match when={props.overlay.kind === "crop" && props.overlay}>{(c) => <CropOverlayView overlay={c()} view={props.view} hover={props.hover} />}</Match>
       <Match when={props.overlay.kind === "perspective-crop" && props.overlay}>{(c) => <PerspectiveCropView overlay={c()} view={props.view} />}</Match>
+      <Match when={props.overlay.kind === "text" && props.overlay}>{(t) => <TextOverlayView overlay={t()} view={props.view} />}</Match>
     </Switch>
   );
 }

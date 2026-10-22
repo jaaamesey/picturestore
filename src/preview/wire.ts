@@ -61,7 +61,9 @@ export type Request =
       readonly window: import("../core/geometry").Rect;
       readonly scale: number;
     }
-  | { readonly op: "clear" };
+  | { readonly op: "clear" }
+  /** Font files the document's type needs (sent once each). */
+  | { readonly op: "fonts"; readonly files: readonly import("../text/fonts").FontFile[] };
 
 export type Response =
   | { readonly id: number; readonly ok: true; readonly width: number; readonly height: number; readonly pixels: Uint8ClampedArray }

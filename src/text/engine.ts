@@ -13,6 +13,7 @@ import { textDrawing } from "./render";
 let library = new FontLibrary();
 let version = 0;
 const listeners = new Set<() => void>();
+library.onChange(() => invalidateText());
 
 export const fontLibrary = () => library;
 
@@ -20,7 +21,7 @@ export const fontLibrary = () => library;
 export function useFontLibrary(lib: FontLibrary) {
   library = lib;
   invalidateText();
-  lib.onChange(invalidateText);
+  lib.onChange(() => invalidateText());
 }
 
 /** Fonts or patterns changed: every layout may differ. */

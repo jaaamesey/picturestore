@@ -1,3 +1,6 @@
+import { DEFAULT_CHAR_STYLE, DEFAULT_PARAGRAPH_STYLE, range, setCharStyle, setParagraphStyle, type CharStyle, type ParagraphStyle, type TextContent, type TextRange } from "../text/model";
+import { drawText } from "../text/engine";
+import type { Motion } from "../text/edit";
 import { createEffect, createMemo, createRoot, createSignal, createStore, snapshot, type Accessor } from "solid-js";
 import { copyMerged, copyPixels, pasteCenter, pasteFloating } from "../core/clipboard";
 import { placementMapping, resizedPlacement, smartObjectLayer, withContent, type Rasterizers } from "../core/content";
@@ -202,6 +205,7 @@ export const DEFAULT_STROKE: ShapeStroke = { color: BLACK, width: 3, align: "ins
 export const DEFAULT_SETTINGS: ToolSettings = {
   transform: { showControls: true, link: true, showReference: false, interpolation: "bicubic" },
   shape: { mode: "shape", fill: "foreground", stroke: null, radius: 0, sides: 5, starRatio: 1, weight: 2 },
+  type: { char: DEFAULT_CHAR_STYLE, paragraph: DEFAULT_PARAGRAPH_STYLE, antiAlias: "sharp" },
   brush: DEFAULT_BRUSH,
   eraser: { ...DEFAULT_BRUSH, hardness: 1 },
   selectionMode: "replace",
@@ -322,6 +326,7 @@ export function createEditor() {
     let gpuReset: () => void = () => {};
     let previews: ReturnType<typeof createPreviewWorker> | null = null;
     let askConfirm: (message: string) => Promise<boolean> = async () => false;
+    let askBoxSize: () => Promise<{ width: number; height: number } | null> = async () => null;
     let mergeKey: string | null = null;
     let switching = false;
 
@@ -412,6 +417,8 @@ export function createEditor() {
         setView: s.setView,
         setForeground,
         setTool,
+        preferences: prefs,
+        askBoxSize: () => askBoxSize(),
       };
     }
 
@@ -884,6 +891,74 @@ export function createEditor() {
       return "Merge Down";
     }
 
+    // --- Type ---------------------------------------------------------------------
+
+    /** Runs `fn` on the Type tools' controller, with the active document's context. */
+    const typing = <R>(fn: (ctx: ToolContext) => R): R | undefined => {
+      const s = active();
+      return s && pending === 0 ? guard(() => fn(context(s)))() : undefined;
+    };
+
+    /** What the type panels show and change: the text being edited (its selection), else the active type layer (all of it). */
+    function textTarget(): { readonly content: TextContent; readonly range: TextRange; readonly editing: boolean; readonly layerId: string } | null {
+      const s = active();
+      const o = s?.overlay();
+      if (o?.kind === "text") return { content: o.content, range: range(o.anchor, o.focus), editing: true, layerId: o.layerId };
+      const l = s && activeLayer(s.doc());
+      if (l?.content.kind === "text") return { content: l.content, range: { start: 0, end: l.content.text.length }, editing: false, layerId: l.id };
+      return null;
+    }
+
+    /** A type layer's content changed, as one history step: laid out and rendered again. */
+    function typeLayerEdit(label: string, f: (c: TextContent) => TextContent, key: string | null = null) {
+      edit(
+        label,
+        (d) => {
+          const l = activeLayer(d);
+          if (!l || l.content.kind !== "text") return d;
+          const content = { ...f(l.content), stale: false };
+          return updateLayer(d, l.id, { content, pixels: renderDrawing(drawText(content), docRect(d)) });
+        },
+        key,
+      );
+    }
+
+    /**
+     * Character attributes: on the selection while editing type, on the
+     * whole active type layer, else on what new type takes (the Type tools'
+     * settings).
+     */
+    function formatCharacters(patch: Partial<CharStyle> | ((s: CharStyle) => Partial<CharStyle>), key?: string) {
+      const t = textTarget();
+      if (t?.editing) return typing((ctx) => tools.type.format(ctx, patch));
+      if (t) {
+        return typeLayerEdit("Edit Type Layer", (c) => {
+          let out = c;
+          let pos = 0;
+          for (const run of c.runs) {
+            if (run.length) out = setCharStyle(out, { start: pos, end: pos + run.length }, typeof patch === "function" ? patch(run.style) : patch);
+            pos += run.length;
+          }
+          return c.text.length ? out : setCharStyle(c, { start: 0, end: 0 }, typeof patch === "function" ? patch(c.runs[0].style) : patch);
+        }, key ? `char:${key}` : null);
+      }
+      setSettings((st) => void Object.assign(st.type.char, typeof patch === "function" ? patch(snapshot(settings).type.char) : patch));
+    }
+
+    function formatParagraphs(patch: Partial<ParagraphStyle>, key?: string) {
+      const t = textTarget();
+      if (t?.editing) return typing((ctx) => tools.type.formatParagraph(ctx, patch));
+      if (t) return typeLayerEdit("Edit Type Layer", (c) => setParagraphStyle(c, { start: 0, end: c.text.length }, patch), key ? `para:${key}` : null);
+      setSettings((st) => void Object.assign(st.type.paragraph, patch));
+    }
+
+    /** A change to the whole of the type (orientation, anti-aliasing, warp, frame). */
+    function updateType(label: string, f: (c: TextContent) => TextContent) {
+      const t = textTarget();
+      if (t?.editing) return typing((ctx) => tools.type.update(ctx, f));
+      if (t) typeLayerEdit(label, f);
+    }
+
     const editor = {
       tools,
       sessions: sessions as Accessor<readonly DocumentSession[]>,
@@ -907,6 +982,37 @@ export function createEditor() {
       settings,
       setSettings,
       setShapeOptions,
+      /** Type: the session's input, and formatting (see formatCharacters). */
+      type: {
+        session: () => {
+          const o = active()?.overlay();
+          return o?.kind === "text" ? o : null;
+        },
+        target: textTarget,
+        input: (text: string) => typing((ctx) => tools.type.input(ctx, text)),
+        paste: (piece: Pick<TextContent, "text" | "runs">) => typing((ctx) => tools.type.paste(ctx, piece)),
+        copy: () => tools.type.copy(),
+        deleteBackward: (unit: "char" | "word" = "char") => typing((ctx) => tools.type.deleteBackward(ctx, unit)),
+        deleteForward: (unit: "char" | "word" = "char") => typing((ctx) => tools.type.deleteForward(ctx, unit)),
+        navigate: (motion: Motion, extend = false) => typing((ctx) => tools.type.navigate(ctx, motion, extend)),
+        select: (anchor: number, focus: number) => typing((ctx) => tools.type.select(ctx, anchor, focus)),
+        selectAll: () => typing((ctx) => tools.type.selectAll(ctx)),
+        compose: (text: string, done: boolean) => typing((ctx) => tools.type.compose(ctx, text, done)),
+        undo: () => !!typing((ctx) => tools.type.undo(ctx)),
+        redo: () => !!typing((ctx) => tools.type.redo(ctx)),
+        toggleHighlight: () => typing((ctx) => tools.type.toggleHighlight(ctx)),
+        setTransforming: (on: boolean) => typing((ctx) => tools.type.setTransforming(ctx, on)),
+        commit: () => typing((ctx) => tools.type.commit(ctx)),
+        discard: () => typing((ctx) => tools.type.discard(ctx)),
+        /** Edits a type layer's text (double-clicking its thumbnail selects it all). */
+        edit: (layerId: string, select: "all" | "end" = "all") => {
+          if (!currentTool.startsWith("type-")) setTool("type-horizontal");
+          typing((ctx) => tools.type.edit(ctx, layerId, select));
+        },
+        formatCharacters,
+        formatParagraphs,
+        update: updateType,
+      },
       foreground,
       background,
       setForeground,
@@ -1049,6 +1155,10 @@ export function createEditor() {
       /** Dismisses the "exhausted" state once the user has seen it. */
       acknowledgeMemory: () => memoryNow.ram === "exhausted" && updateMemory({ ram: "ok" }),
       /** The UI's modal OK/Cancel prompt. */
+      /** The UI's Paragraph Text Size dialog (Alt-click with a Type tool). */
+      onAskBoxSize: (fn: () => Promise<{ width: number; height: number } | null>) => {
+        askBoxSize = fn;
+      },
       onConfirm: (fn: (message: string) => Promise<boolean>) => {
         askConfirm = fn;
       },

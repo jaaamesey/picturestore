@@ -6,6 +6,7 @@ import { createShapeTool } from "./shape";
 import { createMoveTool, createTransformController, type TransformController } from "./transform";
 import { createCropTool, type CropController } from "./crop";
 import { createPerspectiveCropTool } from "./perspectiveCrop";
+import { createTypeController, type TypeController } from "./type";
 
 export interface ToolInfo {
   readonly id: Exclude<ToolId, "transform">;
@@ -31,6 +32,10 @@ export const TOOLBAR: readonly ToolInfo[] = [
   { id: "eraser", label: "Eraser", key: "e" },
   { id: "bucket", label: "Paint Bucket", key: "g" },
   { id: "eyedropper", label: "Eyedropper", key: "i" },
+  { id: "type-horizontal", label: "Horizontal Type Tool", key: "t" },
+  { id: "type-vertical", label: "Vertical Type Tool", key: "t" },
+  { id: "type-mask-vertical", label: "Vertical Type Mask Tool", key: "t" },
+  { id: "type-mask-horizontal", label: "Horizontal Type Mask Tool", key: "t" },
   { id: "rectangle", label: "Rectangle Tool", key: "u" },
   { id: "ellipse", label: "Ellipse Tool", key: "u" },
   { id: "triangle", label: "Triangle Tool", key: "u" },
@@ -51,12 +56,14 @@ export interface Tools {
   readonly byId: Record<ToolId, Tool>;
   readonly transform: TransformController;
   readonly crop: CropController;
+  readonly type: TypeController;
 }
 
 /** Tools keep per-interaction state, so each editor gets its own instances. */
 export function createTools(): Tools {
   const transform = createTransformController();
   const crop = createCropTool();
+  const type = createTypeController();
   const list: Tool[] = [
     createMoveTool(transform),
     createMarqueeTool("rect"),
@@ -69,6 +76,7 @@ export function createTools(): Tools {
     createPaintTool("eraser"),
     bucketTool,
     createEyedropperTool(),
+    ...type.tools,
     createShapeTool("rectangle"),
     createShapeTool("ellipse"),
     createShapeTool("triangle"),
@@ -78,5 +86,5 @@ export function createTools(): Tools {
     zoomTool,
     transform,
   ];
-  return { byId: Object.fromEntries(list.map((t) => [t.id, t])) as Record<ToolId, Tool>, transform, crop };
+  return { byId: Object.fromEntries(list.map((t) => [t.id, t])) as Record<ToolId, Tool>, transform, crop, type };
 }

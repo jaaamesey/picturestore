@@ -417,32 +417,86 @@ export function toKnots(commands: readonly { type: string; values: number[] }[],
 
 // --- The library ---------------------------------------------------------------
 
+/** What font menus list: a font, loaded or not. */
+export interface FontEntry {
+  readonly ref: FontRef;
+  readonly origin: FontOrigin;
+  readonly weight: number;
+  readonly italic: boolean;
+}
+
+/** A font known by name whose data loads when it's first used (one installed on this device). */
+export interface PendingFont extends FontEntry {
+  readonly load: () => Promise<FontFile>;
+}
+
+const WEIGHTS: [RegExp, number][] = [
+  [/thin|hairline/i, 100],
+  [/extra ?light|ultra ?light/i, 200],
+  [/light/i, 300],
+  [/medium/i, 500],
+  [/semi ?bold|demi/i, 600],
+  [/extra ?bold|ultra ?bold/i, 800],
+  [/black|heavy/i, 900],
+  [/bold/i, 700],
+];
+/** A weight guessed from a style name, for fonts not yet read. */
+export const weightOf = (style: string) => WEIGHTS.find(([re]) => re.test(style))?.[1] ?? 400;
+
 /**
  * The fonts available to type: files are added (bundled ones, uploads,
- * local fonts) and fonts are found by reference, by PostScript name first
- * and then by family and style.
+ * installed fonts as they're first used) and fonts are found by
+ * reference, by PostScript name first and then by family and style.
  */
 export class FontLibrary {
   private readonly files = new Map<string, { file: FontFile; blob: HB.Blob }>();
   private readonly infos: FontInfo[] = [];
+  private readonly byName = new Map<string, FontInfo>();
+  private readonly byStyle = new Map<string, FontInfo>();
   private readonly loaded = new Map<string, LoadedFace>();
+  private readonly pending = new Map<string, PendingFont>();
+  private readonly fetching = new Set<string>();
   private listeners: (() => void)[] = [];
   /** Bumped whenever fonts are added or removed. */
   version = 0;
 
   add(file: FontFile): FontInfo[] {
-    this.remove(file.id);
+    this.drop(file.id);
     const fonts = fontsIn(file);
     this.files.set(file.id, { file, blob: new hb.Blob(file.bytes) });
     this.infos.push(...fonts);
+    for (const f of fonts) this.pending.delete(f.ref.postScriptName);
+    this.reindex();
     this.changed();
     return fonts;
   }
 
   remove(fileId: string) {
-    if (!this.files.delete(fileId)) return;
+    if (this.drop(fileId)) this.changed();
+  }
+
+  private drop(fileId: string): boolean {
+    if (!this.files.delete(fileId)) return false;
     for (let i = this.infos.length - 1; i >= 0; i--) if (this.infos[i].fileId === fileId) this.infos.splice(i, 1);
     for (const k of [...this.loaded.keys()]) if (this.loaded.get(k)!.info.fileId === fileId) this.loaded.delete(k);
+    this.reindex();
+    return true;
+  }
+
+  private reindex() {
+    this.byName.clear();
+    this.byStyle.clear();
+    // Earlier files win (bundled before uploads), so a name means one font.
+    for (const f of this.infos) {
+      for (const n of [f.ref.postScriptName, ...f.aliases]) if (!this.byName.has(n)) this.byName.set(n, f);
+      const k = `${f.ref.family}|${f.ref.style}`;
+      if (!this.byStyle.has(k)) this.byStyle.set(k, f);
+    }
+  }
+
+  /** Fonts to load when first used (installed fonts, found through the Local Font Access API). */
+  addPending(fonts: readonly PendingFont[]) {
+    for (const f of fonts) if (!this.byName.has(f.ref.postScriptName)) this.pending.set(f.ref.postScriptName, f);
     this.changed();
   }
 
@@ -464,10 +518,10 @@ export class FontLibrary {
     return this.files.get(id)?.file;
   }
 
-  /** Families, alphabetically, each with its styles (static faces before instances, by weight). */
-  families(): { family: string; fonts: FontInfo[] }[] {
-    const by = new Map<string, FontInfo[]>();
-    for (const f of this.infos) {
+  /** Families, alphabetically, each with its styles (upright before italic, by weight), loaded or not. */
+  families(): { family: string; fonts: FontEntry[] }[] {
+    const by = new Map<string, FontEntry[]>();
+    for (const f of [...this.infos, ...this.pending.values()]) {
       const list = by.get(f.ref.family) ?? [];
       if (!list.some((g) => g.ref.style === f.ref.style)) list.push(f);
       by.set(f.ref.family, list);
@@ -477,13 +531,36 @@ export class FontLibrary {
       .map(([family, fonts]) => ({ family, fonts: fonts.sort((a, b) => +a.italic - +b.italic || a.weight - b.weight) }));
   }
 
-  /** The font a reference names, if it's available. */
+  /** The font a reference names, if it's loaded; one that's pending starts loading (layout redoes once it's in). */
   find(ref: FontRef): FontInfo | undefined {
-    return (
-      this.infos.find((f) => f.ref.postScriptName === ref.postScriptName) ??
-      this.infos.find((f) => f.aliases.includes(ref.postScriptName)) ??
-      this.infos.find((f) => f.ref.family === ref.family && f.ref.style === ref.style)
-    );
+    const found = this.byName.get(ref.postScriptName) ?? this.byStyle.get(`${ref.family}|${ref.style}`);
+    if (!found) this.fetch(ref);
+    return found;
+  }
+
+  /** Whether a reference can be had: loaded, or loading. */
+  knows(ref: FontRef): boolean {
+    return !!this.find(ref) || this.pending.has(ref.postScriptName);
+  }
+
+  private fetch(ref: FontRef) {
+    const p = this.pending.get(ref.postScriptName) ?? [...this.pending.values()].find((f) => f.ref.family === ref.family && f.ref.style === ref.style);
+    if (!p || this.fetching.has(p.ref.postScriptName)) return;
+    this.fetching.add(p.ref.postScriptName);
+    void p
+      .load()
+      .then((file) => this.add(file))
+      .catch((err) => console.warn(`Font ${p.ref.postScriptName} couldn't be loaded:`, err))
+      .finally(() => this.fetching.delete(p.ref.postScriptName));
+  }
+
+  /** Resolves once `ref` is loaded (or can't be). */
+  async ensure(ref: FontRef): Promise<boolean> {
+    if (this.find(ref)) return true;
+    const p = this.pending.get(ref.postScriptName);
+    if (!p) return false;
+    this.add(await p.load());
+    return !!this.find(ref);
   }
 
   face(info: FontInfo): LoadedFace {
