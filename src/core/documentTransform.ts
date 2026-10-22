@@ -87,13 +87,15 @@ export function transformContent(c: NonRaster, t: DocTransform): NonRaster {
  */
 export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers): Promise<Layer> {
   const mask = l.mask && { ...l.mask, pixels: await transformPixels(l.mask.pixels, t, r) };
+  // The vector mask goes where the layer goes (a path, so it stays exact).
+  const vm = l.vectorMask && { vectorMask: { ...l.vectorMask, path: mapPath(l.vectorMask.path, (v) => project(t.matrix, v.x, v.y)) } };
   const c = l.content;
-  if (c.kind === "group") return { ...l, mask, content: { ...c, layers: await Promise.all(c.layers.map((x) => transformLayer(x, t, r))) } };
-  if (c.kind === "adjustment") return { ...l, mask };
+  if (c.kind === "group") return { ...l, mask, ...vm, content: { ...c, layers: await Promise.all(c.layers.map((x) => transformLayer(x, t, r))) } };
+  if (c.kind === "adjustment") return { ...l, mask, ...vm };
   if (isPlaced(c)) {
     const content = transformContent(c, t);
     // Content crossing a perspective's horizon has no exact transform: it's rasterized, as it looks.
-    if (isConvex(content.placement.quad)) return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r, t.filter)), mask };
+    if (isConvex(content.placement.quad)) return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r, t.filter)), mask, ...vm };
   }
   // Type follows affine maps exactly (Image Size scales it, as vectors); a perspective rasterizes it, as Photoshop
   // only allows affine transforms on live type.
@@ -101,9 +103,9 @@ export async function transformLayer(l: Layer, t: DocTransform, r: Rasterizers):
   if (c.kind === "text" && affine) {
     // Another app's rendering is replaced by ours, at the new size.
     const content = { ...c, transform: multiply(affine, c.transform), stale: false };
-    return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r)), mask };
+    return { ...(await withContent(l, content, rect(0, 0, t.width, t.height), r)), mask, ...vm };
   }
-  return { ...l, mask, content: PIXELS, pixels: await transformPixels(l.pixels, t, r) };
+  return { ...l, mask, ...vm, content: PIXELS, pixels: await transformPixels(l.pixels, t, r) };
 }
 
 async function transformPixels(pixels: Pixels, t: DocTransform, r: Rasterizers): Promise<Pixels> {

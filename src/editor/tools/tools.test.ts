@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_BRUSH } from "../../core/brush";
 import { addLayer, createDocument, editTarget, fillPixels, groupLayers, updateLayer, type Doc } from "../../core/document";
 import { childrenOf } from "../../core/layers";
-import { rect } from "../../core/geometry";
+import { rect, vec } from "../../core/geometry";
 import { rectMask } from "../../core/selection";
 import { NO_PIXELS, contentBounds, getPixel } from "../../core/pixels";
 import type { FloatingLayer, View } from "../../gpu/renderer";
@@ -205,6 +205,16 @@ describe("move and transform", () => {
     await h.drag("move", [15, 15], [25.4, 35.6]);
     expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(20, 31, 10, 10));
     expect(h.s.history).toEqual(["Move"]);
+  });
+
+  it("moves the layer's vector mask with it", async () => {
+    const d = withSquare();
+    const path: VectorPath = { subpaths: [{ closed: true, op: "combine", knots: [cornerKnot(vec(10, 10)), cornerKnot(vec(20, 10)), cornerKnot(vec(20, 20)), cornerKnot(vec(10, 20))] }] };
+    const h = harness(updateLayer(d, d.activeLayerId, { vectorMask: { path, enabled: true } }));
+    await h.drag("move", [15, 15], [25, 35]);
+    expect(contentBounds(layerOf(h.s.doc).pixels)).toEqual(rect(20, 30, 10, 10));
+    expect(layerOf(h.s.doc).vectorMask!.path.subpaths[0].knots[0].anchor).toEqual({ x: 20, y: 30 });
+    expect(layerOf(h.s.doc).vectorMask!.path.subpaths[0].knots[2].anchor).toEqual({ x: 30, y: 40 });
   });
 
   it("moves only selected pixels, and the selection with them", async () => {

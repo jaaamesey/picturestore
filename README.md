@@ -148,6 +148,30 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
     TrueType/OpenType/WOFF files (kept in the browser's IndexedDB) or, where the browser allows, use the fonts
     installed on the device. Missing fonts show in brackets with a warning; characters a font lacks come from
     another (Missing Glyph Protection).
+- **Paths**, following Photoshop's manual. The Pen group (P, Shift+P cycles): *Pen* (click for corner points, drag
+  for smooth ones; Shift holds 45°, Alt while dragging breaks the direction lines; click the first point to
+  close, an end of an open path to continue it, another path's end to join them; click the selected end point to
+  drop its direction line, drag from it to pull one out; Auto Add/Delete; Rubber Band; Ctrl is Direct
+  Selection and Alt Convert Point; Esc/Enter end the path), *Freeform Pen* (Curve Fit 0.5–10 px; drag back to the
+  start to close; drag from an end to continue) with *Magnetic* (Width, Contrast, Frequency, Pen Pressure; click
+  to fasten, Delete removes the last fastening point, Alt-click straight, Alt-drag freehand, `[` `]` change the
+  width, Enter ends, double-click closes along the edge, Alt+double-click straight), *Curvature Pen* (click for
+  a point the curve passes through, double-click for a corner and to toggle, drag to move, click a segment to add,
+  Delete keeps the curve), *Add/Delete Anchor Point* and *Convert Point*. *Path Selection* and *Direct
+  Selection* (A): click, Shift, marquee, drag points, segments (Shift 45°; Constrain Path Dragging) and direction
+  points, Alt-click a component, Alt-drag copies components, arrows nudge 1/10 px, Delete removes points, then
+  segments (twice). The options bar has Shape/Path modes, Fill and Stroke, the path operations (Combine, Subtract
+  Front, Intersect, Exclude) for new and for selected components, Path Alignment, distribution, Arrangement,
+  Combine (Merge Shape Components), path colour and thickness, and Make: Selection/Mask/Shape. The *Paths
+  panel* lists saved paths, the work path (italic; replaced when another is drawn unless saved) and the
+  active shape layer's or vector mask's path; double-click renames or saves; buttons fill, stroke, load as a
+  selection, make a work path from the selection (Tolerance), add and delete, with Alt-click opening Make
+  Selection (Feather Radius, Anti-aliased, operation), Fill Path, Stroke Path and Make Work Path dialogs and
+  Panel Options for thumbnail size. *Vector masks* (Layer ▸ Vector Mask ▸ Reveal All / Hide All / Current Path,
+  Delete, Disable, Rasterize) hide what's outside a path, are edited with the path tools and are drawn on the GPU
+  and the CPU reference alike. The Type tool puts type on any selected path (open or closed) or inside a closed
+  one; Ctrl-drag slides it along the path, across it flips it. Paths, the work path and vector masks are in the
+  PSD (image resources and `vmsk`), and are undoable like everything else.
 - **History**: undo/redo with a clickable History panel, limited by History States (default 50) and Memory Usage.
 - **Panel dock**, as in Photoshop: panels in tabbed groups (Character with Paragraph…), opened and closed from the
   Window menu; drag the dock's edge to widen it and the divider between two groups to trade height between them
@@ -196,8 +220,7 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   Match Font and live font preview on hover aren't available. WOFF2 files can't be added (no decoder yet).
   Installed fonts need the Local Font Access API (Chromium browsers).
 - **Anti-aliasing**: Windows and Windows LCD draw as Sharp.
-- **Paths**: there's no Pen tool or Paths panel yet, so Create Work Path isn't available, path and area type are
-  made from shape layers, and path type can't yet be dragged along or flipped across its path.
+- **Paths**: Create Work Path from type isn't available (Convert to Shape is).
 - **Styles**: styles are made from formatted text and redefined by merging overrides; there's no
   attribute-by-attribute Style Options dialog.
 - **Spelling**: English only (Hunspell's en-US dictionary); words in other languages are skipped.
@@ -209,6 +232,29 @@ pnpm test:e2e     # Playwright (builds and serves the app itself)
   digits and variable-font axes. Our exact type, and the named styles, are kept in the file's XMP and used while
   the layer still matches; type edited in Photoshop is read from Photoshop's data and shown with Photoshop's
   pixels until it's edited here.
+
+## Where paths differ from Photoshop
+
+- **Algorithms Adobe doesn't publish** are replaced by well-known ones, so results are close, not identical:
+  the Freeform Pen fits curves by least squares (Schneider's algorithm); the Magnetic Pen traces edges with a
+  live-wire (Dijkstra over gradient cost, within Width of the line to the pointer) and fastens a point when a
+  stretch gets longer than Frequency allows (Contrast is the change in the image, as a percent of the full
+  range, that counts as an edge; Pen Pressure scales Width); the Curvature Pen's automatic points have direction
+  lines along the line between their neighbours, a third as long as each segment; dragging a curved segment bends it
+  by moving its two direction points, the nearer more; Make Work Path traces the selection along pixel
+  boundaries and fits curves within Tolerance.
+- **Content-Aware Tracing** (a Technology Preview in Photoshop) isn't available.
+- Closing a path by dragging, or Auto Add dragging, pulls out symmetric direction lines from the point; the
+  Spacebar doesn't reposition a point being placed. The Magnetic Pen can't continue an existing path.
+- **Merge Shape Components** replaces curves with their flattened outlines. Path Alignment and distribution act on
+  the selected components' own bounds (not the selection or canvas).
+- **Fill Path** has no blending mode or Preserve Transparency; **Stroke Path** is the Brush or Eraser at their
+  current settings (no Simulate Pressure). Deleting a path asks no confirmation (it can be undone). Paths in the
+  panel can't yet be reordered by dragging, and the vector mask has no density or feather.
+- **PSD**: saved path names are written as UTF-8 in the resource's name field, so non-ASCII names look odd in
+  Photoshop; coordinates are 8.24 fixed point, as Photoshop's, so round trips are accurate to ~1e-5 of the image size.
+- A vector mask is drawn as part of the layer's mask (the path's anti-aliased area), and always follows its
+  layer (there's no link toggle for it).
 
 ## Architecture
 
@@ -311,8 +357,7 @@ readback presentation path, enabled with `?present=readback`.
 ## Roadmap
 
 Roughly in Photopea's order: filters (GPU: blurs, sharpen, noise…, and Smart Filters), fill layers, multiple
-layer selection, mask density/feather, Blend If and Fill opacity, custom shapes and path editing (with the Pen
-tool: type on any path), warp grids
+layer selection, mask density/feather, Blend If and Fill opacity, custom shapes, warp grids
 beyond the single patch (splits, 3×3–5×5) and warp presets, snapping while transforming, more selection tools
 (polygonal lasso, quick select, feather/modify), brush presets and smoothing, and GPU painting for very large
 brushes.

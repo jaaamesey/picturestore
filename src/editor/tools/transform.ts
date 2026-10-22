@@ -1,6 +1,7 @@
 import { renderLayers } from "../../core/composite";
 import { framedState, isPlaced, placementState, sourceFloating, toPlacement, withContent, type PlacedContent } from "../../core/content";
-import { PIXELS, docRect, editTarget, updateLayer, type Doc, type Guide, type Layer, type LayerContent } from "../../core/document";
+import { mapPath } from "../../core/path";
+import { PIXELS, docRect, editTarget, layerById, updateLayer, type Doc, type Guide, type Layer, type LayerContent } from "../../core/document";
 import { transformLayer } from "../../core/documentTransform";
 import { EMPTY_RECT, apply, boundsOf, intersect, isEmpty, rect, union, vec, type Mat, type Rect, type Vec2 } from "../../core/geometry";
 import { textLayout } from "../../text/engine";
@@ -29,7 +30,7 @@ import {
   type TransformState,
 } from "../../core/transform";
 import { IDENTITY_PATCH, invert3, invertPatch, isIdentityPatch, mapPoint, mul3, project, quadOf, squareToQuad, subMapping, type Mapping } from "../../core/warp";
-import type { FloatingPixels } from "../../gpu/renderer";
+import type { FloatingLayer, FloatingPixels } from "../../gpu/renderer";
 import type { Tool, ToolContext, ToolEvent, ToolId } from "../types";
 
 export type TransformCommand = "rotate-180" | "rotate-90-cw" | "rotate-90-ccw" | "flip-horizontal" | "flip-vertical";
@@ -104,16 +105,11 @@ function pixelTarget(doc: Doc, layer: Layer, mask: boolean): Target | null {
   };
 }
 
-/**
- * Where something framed by `b` goes when content moves from state `from`
- * to `to` (a placement's mask following it): exact for projective
- * transforms; under a warp, its corners land exactly and the rest follows
- * the homography between them.
- */
-function follow(from: TransformState, to: TransformState, b: Rect): Mapping {
+/** Where a point goes when content moves from state `from` to `to`. */
+function mover(from: TransformState, to: TransformState): (p: Vec2) => Vec2 {
   const inverse = invert3(squareToQuad(from.quad)!)!;
   const toMap = toMapping(to);
-  const corner = (p: Vec2) => {
+  return (p) => {
     let q = project(inverse, p.x, p.y);
     if (from.patch) {
       const st = invertPatch(from.patch, q);
@@ -121,6 +117,43 @@ function follow(from: TransformState, to: TransformState, b: Rect): Mapping {
     }
     return mapPoint(toMap, q.x, q.y);
   };
+}
+
+/** The layers' vector masks, carried along as the content moves from state `from` to `to`. */
+function carryVectorMasks(d: Doc, ids: readonly string[], from: TransformState, to: TransformState): Doc {
+  let out = d;
+  let map: ((p: Vec2) => Vec2) | null = null;
+  for (const id of ids) {
+    const l = layerById(out, id);
+    if (!l?.vectorMask) continue;
+    map ??= mover(from, to);
+    out = updateLayer(out, id, { vectorMask: { ...l.vectorMask, path: mapPath(l.vectorMask.path, map) } });
+  }
+  return out;
+}
+
+/** A transform target whose layers' vector masks follow the content. */
+function withVectorMasks(t: Target): Target {
+  return {
+    ...t,
+    // (The context is extended, not copied, so its live properties stay live.)
+    show: (ctx, s) => t.show(Object.create(ctx, { preview: { value: (d: Doc | null, f?: FloatingLayer | null) => ctx.preview(d && carryVectorMasks(d, t.moving, t.initial, s), f) } }) as ToolContext, s),
+    // A group's contents are transformed as documents are, vector masks included.
+    place: async (ctx, s, filter) => {
+      const d = await t.place(ctx, s, filter);
+      return t.layer.content.kind === "group" ? d : carryVectorMasks(d, t.moving, t.initial, s);
+    },
+  };
+}
+
+/**
+ * Where something framed by `b` goes when content moves from state `from`
+ * to `to` (a placement's mask following it): exact for projective
+ * transforms; under a warp, its corners land exactly and the rest follows
+ * the homography between them.
+ */
+function follow(from: TransformState, to: TransformState, b: Rect): Mapping {
+  const corner = mover(from, to);
   const q = quadOf(b);
   return { source: b, quad: [corner(q[0]), corner(q[1]), corner(q[2]), corner(q[3])], patch: null };
 }
@@ -183,7 +216,16 @@ export function textState(c: TextContent): TransformState {
 
 /** The text's frame in text space, never degenerate (empty type still has a caret's height). */
 function textBox(c: TextContent): Rect {
-  const b = textLayout(c).bounds;
+  const layout = textLayout(c);
+  const b = layout.bounds;
+  // Type on a path: the box round where the type runs (its layout bounds are measured along the path, not in the document).
+  if (layout.onPath && !isEmpty(b)) {
+    const pts: Vec2[] = [];
+    // (`place` measures up from the path; the layout's lines are y-down.)
+    for (let i = 0; i <= 32; i++) for (const t of [b.y, b.y + b.h]) pts.push(layout.place(b.x + (b.w * i) / 32, -t));
+    const box = boundsOf(pts);
+    return rect(box.x, box.y, Math.max(box.w, 1), Math.max(box.h, 1));
+  }
   if (b.w > 0 && b.h > 0) return b;
   const size = c.runs[0].style.size;
   return rect(b.x, isEmpty(b) ? -size : b.y, Math.max(b.w, 1), Math.max(b.h, size));
@@ -265,6 +307,11 @@ function groupTarget(doc: Doc, group: Layer): Target | null {
  * `framed`: see {@link contentTarget}.
  */
 export function transformTarget(doc: Doc, framed = true): Target | null {
+  const target = baseTarget(doc, framed);
+  return target && withVectorMasks(target);
+}
+
+function baseTarget(doc: Doc, framed: boolean): Target | null {
   const t = editTarget(doc);
   if (!t || !t.layer.visible) return null;
   const { layer } = t;

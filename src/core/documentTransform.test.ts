@@ -55,6 +55,17 @@ describe("document transforms", () => {
     expect(s.kind === "shape" && s.placement.quad).toEqual(quadOf(rect(200, 30, 120, 40)));
   });
 
+  it("Image Size and Canvas Size carry vector masks and paths along", async () => {
+    const d = doc();
+    const path = { subpaths: [{ closed: true, op: "combine" as const, knots: [10, 20].flatMap((x) => [10, 20].map((y) => ({ anchor: { x, y }, in: { x, y }, out: { x, y } }))) }] };
+    const masked = { ...d, layers: d.layers.map((l, i) => (i === 1 ? { ...l, vectorMask: { path, enabled: true } } : l)), workPath: path };
+    const big = await imageSize(masked, { width: 400, height: 200, resolution: 72, filter: "bicubic", scaleStyles: true }, cpu);
+    expect(big.layers[1].vectorMask!.path.subpaths[0].knots[3].anchor).toEqual({ x: 40, y: 40 });
+    expect(big.workPath!.subpaths[0].knots[3].anchor).toEqual({ x: 40, y: 40 });
+    const moved = await resizeCanvas(masked, 300, 100, { x: 1, y: 0 }, cpu);
+    expect(moved.layers[1].vectorMask!.path.subpaths[0].knots[0].anchor).toEqual({ x: 110, y: 10 });
+  });
+
   it("Canvas Size is the same transform: a whole-pixel translation, copied exactly", async () => {
     const d = doc();
     const moved = await resizeCanvas(d, 300, 100, { x: 1, y: 0.5 }, cpu);

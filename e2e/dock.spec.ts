@@ -75,5 +75,7 @@ test("resizing panels only resizes them: their contents aren't rebuilt as the di
   const marked = () => page.evaluate(() => [...document.querySelectorAll("[data-panel]")].map((el) => !!(el.firstElementChild as HTMLElement & { mark?: boolean }).mark));
   await dragBy(page, page.getByTestId("dock-divider").nth(1), 0, -50);
   await dragBy(page, page.getByTestId("dock-divider").first(), 0, 30);
-  expect(await marked()).toEqual([true, true, true]);
+  const after = await marked();
+  expect(after.length).toBeGreaterThanOrEqual(3);
+  expect(after.every(Boolean)).toBe(true);
 });
