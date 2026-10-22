@@ -2,6 +2,7 @@ import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type
 import { boundsOf, isEmpty, rect, vec, type Rect, type Vec2 } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
+import type { VectorPath } from "./path";
 import { renderDrawing, renderShape, type Knot, type ShapeGeometry, type ShapeStyle, type VectorDrawing } from "./shape";
 import { drawText } from "../text/engine";
 import type { Pixels } from "./pixels";
@@ -29,11 +30,28 @@ export const CPU_RASTERIZERS: Rasterizers = {
   drawing: async (d, clip) => renderDrawing(d, clip),
 };
 
-/** A shape layer's content from contours in document coordinates: the source box is their bounds, placed where it is. */
-export function pathShape(contours: readonly (readonly Knot[])[], style: ShapeStyle): Extract<LayerContent, { kind: "shape" }> | null {
-  const box = boundsOf(contours.flat().flatMap((k) => [k.anchor, k.in, k.out]));
+/**
+ * A shape layer's content from a path in document coordinates: the source
+ * box is its bounds (padded so it's never degenerate), placed where it is.
+ */
+export function pathShape(path: VectorPath | readonly (readonly Knot[])[], style: ShapeStyle): Extract<LayerContent, { kind: "shape" }> | null {
+  const p: VectorPath = Array.isArray(path) ? { subpaths: (path as readonly (readonly Knot[])[]).map((knots) => ({ knots, closed: true, op: "combine" as const })) } : (path as VectorPath);
+  const box = boundsOf(p.subpaths.flatMap((s) => s.knots.flatMap((k) => [k.anchor, k.in, k.out])));
   if (isEmpty(box)) return null;
-  return { kind: "shape", geometry: { kind: "path", contours }, style, placement: { source: box, quad: quadOf(box), angle: 0, patch: null } };
+  const source = rect(box.x, box.y, Math.max(1, box.w), Math.max(1, box.h));
+  const ops = p.subpaths.map((s) => s.op);
+  const open = p.subpaths.map((s) => !s.closed);
+  return {
+    kind: "shape",
+    geometry: {
+      kind: "path",
+      contours: p.subpaths.map((s) => s.knots),
+      ...(ops.some((o) => o !== "combine") && { ops }),
+      ...(open.some(Boolean) && { open }),
+    },
+    style,
+    placement: { source, quad: quadOf(source), angle: 0, patch: null },
+  };
 }
 
 export const placementMapping = (p: Placement): Mapping => ({ source: p.source, quad: p.quad, patch: p.patch });

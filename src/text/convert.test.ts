@@ -51,9 +51,15 @@ describe("converting type", () => {
   it("outlines draw the type as it's drawn: a shape from them covers the same pixels", async () => {
     const c = { ...setCharStyle(text("Rag"), { start: 0, end: 3 }, { underline: true }), antiAlias: "smooth" as const };
     const contours = textOutlines(c);
-    expect(contours.length).toBeGreaterThan(4);
+    expect(contours.subpaths.length).toBeGreaterThan(4);
+    // "a" has a counter: a component that subtracts.
+    expect(contours.subpaths.some((s) => s.op === "subtract")).toBe(true);
     const shape = pathShape(contours, { fill: { r: 0, g: 0, b: 0 }, stroke: null })!;
-    expect(diff(await pixels(c), await pixels(shape))).toBeLessThanOrEqual(8);
+    // The same pixels, but where pieces overlap (glyphs and the underline) the shape's exact union is a little lighter
+    // than type's accumulated coverage at a few edge pixels.
+    const [t, u] = [await pixels(c), await pixels(shape)];
+    expect(diff(t, u)).toBeLessThanOrEqual(100);
+    expect(t.filter((v, i) => Math.abs(v - u[i]) > 8).length).toBeLessThanOrEqual(12);
     expect(usesFauxBold(c)).toBe(false);
     expect(usesFauxBold(setCharStyle(c, { start: 0, end: 1 }, { fauxBold: true }))).toBe(true);
   });

@@ -27,6 +27,7 @@
     "hyphen": "1.14.1",
     "linebreak": "1.1.0",
     "nspell": "2.1.5",
+    "polygon-clipping": "^0.15.7",
     "solid-js": "2.0.0-rc.15",
     "source-code-pro": "2.42.0",
     "source-sans": "3.52.0",

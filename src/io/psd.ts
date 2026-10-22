@@ -18,7 +18,8 @@ import { PIXELS, resolutionOf, createLayer, docRect, type Doc, type Layer, type 
 import { fromPsd, rgbOf, toPsd } from "./psdAdjustments";
 import { flatten } from "../core/composite";
 import { isEmpty, rect, vec, type Vec2 } from "../core/geometry";
-import { documentKnots, type Knot, type ShapeStyle } from "../core/shape";
+import { documentPath, type Knot, type ShapeStyle } from "../core/shape";
+import { isSmooth, type VectorPath } from "../core/path";
 import { NO_PIXELS, contentBounds, readRect, pixelsFromImage, type Pixels } from "../core/pixels";
 import { isIdentityPatch, type Patch, type Quad } from "../core/warp";
 
@@ -142,14 +143,17 @@ function smartContent(c: PsdLayer, sources: Map<string, SmartSource>): LayerCont
   return { kind: "smart", source, placement: { source: rect(0, 0, source.width, source.height), quad, angle, patch } };
 }
 
-/** A solid-colour shape layer (vector mask + fill/stroke). Gradients, patterns and path booleans import as pixels. */
+/** A solid-colour shape layer (vector mask + fill/stroke); its components keep their operations and open ends. Gradients and patterns import as pixels. */
 function shapeContent(c: PsdLayer): LayerContent | null {
   const mask = c.vectorMask;
   if (!mask || mask.invert || !c.vectorFill || c.vectorFill.type !== "color") return null;
-  if (mask.paths.some((p) => p.open || (p.operation && p.operation !== "combine"))) return null;
-  const contours: Knot[][] = mask.paths.map((p) =>
-    p.knots.map(({ points: q }) => ({ in: vec(q[0], q[1]), anchor: vec(q[2], q[3]), out: vec(q[4], q[5]) })),
-  );
+  const path: VectorPath = {
+    subpaths: mask.paths.map((p) => ({
+      closed: !p.open,
+      op: p.operation ?? "combine",
+      knots: p.knots.map(({ points: q, linked }): Knot => ({ in: vec(q[0], q[1]), anchor: vec(q[2], q[3]), out: vec(q[4], q[5]), smooth: linked })),
+    })),
+  };
   const s = c.vectorStroke;
   const fill = s?.fillEnabled === false ? null : rgbOf(c.vectorFill.color);
   const strokeColor = s?.content?.type === "color" ? rgbOf(s.content.color) : null;
@@ -160,7 +164,7 @@ function shapeContent(c: PsdLayer): LayerContent | null {
         ? { color: strokeColor, width: s.lineWidth?.value ?? 1, align: s.lineAlignment ?? "inside" }
         : null,
   };
-  return pathShape(contours, style);
+  return pathShape(path, style);
 }
 
 /**
@@ -293,11 +297,11 @@ function contentFields(content: LayerContent, linked: Written): Partial<PsdLayer
     }
     case "shape": {
       const { style } = content;
-      const paths: BezierPath[] = documentKnots(content.geometry, placementMapping(content.placement)).map((c) => ({
-        open: false,
-        operation: "combine",
+      const paths: BezierPath[] = documentPath(content.geometry, placementMapping(content.placement)).subpaths.map((s) => ({
+        open: !s.closed,
+        operation: s.op,
         fillRule: "non-zero",
-        knots: c.map((k) => ({ linked: true, points: [k.in.x, k.in.y, k.anchor.x, k.anchor.y, k.out.x, k.out.y] })),
+        knots: s.knots.map((k) => ({ linked: isSmooth(k), points: [k.in.x, k.in.y, k.anchor.x, k.anchor.y, k.out.x, k.out.y] })),
       }));
       return {
         vectorMask: { paths },

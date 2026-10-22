@@ -4,6 +4,10 @@ import { isEmpty, rect, union, vec, type Rect, type Vec2 } from "./geometry";
 import { blendColorSpan } from "./document";
 import { NO_PIXELS, tileWriter, writeSpans, type Pixels } from "./pixels";
 import { mapPoint, squareToQuad, type Mapping } from "./warp";
+import { corner, flattenContours, flattenKnots, type Knot } from "./bezier";
+import { combineAreas, type PathOp, type VectorPath } from "./path";
+
+export { corner, flattenContours, type Knot };
 
 /**
  * Live shapes, as made by Photoshop's shape tools. Geometry is defined in the
@@ -18,8 +22,17 @@ export type ShapeGeometry =
   | { readonly kind: "polygon"; readonly sides: number; readonly starRatio: number }
   /** A bar filling the box; the box's height is the line's weight. */
   | { readonly kind: "line" }
-  /** Arbitrary Bézier contours in source-box coordinates (e.g. imported from PSD). */
-  | { readonly kind: "path"; readonly contours: readonly (readonly Knot[])[] };
+  /**
+   * Arbitrary Bézier components in source-box coordinates (drawn with the Pen tools, or imported from PSD):
+   * each combined with the ones before it by its operation (default combine), and open or closed (default
+   * closed; an open one is filled as if closed, and stroked as a line).
+   */
+  | {
+      readonly kind: "path";
+      readonly contours: readonly (readonly Knot[])[];
+      readonly ops?: readonly PathOp[];
+      readonly open?: readonly boolean[];
+    };
 
 export type StrokeAlign = "inside" | "center" | "outside";
 
@@ -28,14 +41,6 @@ export interface ShapeStyle {
   readonly stroke: { readonly color: RGB; readonly width: number; readonly align: StrokeAlign } | null;
 }
 
-/** A Bézier knot: the anchor and its incoming/outgoing control points (equal to the anchor for corners). */
-export interface Knot {
-  readonly anchor: Vec2;
-  readonly in: Vec2;
-  readonly out: Vec2;
-}
-
-const corner = (p: Vec2): Knot => ({ anchor: p, in: p, out: p });
 /** Control-point distance for a quarter-circle cubic arc. */
 const KAPPA = 0.5522847498307936;
 
@@ -97,66 +102,6 @@ export function shapeContours(g: ShapeGeometry, box: Rect): Knot[][] {
   }
 }
 
-const FLATNESS = 0.1; // maximum chord deviation, document pixels
-
-/**
- * Flattens closed Bézier contours into polygons in document space. Curves are
- * subdivided until their *mapped* control polygon is within {@link FLATNESS}
- * of its chord, so the tolerance holds after scaling and perspective.
- */
-export function flattenContours(contours: readonly (readonly Knot[])[], map: (p: Vec2) => Vec2): Vec2[][] {
-  return contours.map((knots) => {
-    const out: Vec2[] = [];
-    for (let i = 0; i < knots.length; i++) {
-      const a = knots[i], b = knots[(i + 1) % knots.length];
-      const straight = a.out.x === a.anchor.x && a.out.y === a.anchor.y && b.in.x === b.anchor.x && b.in.y === b.anchor.y;
-      out.push(map(a.anchor));
-      // Straight edges stay straight under affine maps but bend under perspective/warp, so they subdivide too.
-      const before = out.length;
-      if (straight) subdivide(a.anchor, a.anchor, b.anchor, b.anchor, map, out, 0);
-      else subdivide(a.anchor, a.out, b.in, b.anchor, map, out, 0);
-      // The last piece ends on the next anchor, which the next iteration (or the start) supplies.
-      if (out.length > before) out.pop();
-    }
-    return out;
-  });
-}
-
-function subdivide(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, map: (p: Vec2) => Vec2, out: Vec2[], depth: number) {
-  const m0 = map(p0), m3 = map(p3);
-  // Flatness of the mapped curve: distance of its mapped midpoint and control points from the chord.
-  const mid = map(cubicAt(p0, p1, p2, p3, 0.5));
-  const flat =
-    depth >= 16 ||
-    (distToSegment(mid, m0, m3) <= FLATNESS &&
-      distToSegment(map(p1), m0, m3) <= FLATNESS * 4 &&
-      distToSegment(map(p2), m0, m3) <= FLATNESS * 4);
-  if (flat) {
-    if (depth > 0) out.push(m3);
-    return;
-  }
-  // de Casteljau split at t = 0.5.
-  const p01 = lerp(p0, p1), p12 = lerp(p1, p2), p23 = lerp(p2, p3);
-  const p012 = lerp(p01, p12), p123 = lerp(p12, p23), m = lerp(p012, p123);
-  subdivide(p0, p01, p012, m, map, out, depth + 1);
-  subdivide(m, p123, p23, p3, map, out, depth + 1);
-}
-
-const lerp = (a: Vec2, b: Vec2) => vec((a.x + b.x) / 2, (a.y + b.y) / 2);
-
-function cubicAt(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: number): Vec2 {
-  const u = 1 - t;
-  const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
-  return vec(a * p0.x + b * p1.x + c * p2.x + d * p3.x, a * p0.y + b * p1.y + c * p2.y + d * p3.y);
-}
-
-function distToSegment(p: Vec2, a: Vec2, b: Vec2): number {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len2 = dx * dx + dy * dy;
-  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
-  return Math.hypot(p.x - a.x - dx * t, p.y - a.y - dy * t);
-}
-
 const signedArea = (poly: readonly Vec2[]) => {
   let s = 0;
   for (let i = 0; i < poly.length; i++) {
@@ -175,10 +120,11 @@ const MITER_LIMIT = 4;
  * Polygons whose union is a centred stroke of `width` around closed contours:
  * one quad per edge plus a miter (or bevel, past the limit) wedge per vertex.
  */
-export function strokePolygons(contours: readonly (readonly Vec2[])[], width: number): Vec2[][] {
+export function strokePolygons(contours: readonly (readonly Vec2[])[], width: number, open: readonly boolean[] = []): Vec2[][] {
   const hw = width / 2;
   const out: Vec2[][] = [];
-  for (const raw of contours) {
+  for (const [ci, raw] of contours.entries()) {
+    const isOpen = !!open[ci];
     // Drop zero-length edges so normals are defined.
     const pts = raw.filter((p, i) => {
       const q = raw[(i + 1) % raw.length];
@@ -191,9 +137,12 @@ export function strokePolygons(contours: readonly (readonly Vec2[])[], width: nu
       const len = Math.hypot(q.x - p.x, q.y - p.y);
       return vec((-(q.y - p.y) / len) * hw, ((q.x - p.x) / len) * hw);
     });
-    for (let i = 0; i < n; i++) {
+    // An open line has no edge from its last point back to its first, and no join at either end.
+    const edgeCount = isOpen ? n - 1 : n;
+    for (let i = 0; i < edgeCount; i++) {
       const a = pts[i], b = pts[(i + 1) % n], nm = normals[i];
       out.push(positive([vec(a.x + nm.x, a.y + nm.y), vec(b.x + nm.x, b.y + nm.y), vec(b.x - nm.x, b.y - nm.y), vec(a.x - nm.x, a.y - nm.y)]));
+      if (isOpen && i + 1 >= edgeCount) continue;
       // Join at b between edge i and edge i+1, on both sides (the inner wedge is harmless and covered anyway).
       const n1 = normals[(i + 1) % n];
       for (const side of [1, -1]) {
@@ -322,8 +271,25 @@ export function boxMapper(m: Mapping): (p: Vec2) => Vec2 {
   return (p) => mapPoint(m, (p.x - x) / w, (p.y - y) / h);
 }
 
-/** Document-space polygons of a shape's outline. */
-export const shapeOutline = (g: ShapeGeometry, m: Mapping) => flattenContours(shapeContours(g, m.source), boxMapper(m));
+/**
+ * Document-space polygons of a shape's outline: its area, with a path's
+ * operations applied (components oriented so overlapping ones unite).
+ */
+export function shapeOutline(g: ShapeGeometry, m: Mapping): Vec2[][] {
+  const map = boxMapper(m);
+  if (g.kind !== "path") return flattenContours(shapeContours(g, m.source), map);
+  return combineAreas(
+    g.contours.map((c) => flattenKnots(c, true, map)).filter((p) => p.length >= 3),
+    g.contours.flatMap((c, i) => (flattenKnots(c, true).length >= 3 ? [g.ops?.[i] ?? "combine"] : [])),
+  );
+}
+
+/** The open components of a path shape, flattened into document space (they're stroked as lines). */
+export function shapeLines(g: ShapeGeometry, m: Mapping): Vec2[][] {
+  if (g.kind !== "path" || !g.open) return [];
+  const map = boxMapper(m);
+  return g.contours.flatMap((c, i) => (g.open![i] && c.length >= 2 ? [flattenKnots(c, false, map)] : []));
+}
 
 /** Coverage of a shape's fill (no stroke), clipped to `clip`. */
 export const fillCoverage = (g: ShapeGeometry, m: Mapping, clip: Rect) => rasterizeContours(shapeOutline(g, m), clip);
@@ -331,13 +297,17 @@ export const fillCoverage = (g: ShapeGeometry, m: Mapping, clip: Rect) => raster
 /** A shape as vector art: its fill, then its stroke over it. */
 export function shapeDrawing(g: ShapeGeometry, style: ShapeStyle, m: Mapping): VectorDrawing {
   const outline = shapeOutline(g, m);
+  const lines = shapeLines(g, m);
   const s = style.stroke && style.stroke.width > 0 ? style.stroke : null;
+  // Closed components are stroked along their outline; open ones as lines.
+  const closedOutline = lines.length ? shapeOutlineOf(g, m, true) : outline;
+  const width = s ? (s.align === "center" ? s.width : s.width * 2) : 0;
   return {
     paints: [
       {
         fill: outline,
         // Inside/outside strokes are a doubled centre stroke clipped by the fill.
-        stroke: s ? strokePolygons(outline, s.align === "center" ? s.width : s.width * 2) : [],
+        stroke: s ? [...strokePolygons(closedOutline, width), ...strokePolygons(lines, width, lines.map(() => true))] : [],
         strokeMode: s ? STROKE_MODES[s.align] : STROKE_MODES.none,
         fillColor: style.fill,
         strokeColor: s?.color ?? null,
@@ -346,6 +316,17 @@ export function shapeDrawing(g: ShapeGeometry, style: ShapeStyle, m: Mapping): V
     ],
     bounds: shapeBounds(g, style, m),
   };
+}
+
+/** A path shape's outline from its closed components only. */
+function shapeOutlineOf(g: ShapeGeometry, m: Mapping, closedOnly: boolean): Vec2[][] {
+  if (g.kind !== "path" || !closedOnly) return shapeOutline(g, m);
+  const map = boxMapper(m);
+  const keep = g.contours.map((c, i) => !g.open?.[i] && c.length >= 3);
+  return combineAreas(
+    g.contours.flatMap((c, i) => (keep[i] ? [flattenKnots(c, true, map)] : [])),
+    g.contours.flatMap((_, i) => (keep[i] ? [g.ops?.[i] ?? "combine"] : [])),
+  );
 }
 
 /**
@@ -371,9 +352,29 @@ export function shapeBounds(g: ShapeGeometry, style: ShapeStyle, m: Mapping): Re
 export function documentKnots(g: ShapeGeometry, m: Mapping): Knot[][] {
   const H = squareToQuad(m.quad);
   const affine = !m.patch && H && Math.abs(H[6]) < 1e-12 && Math.abs(H[7]) < 1e-12;
-  if (!affine) return shapeOutline(g, m).map((poly) => poly.map(corner));
   const map = boxMapper(m);
+  if (!affine) {
+    // Flattened, component by component (a path keeps its components, open ones included).
+    if (g.kind === "path") return g.contours.map((c, i) => flattenKnots(c, !g.open?.[i], map).map(corner));
+    return shapeOutline(g, m).map((poly) => poly.map(corner));
+  }
   return shapeContours(g, m.source).map((c) => c.map((k) => ({ anchor: map(k.anchor), in: map(k.in), out: map(k.out) })));
+}
+
+/**
+ * A path shape's components in document space, with their operations and
+ * whether each is open — what the Pen tools edit. Like {@link documentKnots}
+ * but for any shape (other shapes' outlines are closed combine components).
+ */
+export function documentPath(g: ShapeGeometry, m: Mapping): VectorPath {
+  const contours = documentKnots(g, m);
+  return {
+    subpaths: contours.map((knots, i) => ({
+      knots,
+      closed: !(g.kind === "path" && g.open?.[i]),
+      op: (g.kind === "path" && g.ops?.[i]) || "combine",
+    })),
+  };
 }
 
 /** How a stroke is clipped against the fill: none (no stroke), centred, inside or outside. */
