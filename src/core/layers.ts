@@ -24,6 +24,9 @@ export interface Place {
   readonly parent: GroupLayer | null;
 }
 
+/** The tree's shape: ids, nested as groups nest. */
+export const treeShape = (layers: readonly Layer[]): string => layers.map((l) => (isGroup(l) ? `${l.id}[${treeShape(l.content.layers)}]` : l.id)).join(",");
+
 /** Every layer, depth first: a group comes before its contents, each container bottom to top. */
 export function* walk(layers: readonly Layer[]): Generator<Layer> {
   for (const l of layers) {
@@ -92,14 +95,15 @@ export function removeFrom(layers: readonly Layer[], id: string): readonly Layer
   return inContainerOf(layers, id, (s) => s.filter((l) => l.id !== id));
 }
 
-/** Where to put a layer relative to a target: next to it, or inside it (a group) at the top. */
-export type Placement = "above" | "below" | "inside";
+/** Where to put a layer relative to a target: next to it, or inside it (a group) at the top or the bottom. */
+export type Placement = "above" | "below" | "inside" | "inside-bottom";
 
 /** Inserts `layer` relative to `targetId` (at the top of the document if there's no such target). */
 export function insertAt(layers: readonly Layer[], layer: Layer, targetId: string | null, placement: Placement): readonly Layer[] {
   const target = targetId === null ? undefined : findLayer(layers, targetId);
   if (!target) return [...layers, layer];
   if (placement === "inside" && isGroup(target)) return updateIn(layers, target.id, (g) => withChildren(g, [...childrenOf(g), layer]));
+  if (placement === "inside-bottom" && isGroup(target)) return updateIn(layers, target.id, (g) => withChildren(g, [layer, ...childrenOf(g)]));
   return inContainerOf(layers, target.id, (s) => {
     const i = s.findIndex((l) => l.id === target.id) + (placement === "below" ? 0 : 1);
     return [...s.slice(0, i), layer, ...s.slice(i)];

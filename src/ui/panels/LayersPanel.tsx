@@ -98,6 +98,7 @@ function LayerRow(props: {
       data-kind={props.row.layer.content.kind}
       data-layer-id={props.row.layer.id}
       data-depth={props.row.depth}
+      data-open={isGroup(props.row.layer) && props.row.layer.content.open ? "" : undefined}
       data-clipped={props.row.clipped ? "" : undefined}
       data-editing={editing() ? "" : undefined}
       class={[
@@ -105,6 +106,9 @@ function LayerRow(props: {
         props.active ? "bg-accent-soft" : "hover:bg-raised",
         // Lifted while dragged (see ui/sortable.ts).
         "data-dragging:z-10 data-dragging:cursor-grabbing data-dragging:bg-raised data-dragging:shadow-[0_6px_16px_rgba(0,0,0,0.45)]",
+        // Where a drag would drop, as Photoshop marks it: a line above or below, or the group outlined.
+        "data-[drop=above]:shadow-[inset_0_2px_0_var(--color-accent)] data-[drop=below]:shadow-[inset_0_-2px_0_var(--color-accent)] data-[drop=inside]:shadow-[inset_0_-2px_0_var(--color-accent)]",
+        "data-[drop=inside-bottom]:outline-2 data-[drop=inside-bottom]:-outline-offset-2 data-[drop=inside-bottom]:outline-accent",
       ]}
       style={{ "padding-left": `${6 + props.row.depth * 16}px` }}
       onClick={(e) => {
@@ -274,14 +278,9 @@ export function LayersPanel() {
       items: "[data-testid=layer-row]",
       key: (el) => el.dataset.layerId ?? null,
       canStart: (e) => !(e.target as Element).closest("button, input, select") && !(e.target as Element).closest("[data-editing]"),
-      onSort(id, from, to) {
-        // Rows are listed top-first; dropping past a row puts it below that row, and vice versa;
-        // dropping down onto an open group's row puts it at the top inside it, just under its header.
-        const target = rows()[to]?.layer;
-        if (!target) return;
-        const intoGroup = to > from && isGroup(target) && target.content.open;
-        editor.moveLayer(id, target.id, intoGroup ? "inside" : to > from ? "below" : "above");
-      },
+      depth: (el) => Number(el.dataset.depth),
+      container: (el) => (el.dataset.kind !== "group" ? null : el.dataset.open !== undefined ? "open" : "closed"),
+      onDrop: (id, target, placement) => editor.moveLayer(id, target, placement),
     });
     return () => sortable.dispose();
   });

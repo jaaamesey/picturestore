@@ -2,7 +2,7 @@ import type { Adjustment } from "./adjustments";
 import type { LayerBlendMode } from "./blend";
 import type { RGB } from "./color";
 import { intersect, isEmpty, rect, type Rect } from "./geometry";
-import { allLayers, childrenOf, findLayer, hasPixels, insertAt, isGroup, locate, removeFrom, updateIn, type Placement as TreePlacement } from "./layers";
+import { allLayers, childrenOf, findLayer, hasPixels, insertAt, isGroup, locate, removeFrom, treeShape, updateIn, type Placement as TreePlacement } from "./layers";
 import type { Mask } from "./selection";
 import type { ShapeGeometry, ShapeStyle } from "./shape";
 import type { TransformState } from "./transform";
@@ -307,14 +307,14 @@ export function moveLayer(d: Doc, id: string, toIndex: number): Doc {
   return moveLayerRelative(d, id, target.id, to > p.index ? "above" : "below");
 }
 
-/** Moves a layer next to another, or into a group (at the top), as dropped in the Layers panel. */
+/** Moves a layer next to another, or into a group (at its top or bottom), as dropped in the Layers panel. Unchanged if it's already there. */
 export function moveLayerRelative(d: Doc, id: string, targetId: string, placement: TreePlacement): Doc {
   const l = findLayer(d.layers, id);
   const target = findLayer(d.layers, targetId);
   // A group can't go inside itself.
   if (!l || !target || id === targetId || findLayer(childrenOf(l), targetId)) return d;
   const layers = insertAt(removeFrom(d.layers, id), l, targetId, placement);
-  return { ...d, layers: settleClipping(layers, id) };
+  return treeShape(layers) === treeShape(d.layers) ? d : { ...d, layers: settleClipping(layers, id) };
 }
 
 /** Group Layers (Ctrl+G): puts layers (in their stacking order) into a new group where the topmost one was. */

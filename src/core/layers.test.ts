@@ -30,8 +30,13 @@ describe("layer tree", () => {
     const d = nested();
     expect(names(moveLayerRelative(d, id(d, "D"), id(d, "H"), "inside").layers)).toBe("A G(B H(C D))");
     expect(names(moveLayerRelative(d, id(d, "C"), id(d, "A"), "below").layers)).toBe("C A G(B H()) D");
+    // Dropped on a group's folder, a layer goes in at the bottom.
+    expect(names(moveLayerRelative(d, id(d, "D"), id(d, "G"), "inside-bottom").layers)).toBe("A G(D B H(C))");
     // Not into itself.
     expect(moveLayerRelative(d, id(d, "G"), id(d, "C"), "above")).toBe(d);
+    // Already there: unchanged, so no history step.
+    expect(moveLayerRelative(d, id(d, "A"), id(d, "G"), "below")).toBe(d);
+    expect(moveLayerRelative(d, id(d, "B"), id(d, "G"), "inside-bottom")).toBe(d);
   });
 
   it("groups and ungroups", () => {

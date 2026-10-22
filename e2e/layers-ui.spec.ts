@@ -140,19 +140,85 @@ test.describe("Layers panel: groups, clipping, masks, adjustments", () => {
     expectClose((await gpuPixels(page, [[100, 75]]))[0], [0, 127, 191, 255], 2);
   });
 
-  test("dragging a layer down onto an open group's row puts it in the group", async ({ page }) => {
-    await rectOnLayer(page, 20, 20, 80, 80);
-    await rectOnLayer(page, 100, 20, 160, 80);
-    await row(page, "Layer 1").click();
-    await page.keyboard.press("Control+g");
-    expect(await names(page)).toEqual(["Layer 2", "Group 1", "  Layer 1", "Background"]);
-    const from = (await row(page, "Layer 2").boundingBox())!, to = (await row(page, "Group 1").boundingBox())!;
+  /** Presses on a row and drags it (in steps, as a hand would) to a point down `at` (0–1) another row's height; `during` runs before the release. */
+  async function dragRow(page: Page, name: string, onto: string, at: number, during?: () => Promise<void>) {
+    // Rows animate into place: measure once they've settled.
+    await expect.poll(() => rows(page).evaluateAll((els) => els.flatMap((e) => e.getAnimations()).length)).toBe(0);
+    const from = (await row(page, name).boundingBox())!, to = (await row(page, onto).boundingBox())!;
     await page.mouse.move(from.x + 150, from.y + from.height / 2);
     await page.mouse.down();
-    await page.mouse.move(to.x + 150, to.y + to.height * 0.9, { steps: 10 });
+    await page.mouse.move(from.x + 150, to.y + to.height * at, { steps: 12 });
+    await during?.();
     await page.mouse.up();
+  }
+
+  /** Layer 3, Group 1 (holding Layer 2), Layer 1, Background. */
+  async function groupInMiddle(page: Page) {
+    await rectOnLayer(page, 20, 20, 40, 40);
+    await rectOnLayer(page, 60, 20, 80, 40);
+    await rectOnLayer(page, 100, 20, 120, 40);
+    await row(page, "Layer 2").click();
+    await page.keyboard.press("Control+g");
+    expect(await names(page)).toEqual(["Layer 3", "Group 1", "  Layer 2", "Layer 1", "Background"]);
+  }
+
+  test("dropped on a collapsed group's folder, from above or below, a layer goes in at the bottom", async ({ page }) => {
+    await groupInMiddle(page);
+    await row(page, "Group 1").getByTestId("group-toggle").click();
+    expect(await names(page)).toEqual(["Layer 3", "Group 1", "Layer 1", "Background"]);
+    // From below: the group is outlined while over it.
+    await dragRow(page, "Layer 1", "Group 1", 0.5, async () => {
+      await expect(row(page, "Group 1")).toHaveAttribute("data-drop", "inside-bottom");
+    });
     await expectHistory(page, "Layer Order");
-    expect(await names(page)).toEqual(["Group 1", "  Layer 2", "  Layer 1", "Background"]);
+    await expect(row(page, "Group 1")).not.toHaveAttribute("data-drop");
+    expect(await names(page)).toEqual(["Layer 3", "Group 1", "Background"]);
+    // From above.
+    await dragRow(page, "Layer 3", "Group 1", 0.5);
+    expect(await names(page)).toEqual(["Group 1", "Background"]);
+    await row(page, "Group 1").getByTestId("group-toggle").click();
+    expect(await names(page)).toEqual(["Group 1", "  Layer 2", "  Layer 1", "  Layer 3", "Background"]);
+    // Still drawn: what was in front is in front.
+    expect(await cpuPixel(page, 30, 30)).toEqual(BLACK);
+  });
+
+  test("an open group: the middle of its row drops in at the bottom, just under its header at the top", async ({ page }) => {
+    await groupInMiddle(page);
+    // From above, onto the middle: in at the bottom.
+    await dragRow(page, "Layer 3", "Group 1", 0.5, async () => {
+      await expect(row(page, "Group 1")).toHaveAttribute("data-drop", "inside-bottom");
+    });
+    expect(await names(page)).toEqual(["Group 1", "  Layer 2", "  Layer 3", "Layer 1", "Background"]);
+    // From below, onto the header's lower edge: in at the top, marked by a line under the header.
+    await dragRow(page, "Layer 1", "Group 1", 0.9, async () => {
+      await expect(row(page, "Group 1")).toHaveAttribute("data-drop", "inside");
+    });
+    expect(await names(page)).toEqual(["Group 1", "  Layer 1", "  Layer 2", "  Layer 3", "Background"]);
+    // Onto its top edge: above it, outside.
+    await dragRow(page, "Layer 2", "Group 1", 0.1, async () => {
+      await expect(row(page, "Group 1")).toHaveAttribute("data-drop", "above");
+    });
+    expect(await names(page)).toEqual(["Layer 2", "Group 1", "  Layer 1", "  Layer 3", "Background"]);
+  });
+
+  test("dragging a layer out of a group, and a group with everything in it", async ({ page }) => {
+    await groupInMiddle(page);
+    // Out: onto the lower half of the layer below the group.
+    await dragRow(page, "Layer 2", "Layer 1", 0.75);
+    expect(await names(page)).toEqual(["Layer 3", "Group 1", "Layer 1", "Layer 2", "Background"]);
+    await page.keyboard.press("Control+z");
+    expect(await names(page)).toEqual(["Layer 3", "Group 1", "  Layer 2", "Layer 1", "Background"]);
+    // A group's contents lift and move with it.
+    await dragRow(page, "Group 1", "Layer 3", 0.25, async () => {
+      await expect(row(page, "Layer 2")).toHaveAttribute("data-dragging", "");
+    });
+    expect(await names(page)).toEqual(["Group 1", "  Layer 2", "Layer 3", "Layer 1", "Background"]);
+    // Dropped back where it started: nothing changes, nothing is recorded.
+    const steps = await page.getByTestId("history-entry").count();
+    await dragRow(page, "Layer 3", "Layer 3", 0.5);
+    await page.mouse.move(0, 0);
+    expect(await names(page)).toEqual(["Group 1", "  Layer 2", "Layer 3", "Layer 1", "Background"]);
+    await expect(page.getByTestId("history-entry")).toHaveCount(steps);
   });
 
   test("moving a group moves everything in it", async ({ page }) => {

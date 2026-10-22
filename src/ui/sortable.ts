@@ -125,15 +125,25 @@ export function createFlip(container: HTMLElement, opts: FlipOptions): Flip {
   };
 }
 
+/** Where a dragged item lands relative to the item it's dropped on: next to it, or inside it at its top or bottom. */
+export type DropPlacement = "above" | "below" | "inside" | "inside-bottom";
+
 export interface SortableOptions extends FlipOptions {
-  /** Called on drop when the item moved: its key, and its old and new index in display order. */
-  readonly onSort: (key: string, from: number, to: number) => void;
+  /** Called on a drop: the dragged item's key, the item it was dropped on, and where. */
+  readonly onDrop: (key: string, target: string, placement: DropPlacement) => void;
   /** Whether a press may start a drag (e.g. not on buttons or inputs). */
   readonly canStart?: (e: PointerEvent) => boolean;
   /** Pointer travel before a press becomes a drag, in CSS pixels. */
   readonly threshold?: number;
   /** How quickly other items make room. */
   readonly shiftDuration?: number;
+  /**
+   * For trees listed flat: an item's nesting depth. Items after one that are
+   * deeper are its contents, and move with it.
+   */
+  readonly depth?: (el: HTMLElement) => number;
+  /** For trees: whether an item takes drops inside it, and whether its contents are listed ("open"). */
+  readonly container?: (el: HTMLElement) => "open" | "closed" | null;
 }
 
 interface Slot {
@@ -147,26 +157,45 @@ const AUTOSCROLL_EDGE = 28;
 const AUTOSCROLL_MAX = 14;
 
 /**
- * Drag-to-reorder for a vertical list, in the modern style: the item lifts
- * and follows the pointer, the others slide aside to open the gap where it
- * would land, the list scrolls near its edges, and on drop the item settles
- * into its slot. Escape cancels. The container should be the scrolling
- * element; the dragged item gets a `data-dragging` attribute for styling.
+ * Drag-to-reorder for a vertical list (or a tree listed flat), in the
+ * modern style: the item lifts and follows the pointer, the others slide
+ * aside to open the gap where it would land, the list scrolls near its
+ * edges, and on drop the item settles into its slot. Escape cancels. The
+ * container should be the scrolling element; the dragged item gets a
+ * `data-dragging` attribute, and the item it would drop on `data-drop`
+ * (its placement), for styling.
+ *
+ * Where it lands follows the pointer, as in Photoshop's Layers panel: over
+ * the top or bottom half of an item, above or below it; over a container,
+ * its top quarter is above it, its middle inside it at the bottom (it's
+ * outlined, and the others stay put), and its bottom quarter below it — or,
+ * if it's open, inside it at the top, just under its header.
  */
 export function createSortable(container: HTMLElement, opts: SortableOptions) {
   const flip = createFlip(container, opts);
   const threshold = opts.threshold ?? 4;
   const shiftDuration = opts.shiftDuration ?? 180;
+  const depth = (el: HTMLElement) => opts.depth?.(el) ?? 0;
 
   let press: { el: HTMLElement; pointerId: number; x: number; y: number } | null = null;
   let drag: {
-    el: HTMLElement;
-    slots: Slot[];
-    from: number;
-    to: number;
+    /** The dragged item and its contents. */
+    block: Slot[];
+    /** Every other item, in order, and where each would be with the block taken out. */
+    others: Slot[];
+    packed: number[];
+    /** The block's height. */
+    size: number;
+    /** Where the gap is (an index into `others`), and where the block came from. */
+    gap: number;
+    home: number;
+    /** Where the pointer is in the list, at the start, relative to the item's top. */
+    grab: number;
     startY: number;
     startScroll: number;
     clientY: number;
+    drop: { target: number; placement: DropPlacement } | null;
+    marked: HTMLElement | null;
   } | null = null;
   let scrollFrame = 0;
 
@@ -174,8 +203,7 @@ export function createSortable(container: HTMLElement, opts: SortableOptions) {
 
   function begin(e: PointerEvent) {
     const el = press!.el;
-    const key = opts.key(el);
-    if (key === null) return void (press = null);
+    if (opts.key(el) === null) return void (press = null);
     // Start from settled layout: finish any in-flight motion.
     const els = listItems();
     for (const x of els) for (const a of x.getAnimations()) a.finish();
@@ -186,31 +214,64 @@ export function createSortable(container: HTMLElement, opts: SortableOptions) {
     }
     const from = slots.findIndex((s) => s.el === el);
     if (from < 0) return void (press = null);
-    drag = { el, slots, from, to: from, startY: press!.y, startScroll: container.scrollTop, clientY: e.clientY };
-    el.setAttribute("data-dragging", "");
-    el.style.transition = "none";
+    let end = from + 1;
+    while (end < slots.length && depth(slots[end].el) > depth(el)) end++;
+    const block = slots.slice(from, end);
+    const others = [...slots.slice(0, from), ...slots.slice(end)];
+    const size = block.reduce((h, s) => h + s.height, 0);
+    const packed = others.map((s, i) => s.top - (i >= from ? size : 0));
+    drag = {
+      block, others, packed, size, gap: from, home: from,
+      grab: press!.y - el.getBoundingClientRect().top,
+      startY: press!.y, startScroll: container.scrollTop, clientY: e.clientY,
+      drop: null, marked: null,
+    };
+    for (const s of block) {
+      s.el.setAttribute("data-dragging", "");
+      s.el.style.transition = "none";
+    }
     const ease = reducedMotion() ? "none" : `transform ${shiftDuration}ms ${EASE_OUT}`;
-    for (const s of slots) if (s.el !== el) s.el.style.transition = ease;
+    for (const s of others) s.el.style.transition = ease;
     document.documentElement.style.cursor = "grabbing";
     document.documentElement.style.userSelect = "none";
     scrollFrame = requestAnimationFrame(autoscroll);
   }
 
+  /** Where a drop at list position `y` would go, and the gap it opens; null if `y` is in the gap. */
+  function dropAt(y: number): { gap: number; target: number; placement: DropPlacement } | null {
+    const { others, packed, size, gap } = drag!;
+    const n = others.length;
+    if (n === 0) return null;
+    const gapTop = gap < n ? packed[gap] : packed[n - 1] + others[n - 1].height;
+    if (y >= gapTop && y < gapTop + size) return null;
+    const top = (i: number) => packed[i] + (i >= gap ? size : 0);
+    let i = 0;
+    while (i < n - 1 && y >= top(i) + others[i].height) i++;
+    const f = (y - top(i)) / others[i].height;
+    const kind = opts.container?.(others[i].el) ?? null;
+    if (kind === null ? f < 0.5 : f < 0.25) return { gap: i, target: i, placement: "above" };
+    if (kind === null || (kind === "closed" && f >= 0.75)) return { gap: i + 1, target: i, placement: "below" };
+    if (kind === "open" && f >= 0.75) return { gap: i + 1, target: i, placement: "inside" };
+    // Onto the container itself: it's outlined, and nothing moves (moving it would take it from under the pointer).
+    return { gap, target: i, placement: "inside-bottom" };
+  }
+
   function update() {
     if (!drag) return;
-    const { el, slots, from } = drag;
-    const dy = drag.clientY - drag.startY + (container.scrollTop - drag.startScroll);
-    el.style.transform = `translateY(${dy}px)`;
-    // Its slot is decided by its centre crossing other items' midpoints (in their original layout).
-    const centre = slots[from].top + slots[from].height / 2 + dy;
-    let to = from;
-    for (let i = from + 1; i < slots.length && centre > slots[i].top + slots[i].height / 2; i++) to = i;
-    for (let i = from - 1; i >= 0 && centre < slots[i].top + slots[i].height / 2; i--) to = i;
-    drag.to = to;
-    const h = slots[from].height;
-    slots.forEach((s, i) => {
-      if (i === from) return;
-      const shift = from < i && i <= to ? -h : to <= i && i < from ? h : 0;
+    const d = drag;
+    const dy = d.clientY - d.startY + (container.scrollTop - d.startScroll);
+    for (const s of d.block) s.el.style.transform = `translateY(${dy}px)`;
+    const next = dropAt(d.block[0].top + d.grab + dy);
+    if (next) {
+      d.gap = next.gap;
+      d.drop = { target: next.target, placement: next.placement };
+    }
+    const target = d.drop ? d.others[d.drop.target].el : null;
+    if (d.marked !== target) d.marked?.removeAttribute("data-drop");
+    d.marked = target;
+    target?.setAttribute("data-drop", d.drop!.placement);
+    d.others.forEach((s, i) => {
+      const shift = d.packed[i] + (i >= d.gap ? d.size : 0) - s.top;
       const t = shift ? `translateY(${shift}px)` : "";
       if (s.el.style.transform !== t) s.el.style.transform = t;
     });
@@ -241,11 +302,12 @@ export function createSortable(container: HTMLElement, opts: SortableOptions) {
     removeListeners();
     if (!d) return;
     flip.capture();
-    for (const s of d.slots) {
+    for (const s of [...d.block, ...d.others]) {
       s.el.style.transition = "";
       s.el.style.transform = "";
+      s.el.removeAttribute("data-dragging");
     }
-    d.el.removeAttribute("data-dragging");
+    d.marked?.removeAttribute("data-drop");
     document.documentElement.style.cursor = "";
     document.documentElement.style.userSelect = "";
     // The press ends in a click on the item; it was a drag, not a click.
@@ -255,7 +317,7 @@ export function createSortable(container: HTMLElement, opts: SortableOptions) {
     };
     window.addEventListener("click", swallow, { capture: true, once: true });
     setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
-    if (commit && d.to !== d.from) opts.onSort(d.slots[d.from].key, d.from, d.to);
+    if (commit && d.drop) opts.onDrop(d.block[0].key, d.others[d.drop.target].key, d.drop.placement);
   }
 
   const onMove = (e: PointerEvent) => {
