@@ -5,6 +5,14 @@ import { intersect, isEmpty, rect, type Rect } from "./geometry";
 import { allLayers, childrenOf, findLayer, hasPixels, insertAt, isGroup, locate, removeFrom, treeShape, updateIn, type Placement as TreePlacement } from "./layers";
 import type { Mask } from "./selection";
 import type { TextStyles } from "../text/model";
+import type { VectorPath } from "./path";
+
+/** A path saved with the document, listed in the Paths panel. */
+export interface SavedPath {
+  readonly id: string;
+  readonly name: string;
+  readonly path: VectorPath;
+}
 import type { ShapeGeometry, ShapeStyle } from "./shape";
 import type { TextContent } from "../text/model";
 import type { TransformState } from "./transform";
@@ -103,6 +111,10 @@ export interface Doc {
   readonly guides?: readonly Guide[];
   /** Named character and paragraph styles (the Character Styles and Paragraph Styles panels). */
   readonly textStyles?: TextStyles;
+  /** Saved paths (the Paths panel), in panel order, top first. */
+  readonly paths?: readonly SavedPath[];
+  /** The work path: the temporary path the Pen tools draw into until it's saved. */
+  readonly workPath?: VectorPath | null;
 }
 
 /** Photoshop's default for screen documents. */

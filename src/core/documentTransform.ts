@@ -7,6 +7,7 @@ import { transformMask, translateMask } from "./selection";
 import { NO_PIXELS, clipPixels, contentBounds, translatePixels, type Pixels } from "./pixels";
 import { transformGuides } from "./snap";
 import { invert3, isConvex, project, type Mat3, type Quad } from "./warp";
+import { mapPath, type VectorPath } from "./path";
 
 /**
  * A change to the whole document as a projective map of its space: Canvas
@@ -143,7 +144,12 @@ export async function transformDocument(doc: Doc, t: DocTransform, r: Rasterizer
           patch: null,
         }));
   const guides = transformGuides(doc.guides, t.matrix);
-  return { ...doc, width: t.width, height: t.height, layers, selection, resolution: t.resolution ?? doc.resolution, guides };
+  // Paths follow the transform exactly under affine maps (control points map as points), and as projected points otherwise.
+  const m3 = t.matrix as unknown as Mat3;
+  const mapPoints = (p: VectorPath) => mapPath(p, (v) => project(m3, v.x, v.y));
+  const paths = doc.paths?.map((s) => ({ ...s, path: mapPoints(s.path) }));
+  const workPath = doc.workPath && mapPoints(doc.workPath);
+  return { ...doc, width: t.width, height: t.height, layers, selection, resolution: t.resolution ?? doc.resolution, guides, ...(paths && { paths }), ...(workPath && { workPath }) };
 }
 
 /** Where existing content sits within a resized canvas: 0, ½ or 1 of the added (or removed) space on each axis. */

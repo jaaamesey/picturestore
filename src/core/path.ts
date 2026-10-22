@@ -208,18 +208,96 @@ export const toCorner = (path: VectorPath, r: PointRef): VectorPath => setKnot(p
 /** A smooth point with mirrored direction lines, `out` where given (dragging from a corner point). */
 export const toSmooth = (path: VectorPath, r: PointRef, out: Vec2): VectorPath => setKnot(path, r, smoothKnot(path.subpaths[r.sub].knots[r.knot].anchor, out));
 
-/** Removes one segment: a closed component opens there; an open one splits in two. */
-export function deleteSegment(path: VectorPath, subIndex: number, seg: number): VectorPath {
-  const s = path.subpaths[subIndex];
+/** Pieces of a component's knots left after cutting the segments in `cuts` (segment i joins knot i and i + 1): each an open component. */
+function cutAt(s: Subpath, cuts: readonly number[]): Subpath[] {
   const n = s.knots.length;
+  const sorted = [...new Set(cuts)].sort((a, b) => a - b);
+  if (!sorted.length) return [s];
   const pieces: Subpath[] = [];
+  const make = (knots: Knot[]) => knots.length && pieces.push({ ...s, knots, closed: false });
   if (s.closed) {
-    const order = Array.from({ length: n }, (_, i) => s.knots[(seg + 1 + i) % n]);
-    pieces.push({ ...s, knots: order, closed: false });
+    // Round the circle from just after one cut to that cut, in pieces ending at each cut.
+    let start = (sorted[0] + 1) % n;
+    for (let k = 0; k < sorted.length; k++) {
+      const end = sorted[(k + 1) % sorted.length];
+      const knots: Knot[] = [];
+      for (let i = start; ; i = (i + 1) % n) {
+        knots.push(s.knots[i]);
+        if (i === end) break;
+      }
+      make(knots);
+      start = (end + 1) % n;
+    }
   } else {
-    pieces.push({ ...s, knots: s.knots.slice(0, seg + 1) }, { ...s, knots: s.knots.slice(seg + 1) });
+    let start = 0;
+    for (const c of sorted) {
+      make(s.knots.slice(start, c + 1));
+      start = c + 1;
+    }
+    make(s.knots.slice(start));
   }
-  return { subpaths: [...path.subpaths.slice(0, subIndex), ...pieces, ...path.subpaths.slice(subIndex + 1)] };
+  return pieces;
+}
+
+const replaceSub = (path: VectorPath, i: number, pieces: readonly Subpath[]): VectorPath => ({
+  subpaths: [...path.subpaths.slice(0, i), ...pieces, ...path.subpaths.slice(i + 1)],
+});
+
+/** Removes segments of a component: a closed component opens where one goes; an open one splits. */
+export const deleteSegments = (path: VectorPath, subIndex: number, segs: readonly number[]): VectorPath => replaceSub(path, subIndex, cutAt(path.subpaths[subIndex], segs));
+
+export const deleteSegment = (path: VectorPath, subIndex: number, seg: number): VectorPath => deleteSegments(path, subIndex, [seg]);
+
+/**
+ * What Delete does to selected anchor points in Photoshop: components with
+ * every point selected go; else selected segments (two selected neighbours)
+ * are removed, leaving their points selected (Delete again erases them);
+ * failing those, the selected points go with the segments touching them —
+ * the path opens or splits.
+ */
+export function deleteSelection(path: VectorPath, refs: readonly PointRef[]): { path: VectorPath; selected: PointRef[] } {
+  const gone = new Set(selectedSubpaths(path, refs));
+  let out = removeSubpaths(path, [...gone]);
+  const remap = (r: PointRef): PointRef => ({ sub: r.sub - [...gone].filter((g) => g < r.sub).length, knot: r.knot });
+  const rest = refs.filter((r) => !gone.has(r.sub)).map(remap);
+  const segs = selectedSegments(out, rest);
+  if (segs.length) {
+    // Knots keep their identity through the cut, which is how the selection finds them again.
+    const kept = rest.map((r) => out.subpaths[r.sub].knots[r.knot]);
+    for (const sub of [...new Set(segs.map((x) => x.sub))].sort((a, b) => b - a)) out = deleteSegments(out, sub, segs.filter((x) => x.sub === sub).map((x) => x.seg));
+    const selected = kept.flatMap((k) => {
+      for (let sub = 0; sub < out.subpaths.length; sub++) {
+        const knot = out.subpaths[sub].knots.indexOf(k);
+        if (knot >= 0) return [{ sub, knot }];
+      }
+      return [];
+    });
+    return { path: out, selected };
+  }
+  const subs = [...new Set(rest.map((r) => r.sub))].sort((a, b) => b - a);
+  for (const sub of subs) {
+    const del = new Set(rest.filter((r) => r.sub === sub).map((r) => r.knot));
+    out = replaceSub(out, sub, runsWithout(out.subpaths[sub], del));
+  }
+  return { path: out, selected: [] };
+}
+
+/** The runs of knots left when some are removed: each an open component (the whole component if none are). */
+function runsWithout(s: Subpath, del: ReadonlySet<number>): Subpath[] {
+  const n = s.knots.length;
+  if (!del.size) return [s];
+  const runs: Knot[][] = [];
+  let cur: Knot[] = [];
+  const start = s.closed ? [...del][0] : 0;
+  for (let k = 0; k < n; k++) {
+    const i = (start + k) % n;
+    if (del.has(i)) {
+      if (cur.length) runs.push(cur);
+      cur = [];
+    } else cur.push(s.knots[i]);
+  }
+  if (cur.length) runs.push(cur);
+  return runs.map((knots) => ({ ...s, knots, closed: false }));
 }
 
 export const removeSubpaths = (path: VectorPath, subs: readonly number[]): VectorPath => ({ subpaths: path.subpaths.filter((_, i) => !subs.includes(i)) });
@@ -451,4 +529,85 @@ export function arrangeSubpaths(path: VectorPath, subs: readonly number[], how: 
     if (order[i].sel && j >= 0 && j < order.length && !order[j].sel) [order[i], order[j]] = [order[j], order[i]];
   }
   return { path: { subpaths: order.map((x) => x.s) }, moved: order.flatMap((x, i) => (x.sel ? [i] : [])) };
+}
+
+/** The anchor point a Pen tool continues from: the only selected point, when it's an end of an open component. */
+export function activeEndpoint(path: VectorPath, selected: readonly PointRef[]): PointRef | null {
+  return selected.length === 1 && isEndpoint(path, selected[0]) ? selected[0] : null;
+}
+
+// --- Hit testing --------------------------------------------------------------------------
+
+/** A direction point of a selected anchor under `p` (the nearest one within `tolerance`). */
+export function handleAt(path: VectorPath, refs: readonly PointRef[], p: Vec2, tolerance: number): { ref: PointRef; side: "in" | "out" } | null {
+  let best: { ref: PointRef; side: "in" | "out" } | null = null, bestD = tolerance;
+  for (const ref of refs) {
+    const k = path.subpaths[ref.sub]?.knots[ref.knot];
+    if (!k) continue;
+    for (const side of ["out", "in"] as const) {
+      if (eq(k[side], k.anchor)) continue;
+      const d = Math.hypot(k[side].x - p.x, k[side].y - p.y);
+      if (d <= bestD) ((bestD = d), (best = { ref, side }));
+    }
+  }
+  return best;
+}
+
+/** Whether `p` is inside a component's area (an open component closes with a straight edge). */
+export function pointInSubpath(s: Subpath, p: Vec2): boolean {
+  const poly = flattenSubpath(s);
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+/** Whether any part of a component's outline touches a rectangle. */
+export function subpathTouchesRect(s: Subpath, r: Rect): boolean {
+  const poly = flattenSubpath(s);
+  const inR = (q: Vec2) => q.x >= r.x && q.x <= r.x + r.w && q.y >= r.y && q.y <= r.y + r.h;
+  if (poly.some(inR)) return true;
+  const corners = [vec(r.x, r.y), vec(r.x + r.w, r.y), vec(r.x + r.w, r.y + r.h), vec(r.x, r.y + r.h)];
+  const cross = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
+    const o = (p: Vec2, q: Vec2, t: Vec2) => Math.sign((q.x - p.x) * (t.y - p.y) - (q.y - p.y) * (t.x - p.x));
+    return o(a, b, c) !== o(a, b, d) && o(c, d, a) !== o(c, d, b);
+  };
+  const n = poly.length;
+  for (let i = 0; i < n - (s.closed ? 0 : 1); i++) for (let k = 0; k < 4; k++) if (cross(poly[i], poly[(i + 1) % n], corners[k], corners[(k + 1) % 4])) return true;
+  return false;
+}
+
+/** The anchor points inside a rectangle. */
+export function anchorsIn(path: VectorPath, r: Rect): PointRef[] {
+  const out: PointRef[] = [];
+  path.subpaths.forEach((s, sub) =>
+    s.knots.forEach((k, knot) => {
+      const a = k.anchor;
+      if (a.x >= r.x && a.x <= r.x + r.w && a.y >= r.y && a.y <= r.y + r.h) out.push({ sub, knot });
+    }),
+  );
+  return out;
+}
+
+/** Every anchor point of the given components. */
+export const allAnchors = (path: VectorPath, subs: readonly number[]): PointRef[] =>
+  subs.flatMap((sub) => path.subpaths[sub].knots.map((_, knot) => ({ sub, knot })));
+
+/** Components all of whose anchor points are selected. */
+export function selectedSubpaths(path: VectorPath, refs: readonly PointRef[]): number[] {
+  return path.subpaths.flatMap((s, sub) => (s.knots.length > 0 && s.knots.every((_, knot) => refs.some((r) => r.sub === sub && r.knot === knot)) ? [sub] : []));
+}
+
+/** The segments with both ends selected (a selected segment is its two anchor points). */
+export function selectedSegments(path: VectorPath, refs: readonly PointRef[]): { sub: number; seg: number }[] {
+  const out: { sub: number; seg: number }[] = [];
+  path.subpaths.forEach((s, sub) => {
+    for (let seg = 0; seg < segmentCount(s); seg++) {
+      const a = { sub, knot: seg }, b = { sub, knot: (seg + 1) % s.knots.length };
+      if (refs.some((r) => sameRef(r, a)) && refs.some((r) => sameRef(r, b))) out.push({ sub, seg });
+    }
+  });
+  return out;
 }

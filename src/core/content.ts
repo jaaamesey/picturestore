@@ -1,5 +1,5 @@
 import { createLayer, newSourceId, type Doc, type Layer, type LayerContent, type Placement, type SmartSource } from "./document";
-import { boundsOf, isEmpty, rect, vec, type Rect, type Vec2 } from "./geometry";
+import { boundsOf, rect, vec, type Rect, type Vec2 } from "./geometry";
 import { transformFloatingCpu, type Floating } from "./raster";
 import type { Filter } from "./rasterize";
 import type { VectorPath } from "./path";
@@ -36,8 +36,10 @@ export const CPU_RASTERIZERS: Rasterizers = {
  */
 export function pathShape(path: VectorPath | readonly (readonly Knot[])[], style: ShapeStyle): Extract<LayerContent, { kind: "shape" }> | null {
   const p: VectorPath = Array.isArray(path) ? { subpaths: (path as readonly (readonly Knot[])[]).map((knots) => ({ knots, closed: true, op: "combine" as const })) } : (path as VectorPath);
-  const box = boundsOf(p.subpaths.flatMap((s) => s.knots.flatMap((k) => [k.anchor, k.in, k.out])));
-  if (isEmpty(box)) return null;
+  const points = p.subpaths.flatMap((s) => s.knots.flatMap((k) => [k.anchor, k.in, k.out]));
+  // A lone anchor point (the Pen tool's first click) is a path with no area, but still a path.
+  if (!points.length) return null;
+  const box = boundsOf(points);
   const source = rect(box.x, box.y, Math.max(1, box.w), Math.max(1, box.h));
   const ops = p.subpaths.map((s) => s.op);
   const open = p.subpaths.map((s) => !s.closed);

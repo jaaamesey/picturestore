@@ -382,6 +382,8 @@ export function App() {
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTyping(e.target) || showNew() || confirmation() || prefsPane() || canvasSize() || imageSizeFor() || newGuideFor() || boxSizeAsk()) return;
+      // The current tool gets Delete, the arrows, Enter and Escape before commands do (the path tools use them).
+      if (editor.toolKeyDown({ key: e.key, shift: e.shiftKey, alt: e.altKey, mod: e.ctrlKey || e.metaKey })) return e.preventDefault();
       const id = findCommand(e);
       if (id === "edit.paste" || id === "edit.pasteInPlace") {
         // Let the browser deliver a paste event with the clipboard's contents.

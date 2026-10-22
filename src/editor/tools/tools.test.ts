@@ -7,7 +7,7 @@ import { rectMask } from "../../core/selection";
 import { NO_PIXELS, contentBounds, getPixel } from "../../core/pixels";
 import type { FloatingLayer, View } from "../../gpu/renderer";
 import { DEFAULT_SETTINGS } from "../editor";
-import type { Overlay, ToolContext, ToolEvent, ToolId, ToolSettings, Writable } from "../types";
+import { NO_PATH_STATE, type Overlay, type PathState, type ToolContext, type ToolEvent, type ToolId, type ToolSettings, type Writable } from "../types";
 import { createTools } from "./index";
 import { moveFrame } from "./transform";
 import { screenToDoc } from "../view";
@@ -18,6 +18,7 @@ import type { SmartGuide } from "../../core/snap";
 import { CPU_RASTERIZERS, smartObjectLayer, smartSource, wholePixelMove } from "../../core/content";
 import { convertToSmartObject, createLayer } from "../../core/document";
 import { IDENTITY_PATCH, quadOf } from "../../core/warp";
+import { cornerKnot, smoothKnot, type VectorPath } from "../../core/path";
 
 const settings: ToolSettings = {
   ...DEFAULT_SETTINGS,
@@ -45,6 +46,7 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     lockGuides: false,
     /** What the Paragraph Text Size dialog answers. */
     boxSize: null as { width: number; height: number } | null,
+    paths: NO_PATH_STATE as PathState,
     settings: structuredClone({ ...settings, ...options }) as Writable<ToolSettings>,
   };
   const ctx = (): ToolContext => ({
@@ -81,6 +83,10 @@ function harness(doc: Doc, options: Partial<ToolSettings> = {}) {
     snap: createSnapper(s.doc, s.view.zoom, s.snapTo, defaultPreferences(), (g) => (s.smartGuides = g)),
     updateSettings: (fn) => fn(s.settings),
     preferences: defaultPreferences(),
+    get paths() {
+      return s.paths;
+    },
+    setPaths: (fn) => (s.paths = fn(s.paths)),
     askBoxSize: async () => s.boxSize,
   });
   const ev = (x: number, y: number, mods: Partial<ToolEvent> = {}): ToolEvent => ({
@@ -814,5 +820,355 @@ describe("masks and groups", () => {
     await h.drag("brush", [50, 50], [50, 50]);
     expect(h.s.history).toEqual(["Move"]);
     expect(editTarget(h.s.doc)!.layer.content.kind).toBe("group");
+  });
+});
+
+describe("pen tools", () => {
+  const P = (x: number, y: number) => ({ x, y });
+  const pathMode = { pen: { ...DEFAULT_SETTINGS.pen, mode: "path" as const } };
+  const square: VectorPath = { subpaths: [{ closed: true, op: "combine", knots: [cornerKnot(P(20, 20)), cornerKnot(P(80, 20)), cornerKnot(P(80, 80)), cornerKnot(P(20, 80))] }] };
+  /** A harness whose work path is the target, with `selected` anchor points. */
+  const withWork = (path: VectorPath, selected: { sub: number; knot: number }[] = []) => {
+    const h = harness({ ...blank(), workPath: path }, pathMode);
+    h.s.paths = { target: { kind: "work" }, selected };
+    return h;
+  };
+  const anchors = (h: ReturnType<typeof harness>, sub = 0) => h.s.doc.workPath!.subpaths[sub].knots.map((k) => [k.anchor.x, k.anchor.y]);
+  const click = (h: ReturnType<typeof harness>, id: ToolId, x: number, y: number, mods: Partial<ToolEvent> = {}) => h.drag(id, [x, y], [x, y], mods);
+
+  describe("Pen", () => {
+    it("clicks make corner points, each one history step, the newest selected", async () => {
+      const h = harness(blank(), pathMode);
+      await click(h, "pen", 20, 20);
+      await click(h, "pen", 80, 20);
+      await click(h, "pen", 80, 80);
+      expect(h.s.history).toEqual(["Pen Tool", "Pen Tool", "Pen Tool"]);
+      expect(anchors(h)).toEqual([[20, 20], [80, 20], [80, 80]]);
+      expect(h.s.doc.workPath!.subpaths[0].closed).toBe(false);
+      expect(h.s.doc.workPath!.subpaths[0].knots.every((k) => k.in.x === k.anchor.x && k.out.y === k.anchor.y)).toBe(true);
+      expect(h.s.paths.target).toEqual({ kind: "work" });
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 2 }]);
+    });
+
+    it("dragging makes a smooth point with mirrored direction lines", async () => {
+      const h = harness(blank(), pathMode);
+      await click(h, "pen", 20, 50);
+      await h.drag("pen", [60, 50], [80, 70]);
+      const k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(k.anchor).toEqual(P(60, 50));
+      expect(k.out).toEqual(P(80, 70));
+      expect(k.in).toEqual(P(40, 30));
+      expect(h.s.history).toEqual(["Pen Tool", "Pen Tool"]);
+    });
+
+    it("Shift holds a clicked segment, and a dragged direction line, to 45°", async () => {
+      const h = harness(blank(), pathMode);
+      await click(h, "pen", 20, 20);
+      await click(h, "pen", 80, 26, { shift: true });
+      expect(anchors(h)[1][1]).toBeCloseTo(20);
+      await h.drag("pen", [50, 60], [90, 70], { shift: true });
+      const k = h.s.doc.workPath!.subpaths[0].knots[2];
+      const [dx, dy] = [Math.abs(k.out.x - k.anchor.x), Math.abs(k.out.y - k.anchor.y)];
+      expect(Math.min(dx, dy) < 1e-9 || Math.abs(dx - dy) < 1e-9).toBe(true);
+      expect(dx + dy).toBeGreaterThan(10);
+    });
+
+    it("Alt while dragging breaks the direction lines: the one behind stays", async () => {
+      const h = harness(blank(), pathMode);
+      await click(h, "pen", 20, 50);
+      const pen = h.tools.byId.pen;
+      pen.down!(h.ctx(), h.ev(60, 50));
+      pen.move!(h.ctx(), h.ev(75, 50));
+      pen.move!(h.ctx(), h.ev(60, 80, { alt: true }));
+      pen.up!(h.ctx(), h.ev(60, 80, { alt: true }));
+      const k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(k.in).toEqual(P(45, 50));
+      expect(k.out).toEqual(P(60, 80));
+    });
+
+    it("clicking the first point closes the path; the next click starts another", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[20, 20], [80, 20], [80, 80]]) await click(h, "pen", x, y);
+      await click(h, "pen", 20, 20);
+      expect(h.s.doc.workPath!.subpaths[0].closed).toBe(true);
+      expect(anchors(h)).toHaveLength(3);
+      expect(h.s.paths.selected).toEqual([]);
+      await click(h, "pen", 25, 70);
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(2);
+    });
+
+    it("dragging on the first point closes with a curve", async () => {
+      const h = harness(blank(), pathMode);
+      for (const [x, y] of [[20, 20], [80, 20], [80, 80]]) await click(h, "pen", x, y);
+      await h.drag("pen", [20, 20], [10, 40]);
+      const s = h.s.doc.workPath!.subpaths[0];
+      expect(s.closed).toBe(true);
+      expect(s.knots[0].out).toEqual(P(10, 40));
+      expect(s.knots[0].in).toEqual(P(30, 0));
+    });
+
+    it("Escape ends the path; clicking its end then continues it", async () => {
+      const h = harness(blank(), pathMode);
+      await click(h, "pen", 20, 20);
+      await click(h, "pen", 80, 20);
+      h.tools.byId.pen.cancel!(h.ctx());
+      expect(h.s.paths.selected).toEqual([]);
+      // Without a selected end, a click elsewhere starts a new component.
+      await click(h, "pen", 50, 70);
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(2);
+      h.tools.byId.pen.cancel!(h.ctx());
+      // Clicking an end selects it, and the next click extends that path.
+      await click(h, "pen", 80, 20);
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 1 }]);
+      await click(h, "pen", 90, 60);
+      expect(anchors(h, 0)).toEqual([[20, 20], [80, 20], [90, 60]]);
+    });
+
+    it("continuing from a path's start turns it round", async () => {
+      const h = withWork({ subpaths: [{ closed: false, op: "combine", knots: [cornerKnot(P(20, 20)), cornerKnot(P(80, 20))] }] });
+      await click(h, "pen", 20, 20);
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 0 }]);
+      await click(h, "pen", 10, 60);
+      expect(anchors(h)).toEqual([[80, 20], [20, 20], [10, 60]]);
+    });
+
+    it("clicking the end of another open path joins them", async () => {
+      const h = withWork({
+        subpaths: [
+          { closed: false, op: "combine", knots: [cornerKnot(P(10, 10)), cornerKnot(P(40, 10))] },
+          { closed: false, op: "combine", knots: [cornerKnot(P(60, 60)), cornerKnot(P(90, 60))] },
+        ],
+      }, [{ sub: 0, knot: 1 }]);
+      await click(h, "pen", 60, 60);
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(1);
+      expect(anchors(h)).toEqual([[10, 10], [40, 10], [60, 60], [90, 60]]);
+    });
+
+    it("clicking the selected end drops its direction line; dragging from it pulls one out", async () => {
+      const h = harness(blank(), pathMode);
+      await click(h, "pen", 20, 50);
+      await h.drag("pen", [60, 50], [80, 50]);
+      await click(h, "pen", 60, 50);
+      let k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(k.out).toEqual(k.anchor);
+      expect(k.in).toEqual(P(40, 50));
+      await h.drag("pen", [60, 50], [70, 70]);
+      k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(k.out).toEqual(P(70, 70));
+      expect(k.in).toEqual(P(40, 50));
+    });
+
+    it("Auto Add/Delete adds an anchor point on a segment and deletes one it's over", async () => {
+      const h = withWork(square);
+      await click(h, "pen", 50, 20);
+      expect(anchors(h)).toEqual([[20, 20], [50, 20], [80, 20], [80, 80], [20, 80]]);
+      await click(h, "pen", 80, 80);
+      expect(anchors(h)).toEqual([[20, 20], [50, 20], [80, 20], [20, 80]]);
+      expect(h.s.history).toEqual(["Add Anchor Point", "Delete Anchor Point"]);
+    });
+
+    it("places points on top of a path when Auto Add/Delete is off", async () => {
+      const h = harness({ ...blank(), workPath: square }, { pen: { ...DEFAULT_SETTINGS.pen, mode: "path", autoAddDelete: false } });
+      h.s.paths = { target: { kind: "work" }, selected: [] };
+      await click(h, "pen", 50, 20);
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(2);
+    });
+
+    it("Ctrl is the Direct Selection tool, Alt the Convert Point tool", async () => {
+      const h = withWork({ subpaths: [{ closed: false, op: "combine", knots: [cornerKnot(P(20, 20)), smoothKnot(P(50, 50), P(70, 50)), cornerKnot(P(80, 80))] }] }, [{ sub: 0, knot: 2 }]);
+      await h.drag("pen", [20, 20], [30, 25], { mod: true });
+      expect(anchors(h)[0]).toEqual([30, 25]);
+      await click(h, "pen", 50, 50, { alt: true });
+      expect(h.s.doc.workPath!.subpaths[0].knots[1].out).toEqual(P(50, 50));
+      expect(h.s.history).toEqual(["Move Anchor Points", "Convert Point"]);
+    });
+
+    it("Shape mode: the first click makes a shape layer, later clicks edit its path", async () => {
+      const h = harness(blank());
+      const before = h.s.doc.layers.length;
+      await click(h, "pen", 20, 20);
+      expect(h.s.doc.layers).toHaveLength(before + 1);
+      await click(h, "pen", 80, 20);
+      await click(h, "pen", 50, 80);
+      await click(h, "pen", 20, 20);
+      const layer = layerOf(h.s.doc);
+      expect(layer.content.kind).toBe("shape");
+      expect(h.s.doc.layers).toHaveLength(before + 1);
+      expect(getPixel(layer.pixels, 50, 40)[3]).toBe(255);
+      expect(getPixel(layer.pixels, 5, 90)[3]).toBe(0);
+      expect(h.s.history).toEqual(Array(4).fill("Pen Tool"));
+      // The path is closed: the next click is another shape.
+      await click(h, "pen", 10, 90);
+      expect(h.s.doc.layers).toHaveLength(before + 2);
+    });
+
+    it("Shape mode: ending a path that is a lone point leaves no layer", async () => {
+      const h = harness(blank());
+      const before = h.s.doc.layers.length;
+      await click(h, "pen", 20, 20);
+      h.tools.byId.pen.cancel!(h.ctx());
+      expect(h.s.doc.layers).toHaveLength(before);
+    });
+
+    it("Shape mode: with a shape-area operation chosen, new components go into the active shape layer", async () => {
+      const h = harness(blank());
+      for (const [x, y] of [[10, 10], [90, 10], [90, 90], [10, 90], [10, 10]]) await click(h, "pen", x, y);
+      const layers = h.s.doc.layers.length;
+      h.s.settings.pen.op = "subtract";
+      for (const [x, y] of [[30, 30], [70, 30], [70, 70], [30, 70], [30, 30]]) await click(h, "pen", x, y);
+      expect(h.s.doc.layers).toHaveLength(layers);
+      const layer = layerOf(h.s.doc);
+      expect(layer.content.kind === "shape" && layer.content.geometry.kind === "path" && layer.content.geometry.ops).toEqual(["combine", "subtract"]);
+      expect(getPixel(layer.pixels, 20, 50)[3]).toBe(255);
+      expect(getPixel(layer.pixels, 50, 50)[3]).toBe(0);
+    });
+  });
+
+  describe("Direct Selection", () => {
+    it("clicking an anchor point selects it; Shift adds; clicking away deselects", async () => {
+      const h = withWork(square);
+      await click(h, "direct-select", 80, 20);
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 1 }]);
+      await click(h, "direct-select", 80, 80, { shift: true });
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 1 }, { sub: 0, knot: 2 }]);
+      await click(h, "direct-select", 50, 50);
+      expect(h.s.paths.selected).toEqual([]);
+      expect(h.s.history).toEqual([]);
+    });
+
+    it("dragging moves the selected points together; Shift holds 45°", async () => {
+      const h = withWork(square, [{ sub: 0, knot: 1 }, { sub: 0, knot: 2 }]);
+      await h.drag("direct-select", [80, 20], [90, 30]);
+      expect(anchors(h)).toEqual([[20, 20], [90, 30], [90, 90], [20, 80]]);
+      await h.drag("direct-select", [90, 30], [100, 31], { shift: true });
+      expect(anchors(h)[1]).toEqual([100, 30]);
+      expect(h.s.history).toEqual(["Move Anchor Points", "Move Anchor Points"]);
+    });
+
+    it("a marquee selects the anchor points inside it", async () => {
+      const h = withWork(square);
+      await h.drag("direct-select", [5, 5], [95, 50]);
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 0 }, { sub: 0, knot: 1 }]);
+    });
+
+    it("dragging a straight segment moves its two points; a curved one bends", async () => {
+      const h = withWork(square);
+      await h.drag("direct-select", [50, 20], [50, 10]);
+      expect(anchors(h)).toEqual([[20, 10], [80, 10], [80, 80], [20, 80]]);
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 0 }, { sub: 0, knot: 1 }]);
+      const c = withWork({ subpaths: [{ closed: false, op: "combine", knots: [{ ...cornerKnot(P(20, 50)), out: P(20, 20) }, { ...cornerKnot(P(80, 50)), in: P(80, 20) }] }] });
+      await c.drag("direct-select", [50, 27.5], [50, 7.5]);
+      const bent = c.s.doc.workPath!.subpaths[0].knots;
+      expect(bent[0].anchor).toEqual(P(20, 50));
+      expect(bent[0].out.y).toBeLessThan(20);
+      expect(bent[1].in.y).toBeLessThan(20);
+    });
+
+    it("dragging a direction point moves it; the other side of a smooth point turns to stay in line", async () => {
+      const h = withWork({ subpaths: [{ closed: false, op: "combine", knots: [cornerKnot(P(10, 50)), smoothKnot(P(50, 50), P(70, 50)), cornerKnot(P(90, 50))] }] }, [{ sub: 0, knot: 1 }]);
+      await h.drag("direct-select", [70, 50], [50, 80]);
+      const k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(k.out).toEqual(P(50, 80));
+      // The other side keeps its length (20), now pointing opposite.
+      expect(k.in.x).toBeCloseTo(50);
+      expect(k.in.y).toBeCloseTo(30);
+      expect(h.s.history).toEqual(["Move Direction Point"]);
+    });
+
+    it("Delete removes the selected points and the segments touching them; the arrow keys nudge", async () => {
+      const h = withWork(square, [{ sub: 0, knot: 1 }]);
+      const t = h.tools.byId["direct-select"];
+      expect(t.keyDown!(h.ctx(), { key: "ArrowRight", shift: true, alt: false, mod: false })).toBe(true);
+      expect(anchors(h)[1]).toEqual([90, 20]);
+      expect(t.keyDown!(h.ctx(), { key: "ArrowDown", shift: false, alt: false, mod: false })).toBe(true);
+      expect(anchors(h)[1]).toEqual([90, 21]);
+      expect(t.keyDown!(h.ctx(), { key: "Delete", shift: false, alt: false, mod: false })).toBe(true);
+      const s = h.s.doc.workPath!.subpaths;
+      expect(s).toHaveLength(1);
+      expect(s[0].closed).toBe(false);
+      expect(s[0].knots.map((k) => [k.anchor.x, k.anchor.y])).toEqual([[80, 80], [20, 80], [20, 20]]);
+      expect(h.s.paths.selected).toEqual([]);
+    });
+
+    it("keys do nothing with no anchor points selected", () => {
+      const h = withWork(square);
+      expect(h.tools.byId["direct-select"].keyDown!(h.ctx(), { key: "Delete", shift: false, alt: false, mod: false })).toBe(false);
+    });
+  });
+
+  describe("Path Selection", () => {
+    const two: VectorPath = {
+      subpaths: [
+        square.subpaths[0],
+        { closed: true, op: "combine", knots: [cornerKnot(P(100, 100)), cornerKnot(P(140, 100)), cornerKnot(P(140, 140))] },
+      ],
+    };
+    it("clicking inside a component selects all of it", async () => {
+      const h = withWork(two);
+      await click(h, "path-select", 50, 50);
+      expect(h.s.paths.selected).toHaveLength(4);
+      await click(h, "path-select", 130, 110, { shift: true });
+      expect(h.s.paths.selected).toHaveLength(7);
+      await click(h, "path-select", 200, 200);
+      expect(h.s.paths.selected).toEqual([]);
+    });
+
+    it("dragging moves the component; Alt-drag copies it", async () => {
+      const h = withWork(two);
+      await h.drag("path-select", [50, 50], [60, 70]);
+      expect(anchors(h, 0)[0]).toEqual([30, 40]);
+      expect(anchors(h, 1)[0]).toEqual([100, 100]);
+      await h.drag("path-select", [50, 70], [50, 100], { alt: true });
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(3);
+      expect(anchors(h, 0)[0]).toEqual([30, 40]);
+      expect(anchors(h, 2)[0]).toEqual([30, 70]);
+      expect(h.s.history).toEqual(["Move Path Components", "Duplicate Path Component"]);
+    });
+
+    it("a marquee selects the components it touches; Delete removes them", async () => {
+      const h = withWork(two);
+      await h.drag("path-select", [90, 90], [150, 150]);
+      expect(h.s.paths.selected).toHaveLength(3);
+      h.tools.byId["path-select"].keyDown!(h.ctx(), { key: "Delete", shift: false, alt: false, mod: false });
+      expect(h.s.doc.workPath!.subpaths).toHaveLength(1);
+    });
+  });
+
+  describe("Convert Point, Add Anchor Point and Delete Anchor Point", () => {
+    const curve: VectorPath = { subpaths: [{ closed: false, op: "combine", knots: [cornerKnot(P(10, 50)), smoothKnot(P(50, 50), P(70, 50)), cornerKnot(P(90, 50))] }] };
+    it("Convert Point: a click makes a smooth point a corner; a drag makes a corner smooth", async () => {
+      const h = withWork(curve);
+      await click(h, "convert-point", 50, 50);
+      const k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect([k.in, k.out]).toEqual([P(50, 50), P(50, 50)]);
+      await h.drag("convert-point", [50, 50], [60, 70]);
+      const s = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(s.out).toEqual(P(60, 70));
+      expect(s.in).toEqual(P(40, 30));
+      expect(h.s.history).toEqual(["Convert Point", "Convert Point"]);
+    });
+
+    it("Convert Point: dragging a direction point moves it alone", async () => {
+      const h = withWork(curve, [{ sub: 0, knot: 1 }]);
+      await h.drag("convert-point", [70, 50], [60, 80]);
+      const k = h.s.doc.workPath!.subpaths[0].knots[1];
+      expect(k.out).toEqual(P(60, 80));
+      expect(k.in).toEqual(P(30, 50));
+    });
+
+    it("Add Anchor Point adds a point where a segment is clicked, keeping its shape", async () => {
+      const h = withWork(square);
+      await click(h, "add-anchor", 50, 80);
+      expect(anchors(h)).toEqual([[20, 20], [80, 20], [80, 80], [50, 80], [20, 80]]);
+      expect(h.s.paths.selected).toEqual([{ sub: 0, knot: 3 }]);
+    });
+
+    it("Delete Anchor Point removes the point clicked and joins its neighbours", async () => {
+      const h = withWork(square);
+      await click(h, "delete-anchor", 80, 80);
+      expect(anchors(h)).toEqual([[20, 20], [80, 20], [20, 80]]);
+      expect(h.s.doc.workPath!.subpaths[0].closed).toBe(true);
+      expect(h.s.history).toEqual(["Delete Anchor Point"]);
+    });
   });
 });

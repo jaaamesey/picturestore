@@ -111,7 +111,7 @@ import { createSnapper, guidePosition } from "./snapping";
 import { activeSnapTo, loadViewOptions, saveViewOptions, shown, type ViewOptions } from "./viewOptions";
 import type { SmartGuide } from "../core/snap";
 import type { ShapeOptionsPatch, ShapeStroke } from "./types";
-import type { Overlay, ShapeSettings, ShapeToolId, ToolContext, ToolEvent, ToolId, ToolKey, ToolSettings, Writable } from "./types";
+import { NO_PATH_STATE, type Overlay, type PathState, type ShapeSettings, type ShapeToolId, type ToolContext, type ToolEvent, type ToolId, type ToolKey, type ToolKeyDown, type ToolSettings, type Writable } from "./types";
 import { loadPreferences, savePreferences, type Preferences } from "./preferences";
 import { loadDefaultStyles } from "./defaultStyles";
 import { fitView, followRemap, nextZoomStep, placeAt, prevZoomStep, screenToDoc, zoomAt } from "./view";
@@ -130,6 +130,8 @@ export interface DocumentSession {
   /** Alt-clicking a mask thumbnail shows the active layer's mask alone, in grey, until it's clicked again. */
   readonly maskView: Accessor<boolean>;
   readonly overlay: Accessor<Overlay | null>;
+  /** The target path and its selected anchor points (not history). */
+  readonly paths: Accessor<PathState>;
   /** Smart guides of the current drag's snap. */
   readonly smartGuides: Accessor<readonly SmartGuide[]>;
   readonly view: Accessor<View>;
@@ -150,6 +152,7 @@ interface SessionInternals extends DocumentSession {
   setFloating(f: FloatingLayer | null): void;
   setMaskView(on: boolean): void;
   setOverlay(o: Overlay | null): void;
+  setPaths(fn: (s: PathState) => PathState): void;
   setSmartGuides(g: readonly SmartGuide[]): void;
   setView(v: View): void;
   markSaved(doc: Doc | null): void;
@@ -167,6 +170,9 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
   const [preview, setPreview] = createSignal<Doc | null>(null);
   const [floating, setFloating] = createSignal<FloatingLayer | null>(null);
   const [overlay, setOverlay] = createSignal<Overlay | null>(null);
+  // Read synchronously by tools (signal reads lag writes until Solid flushes), so the signal only notifies.
+  let pathState: PathState = NO_PATH_STATE;
+  const [pathVersion, bumpPaths] = createSignal(0);
   const [smartGuides, setSmartGuides] = createSignal<readonly SmartGuide[]>([]);
   const [view, setView] = createSignal<View>({ zoom: 1, panX: 0, panY: 0 });
   const [saved, setSaved] = createSignal<Doc | null>(doc);
@@ -191,6 +197,13 @@ function createSession(doc: Doc, name: string, label: string, smartLink: SmartLi
     maskView: () => !!viewedMask(),
     setMaskView,
     overlay,
+    paths: () => (pathVersion(), pathState),
+    setPaths(fn) {
+      const next = fn(pathState);
+      if (next === pathState) return;
+      pathState = next;
+      bumpPaths((v) => v + 1);
+    },
     smartGuides,
     view,
     dirty: createMemo(() => saved() !== current()),
@@ -234,10 +247,28 @@ function maskViewDoc(d: Doc, id: string, mask: LayerMask): Doc {
 /** A stroke's properties before any are chosen. */
 export const DEFAULT_STROKE: ShapeStroke = { color: BLACK, width: 3, align: "inside" };
 
+/** The Pen group edits the active shape layer's fill and stroke too. */
+const PEN_STYLE_TOOLS: readonly ToolId[] = ["pen", "freeform-pen", "curvature-pen"];
+
 export const DEFAULT_SETTINGS: ToolSettings = {
   transform: { showControls: true, link: true, showReference: false, interpolation: "bicubic" },
   shape: { mode: "shape", fill: "foreground", stroke: null, radius: 0, sides: 5, starRatio: 1, weight: 2 },
   type: { char: DEFAULT_CHAR_STYLE, paragraph: DEFAULT_PARAGRAPH_STYLE, antiAlias: "sharp" },
+  pen: {
+    mode: "shape",
+    op: "new",
+    autoAddDelete: true,
+    rubberBand: false,
+    curveFit: 2,
+    magnetic: false,
+    magneticWidth: 10,
+    magneticContrast: 10,
+    magneticFrequency: 57,
+    magneticPressure: false,
+    constrainDragging: false,
+  },
+  // Photoshop's defaults: a thin black line.
+  pathDisplay: { thickness: 1, color: BLACK },
   brush: DEFAULT_BRUSH,
   eraser: { ...DEFAULT_BRUSH, hardness: 1 },
   selectionMode: "replace",
@@ -454,6 +485,10 @@ export function createEditor() {
         setForeground,
         setTool,
         preferences: prefs,
+        get paths() {
+          return s.paths();
+        },
+        setPaths: s.setPaths,
         askBoxSize: () => askBoxSize(),
       };
     }
@@ -837,7 +872,7 @@ export function createEditor() {
     function setShapeOptions(patch: ShapeOptionsPatch) {
       const s = active();
       const l = s && activeLayer(s.doc());
-      const editing = !!s && !!l && l.content.kind === "shape" && SHAPE_TOOLS.includes(currentTool);
+      const editing = !!s && !!l && l.content.kind === "shape" && (SHAPE_TOOLS.includes(currentTool) || PEN_STYLE_TOOLS.includes(currentTool));
       const c = editing ? latestShape(s!, l!) : null;
       const { stroke: strokePatch, ...rest } = patch;
       const baseStroke = c ? c.style.stroke : snapshot(settings).shape.stroke;
@@ -1371,6 +1406,16 @@ export function createEditor() {
       cursor: (e: ToolEvent | null) => {
         const s = active();
         return s ? (tools.byId[toolId()].cursor?.(context(s), e) ?? "default") : "default";
+      },
+      /** The pointer moved over the canvas with no button down (a Pen tool's Rubber Band). */
+      pointerHover: (e: ToolEvent) => {
+        if (pending === 0) withTool((ctx) => tools.byId[currentTool].hover?.(ctx, e));
+      },
+      /** Any key, before commands see it (the path tools' Delete, arrows, Enter and Escape); true when the tool used it. */
+      toolKeyDown(e: ToolKeyDown): boolean {
+        let used = false;
+        if (pending === 0) withTool((ctx) => (used = !!tools.byId[currentTool].keyDown?.(ctx, e)));
+        return used;
       },
       /** A plain key for the current tool (the Crop tool's H, O, X, P, I); true when it used it. */
       toolKey(e: ToolKey): boolean {

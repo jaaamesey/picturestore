@@ -10,6 +10,8 @@ export interface ViewOptions {
   readonly showGuides: boolean;
   readonly showGrid: boolean;
   readonly showSmartGuides: boolean;
+  /** View ▸ Show ▸ Target Path: the path selected in the Paths panel. */
+  readonly showTargetPath: boolean;
   /** View ▸ Rulers (Ctrl+R). */
   readonly rulers: boolean;
   /** View ▸ Snap (Shift+Ctrl+;). */
@@ -33,6 +35,7 @@ export const DEFAULT_VIEW_OPTIONS: ViewOptions = {
   showGuides: true,
   showGrid: false,
   showSmartGuides: true,
+  showTargetPath: true,
   rulers: false,
   snap: true,
   snapTo: { guides: true, grid: true, layers: true, bounds: true },
@@ -44,6 +47,7 @@ export const shown = (v: ViewOptions) => ({
   guides: v.extras && v.showGuides,
   grid: v.extras && v.showGrid,
   smartGuides: v.extras && v.showSmartGuides,
+  targetPath: v.extras && v.showTargetPath,
 });
 
 /**
@@ -68,6 +72,7 @@ export function normalizeViewOptions(raw: unknown): ViewOptions {
     showGuides: bool(o.showGuides, d.showGuides),
     showGrid: bool(o.showGrid, d.showGrid),
     showSmartGuides: bool(o.showSmartGuides, d.showSmartGuides),
+    showTargetPath: bool(o.showTargetPath, d.showTargetPath),
     rulers: bool(o.rulers, d.rulers),
     snap: bool(o.snap, d.snap),
     snapTo: {

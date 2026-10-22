@@ -6,6 +6,8 @@ import { createShapeTool } from "./shape";
 import { createMoveTool, createTransformController, type TransformController } from "./transform";
 import { createCropTool, type CropController } from "./crop";
 import { createPerspectiveCropTool } from "./perspectiveCrop";
+import { createPenTool } from "./pen";
+import { createAddAnchorTool, createConvertPointTool, createDeleteAnchorTool, createDirectSelectTool, createPathSelectTool } from "./pathTools";
 import { createTypeController, type TypeController } from "./type";
 
 export interface ToolInfo {
@@ -32,10 +34,16 @@ export const TOOLBAR: readonly ToolInfo[] = [
   { id: "eraser", label: "Eraser", key: "e" },
   { id: "bucket", label: "Paint Bucket", key: "g" },
   { id: "eyedropper", label: "Eyedropper", key: "i" },
+  { id: "pen", label: "Pen Tool", key: "p" },
+  { id: "add-anchor", label: "Add Anchor Point Tool", key: "p" },
+  { id: "delete-anchor", label: "Delete Anchor Point Tool", key: "p" },
+  { id: "convert-point", label: "Convert Point Tool", key: "p" },
   { id: "type-horizontal", label: "Horizontal Type Tool", key: "t" },
   { id: "type-vertical", label: "Vertical Type Tool", key: "t" },
   { id: "type-mask-vertical", label: "Vertical Type Mask Tool", key: "t" },
   { id: "type-mask-horizontal", label: "Horizontal Type Mask Tool", key: "t" },
+  { id: "path-select", label: "Path Selection Tool", key: "a" },
+  { id: "direct-select", label: "Direct Selection Tool", key: "a" },
   { id: "rectangle", label: "Rectangle Tool", key: "u" },
   { id: "ellipse", label: "Ellipse Tool", key: "u" },
   { id: "triangle", label: "Triangle Tool", key: "u" },
@@ -76,7 +84,13 @@ export function createTools(): Tools {
     createPaintTool("eraser"),
     bucketTool,
     createEyedropperTool(),
+    createPenTool(),
+    createAddAnchorTool(),
+    createDeleteAnchorTool(),
+    createConvertPointTool(),
     ...type.tools,
+    createPathSelectTool(),
+    createDirectSelectTool(),
     createShapeTool("rectangle"),
     createShapeTool("ellipse"),
     createShapeTool("triangle"),

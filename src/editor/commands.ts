@@ -289,6 +289,7 @@ export const COMMANDS = {
   "view.show.guides": viewToggle("Guides", "showGuides", ["Mod+;"]),
   "view.show.grid": viewToggle("Grid", "showGrid", ["Mod+'"]),
   "view.show.smartGuides": viewToggle("Smart Guides", "showSmartGuides"),
+  "view.show.targetPath": viewToggle("Target Path", "showTargetPath"),
   "view.rulers": viewToggle("Rulers", "rulers", ["Mod+R"]),
   "view.snap": viewToggle("Snap", "snap", ["Shift+Mod+;"]),
   "view.snapTo.guides": snapToToggle("Guides", "guides"),

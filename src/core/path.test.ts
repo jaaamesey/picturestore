@@ -7,11 +7,16 @@ import { rect, vec } from "./geometry";
 import {
   addSubpath,
   alignSubpaths,
+  allAnchors,
+  anchorsIn,
   arrangeSubpaths,
   closeSubpath,
   cornerKnot,
   deleteSegment,
+  deleteSegments,
+  deleteSelection,
   distributeSubpaths,
+  handleAt,
   dragSegment,
   extend,
   insertKnot,
@@ -20,9 +25,13 @@ import {
   mergeComponents,
   moveHandle,
   nearestSegment,
+  pointInSubpath,
   pathArea,
   removeKnot,
+  selectedSegments,
+  selectedSubpaths,
   segmentCount,
+  subpathTouchesRect,
   smoothKnot,
   toCorner,
   toSmooth,
@@ -125,6 +134,31 @@ describe("editing a path", () => {
     expect(opened[0].knots.map((k) => k.anchor)).toEqual([P(10, 10), P(0, 10), P(0, 0), P(10, 0)]);
     const split = deleteSegment(line(), 0, 0).subpaths;
     expect(split.map((s) => s.knots.length)).toEqual([1, 2]);
+  });
+
+  it("Delete on selected points: segments between two selected neighbours go; a lone point goes with the segments touching it; a whole component goes", () => {
+    const sq = { subpaths: [square(0, 0, 10)] };
+    const knot = (k: number) => ({ sub: 0, knot: k });
+    // A selected segment: only that segment goes; the path opens.
+    const cut = deleteSelection(sq, [knot(1), knot(2)]);
+    const seg = cut.path.subpaths;
+    // The two points stay selected, now ends of the opened path: Delete again erases them.
+    expect(cut.selected).toEqual([{ sub: 0, knot: 3 }, { sub: 0, knot: 0 }]);
+    expect(seg).toHaveLength(1);
+    expect(seg[0].closed).toBe(false);
+    expect(seg[0].knots.map((k) => k.anchor)).toEqual([P(10, 10), P(0, 10), P(0, 0), P(10, 0)]);
+    // A lone point: it goes, with both its segments; the other three stay as an open path.
+    const lone = deleteSelection(sq, [knot(1)]).path.subpaths;
+    expect(lone).toHaveLength(1);
+    expect(lone[0].knots.map((k) => k.anchor)).toEqual([P(10, 10), P(0, 10), P(0, 0)]);
+    // Every point: the component goes.
+    expect(deleteSelection(sq, [knot(0), knot(1), knot(2), knot(3)]).path.subpaths).toHaveLength(0);
+    // Two cuts in a closed path leave two pieces.
+    const two = deleteSegments(sq, 0, [0, 2]).subpaths;
+    expect(two.map((s) => s.knots.map((k) => k.anchor))).toEqual([[P(10, 0), P(10, 10)], [P(0, 10), P(0, 0)]]);
+    // An open path: a lone middle point splits it.
+    const open: VectorPath = { subpaths: [{ closed: false, op: "combine", knots: [cornerKnot(P(0, 0)), cornerKnot(P(5, 0)), cornerKnot(P(10, 0))] }] };
+    expect(deleteSelection(open, [knot(1)]).path.subpaths.map((s) => s.knots.length)).toEqual([1, 1]);
   });
 
   it("joins two open paths at their ends, in order, and closes a path by joining its own ends", () => {
@@ -257,5 +291,34 @@ describe("path shapes", () => {
     const back = documentPath(c.geometry, placementMapping(c.placement));
     expect(back.subpaths.map((s) => [s.op, s.closed, s.knots.length])).toEqual([["combine", true, 4], ["exclude", false, 4]]);
     expect(back.subpaths[0].knots[2].anchor.x).toBeCloseTo(50);
+  });
+});
+
+describe("hit testing", () => {
+  const sq = { subpaths: [square(10, 10, 20)] };
+
+  it("finds direction points of selected anchors only", () => {
+    const path = addSubpath({ subpaths: [] }, smoothKnot(P(10, 10), P(20, 10)));
+    expect(handleAt(path, [{ sub: 0, knot: 0 }], P(20.5, 10), 2)).toEqual({ ref: { sub: 0, knot: 0 }, side: "out" });
+    expect(handleAt(path, [], P(20, 10), 2)).toBeNull();
+    expect(handleAt(path, [{ sub: 0, knot: 0 }], P(0, 10), 2)?.side).toBe("in");
+  });
+
+  it("tells whether a point is inside a component, and which components a rectangle touches", () => {
+    expect(pointInSubpath(sq.subpaths[0], P(20, 20))).toBe(true);
+    expect(pointInSubpath(sq.subpaths[0], P(5, 20))).toBe(false);
+    expect(subpathTouchesRect(sq.subpaths[0], rect(25, 5, 10, 10))).toBe(true); // a corner inside
+    expect(subpathTouchesRect(sq.subpaths[0], rect(0, 18, 40, 4))).toBe(true); // crossing, with no corner inside
+    expect(subpathTouchesRect(sq.subpaths[0], rect(40, 40, 5, 5))).toBe(false);
+  });
+
+  it("selects anchors in a rectangle; a component is selected when all its anchors are; two selected neighbours make a selected segment", () => {
+    expect(anchorsIn(sq, rect(0, 0, 25, 25)).map((r) => r.knot)).toEqual([0]);
+    const all = allAnchors(sq, [0]);
+    expect(selectedSubpaths(sq, all)).toEqual([0]);
+    expect(selectedSubpaths(sq, all.slice(1))).toEqual([]);
+    expect(selectedSegments(sq, [{ sub: 0, knot: 1 }, { sub: 0, knot: 2 }])).toEqual([{ sub: 0, seg: 1 }]);
+    expect(selectedSegments(sq, [{ sub: 0, knot: 3 }, { sub: 0, knot: 0 }])).toEqual([{ sub: 0, seg: 3 }]); // the closing one
+    expect(selectedSegments(sq, [{ sub: 0, knot: 0 }, { sub: 0, knot: 2 }])).toEqual([]);
   });
 });

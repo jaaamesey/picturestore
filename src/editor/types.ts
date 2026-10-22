@@ -9,6 +9,7 @@ import type { SelectionMode } from "../core/selection";
 import type { Filter } from "../core/rasterize";
 import type { TransformMode, TransformState } from "../core/transform";
 import type { FloatingLayer, View } from "../gpu/renderer";
+import type { PathOp, PointRef } from "../core/path";
 import type { Snapper } from "./snapping";
 import type { Preferences } from "./preferences";
 import type { AntiAlias, CharStyle, ParagraphStyle, TextContent } from "../text/model";
@@ -37,7 +38,18 @@ export type ToolId =
   | "type-vertical"
   | "type-mask-horizontal"
   | "type-mask-vertical"
+  | "pen"
+  | "freeform-pen"
+  | "curvature-pen"
+  | "add-anchor"
+  | "delete-anchor"
+  | "convert-point"
+  | "path-select"
+  | "direct-select"
   | "transform";
+
+/** The tools that edit paths. */
+export type PathToolId = "pen" | "freeform-pen" | "curvature-pen" | "add-anchor" | "delete-anchor" | "convert-point" | "path-select" | "direct-select";
 
 export type TypeToolId = "type-horizontal" | "type-vertical" | "type-mask-horizontal" | "type-mask-vertical";
 
@@ -69,6 +81,46 @@ export type ShapeStroke = NonNullable<ShapeSettings["stroke"]>;
 
 /** A change to shape options; a stroke patch names only the stroke properties it changes (null removes the stroke). */
 export type ShapeOptionsPatch = Partial<Omit<ShapeSettings, "stroke">> & { readonly stroke?: Partial<ShapeStroke> | null };
+
+/** The Pen tools' options (Pen, Freeform Pen with Magnetic, Curvature Pen) and the path selection tools'. */
+export interface PenSettings {
+  /** Shape layers, or a work path. */
+  readonly mode: "shape" | "path";
+  /** What a new component does: "new" makes a new shape layer (Shape mode); the rest are shape-area operations. */
+  readonly op: "new" | PathOp;
+  /** The Pen tool adds an anchor point when it's over a segment of the path and deletes one when it's over an anchor point. */
+  readonly autoAddDelete: boolean;
+  /** Preview the segment to the pointer between clicks. */
+  readonly rubberBand: boolean;
+  /** Freeform Pen: how closely the path follows the pointer, in pixels (0.5–10; higher is simpler). */
+  readonly curveFit: number;
+  /** Freeform Pen: snap to edges in the image (the Magnetic Pen). */
+  readonly magnetic: boolean;
+  readonly magneticWidth: number;
+  readonly magneticContrast: number;
+  readonly magneticFrequency: number;
+  readonly magneticPressure: boolean;
+  /** Path Selection and Direct Selection: dragging a segment edits only the segments between the selected anchor points. */
+  readonly constrainDragging: boolean;
+}
+
+/** How paths show on the canvas (Path options): the line's thickness in pixels and colour. */
+export interface PathDisplay {
+  readonly thickness: number;
+  readonly color: RGB;
+}
+
+/** The target path, and its selected anchor points: not part of history. */
+export type PathTarget = { readonly kind: "work" } | { readonly kind: "saved"; readonly id: string } | { readonly kind: "layer"; readonly layerId: string };
+
+export interface PathState {
+  /** The path the path tools edit (the Paths panel's selected path). */
+  readonly target: PathTarget | null;
+  /** Its selected anchor points: shown solid, with their direction lines. */
+  readonly selected: readonly PointRef[];
+}
+
+export const NO_PATH_STATE: PathState = { target: null, selected: [] };
 
 export interface TransformSettings {
   /** Move tool: show the bounding box and handles of the active layer/selection (Photoshop's default: on). */
@@ -117,6 +169,8 @@ export interface ToolSettings {
   readonly crop: CropSettings;
   readonly perspectiveCrop: PerspectiveCropSettings;
   readonly shape: ShapeSettings;
+  readonly pen: PenSettings;
+  readonly pathDisplay: PathDisplay;
   readonly type: TypeSettings;
   readonly brush: BrushSettings;
   readonly eraser: BrushSettings;
@@ -233,6 +287,9 @@ export interface ToolContext {
   /** Activates another tool (e.g. leaving Free Transform). */
   setTool(id: ToolId): void;
   readonly preferences: Preferences;
+  /** The target path and selected anchor points (see PathState); changing them records no history. */
+  readonly paths: PathState;
+  setPaths(fn: (s: PathState) => PathState): void;
   /** Alt-click with a Type tool: Photoshop's Paragraph Text Size dialog (null if cancelled). */
   askBoxSize(): Promise<{ width: number; height: number } | null>;
 }
@@ -261,6 +318,19 @@ export interface Tool {
   sync?(ctx: ToolContext): void;
   /** A key without Ctrl/Alt while the tool is selected; true when the tool used it. */
   key?(ctx: ToolContext, e: ToolKey): boolean;
+  /**
+   * Every key press, before commands see it (Delete, Backspace, the arrows, Enter and Escape mean other
+   * things elsewhere): true when the tool used it.
+   */
+  keyDown?(ctx: ToolContext, e: ToolKeyDown): boolean;
+  /** The pointer moved over the canvas with no button down (previews, cursors that depend on what's under it). */
+  hover?(ctx: ToolContext, e: ToolEvent): void;
+}
+
+export interface ToolKeyDown extends ToolKey {
+  readonly alt: boolean;
+  /** Ctrl, or Cmd on macOS. */
+  readonly mod: boolean;
 }
 
 export interface ToolKey {

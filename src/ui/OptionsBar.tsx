@@ -4,7 +4,7 @@ import { BLACK, toHex, type RGB } from "../core/color";
 import { activeLayer } from "../core/document";
 import type { StrokeAlign } from "../core/shape";
 import { SHAPE_TOOLS } from "../editor/tools";
-import type { ShapeOptionsPatch, ShapeSettings, ShapeStroke } from "../editor/types";
+import type { PenSettings, ShapeOptionsPatch, ShapeSettings, ShapeStroke } from "../editor/types";
 import { ColorPicker } from "./ColorPicker";
 import { Popover } from "./Popover";
 import type { SelectionMode } from "../core/selection";
@@ -14,6 +14,8 @@ import { AppContext } from "./context";
 import { IconButton, NumberField, Separator } from "./controls";
 import { CropOptions, PerspectiveCropOptions } from "./CropOptions";
 import { TypeOptions } from "./type/TypeOptions";
+import { Icon } from "./icons";
+import { isPathTool } from "./PathsOverlay";
 
 const MODES: readonly { mode: SelectionMode; label: string; glyph: string }[] = [
   { mode: "replace", label: "New selection", glyph: "▢" },
@@ -247,11 +249,8 @@ function Swatch(props: { title: string; testId: string; color: RGB | null; onCha
   );
 }
 
-/**
- * Shape tool options. With a shape layer selected they show (and edit) that
- * layer's properties, as Photoshop's options bar does.
- */
-function ShapeOptions() {
+/** Fill, stroke colour, width and alignment: of the active shape layer if there is one, else what new shapes get. */
+function ShapeStyleFields() {
   const { editor } = useContext(AppContext);
   const o = () => editor.settings.shape;
   const layer = () => {
@@ -264,14 +263,41 @@ function ShapeOptions() {
     const f = o().fill;
     return f === "foreground" ? editor.foreground() : f;
   };
-  const radius = () => {
-    const g = layer()?.geometry;
-    return g?.kind === "rectangle" ? g.radius : o().radius;
-  };
   const stroke = () => (layer() ? layer()!.style.stroke : o().stroke);
   const set = (patch: ShapeOptionsPatch) => editor.setShapeOptions(patch);
   // Only the changed property: the editor applies it to the latest stroke (edits may still be in flight).
   const strokeWith = (patch: Partial<ShapeStroke>) => set({ stroke: patch });
+  return (
+    <>
+      <Swatch title="Fill" testId="shape-fill" color={fill()} onChange={(fill) => set({ fill })} />
+      <Swatch title="Stroke" testId="shape-stroke" color={stroke()?.color ?? null} onChange={(c) => (c ? strokeWith({ color: c }) : set({ stroke: null }))} />
+      <NumberField label="Width" testId="shape-stroke-width" value={stroke()?.width ?? 3} min={0} max={1000} step={0.5} suffix="px" onChange={(width) => strokeWith({ width })} />
+      <select title="Stroke alignment" data-testid="shape-stroke-align" value={stroke()?.align ?? "inside"} onChange={(e) => strokeWith({ align: e.currentTarget.value as StrokeAlign })}>
+        <option value="inside">Inside</option>
+        <option value="center">Center</option>
+        <option value="outside">Outside</option>
+      </select>
+    </>
+  );
+}
+
+/**
+ * Shape tool options. With a shape layer selected they show (and edit) that
+ * layer's properties, as Photoshop's options bar does.
+ */
+function ShapeOptions() {
+  const { editor } = useContext(AppContext);
+  const o = () => editor.settings.shape;
+  const layer = () => {
+    const d = editor.active()?.doc();
+    const l = d && activeLayer(d);
+    return l?.content.kind === "shape" ? l.content : null;
+  };
+  const radius = () => {
+    const g = layer()?.geometry;
+    return g?.kind === "rectangle" ? g.radius : o().radius;
+  };
+  const set = (patch: ShapeOptionsPatch) => editor.setShapeOptions(patch);
   const tool = () => editor.tool();
   return (
     <>
@@ -287,19 +313,7 @@ function ShapeOptions() {
         <option value="pixels">Pixels</option>
       </select>
       <Show when={o().mode === "shape"}>
-        <Swatch title="Fill" testId="shape-fill" color={fill()} onChange={(fill) => set({ fill })} />
-        <Swatch title="Stroke" testId="shape-stroke" color={stroke()?.color ?? null} onChange={(c) => (c ? strokeWith({ color: c }) : set({ stroke: null }))} />
-        <NumberField label="Width" testId="shape-stroke-width" value={stroke()?.width ?? 3} min={0} max={1000} step={0.5} suffix="px" onChange={(width) => strokeWith({ width })} />
-        <select
-          title="Stroke alignment"
-          data-testid="shape-stroke-align"
-          value={stroke()?.align ?? "inside"}
-          onChange={(e) => strokeWith({ align: e.currentTarget.value as StrokeAlign })}
-        >
-          <option value="inside">Inside</option>
-          <option value="center">Center</option>
-          <option value="outside">Outside</option>
-        </select>
+        <ShapeStyleFields />
         <Separator />
       </Show>
       <Switch>
@@ -314,6 +328,69 @@ function ShapeOptions() {
           <NumberField label="Weight" testId="shape-weight" value={o().weight} min={1} max={1000} suffix="px" onChange={(weight) => set({ weight })} />
         </Match>
       </Switch>
+    </>
+  );
+}
+
+const PEN_OPS: readonly { op: PenSettings["op"]; label: string }[] = [
+  { op: "new", label: "New Layer" },
+  { op: "combine", label: "Combine Shapes" },
+  { op: "subtract", label: "Subtract Front Shape" },
+  { op: "intersect", label: "Intersect Shape Areas" },
+  { op: "exclude", label: "Exclude Overlapping Shapes" },
+];
+
+/** The Pen group's and the path selection tools' options. */
+function PenOptions() {
+  const { editor } = useContext(AppContext);
+  const o = () => editor.settings.pen;
+  const tool = () => editor.tool();
+  const set = (patch: Partial<PenSettings>) => editor.setSettings((s) => void Object.assign(s.pen, patch));
+  const [gear, setGear] = createSignal(false);
+  let gearButton!: HTMLButtonElement;
+  const draws = () => ["pen", "freeform-pen", "curvature-pen"].includes(tool());
+  const check = (label: string, testId: string, checked: boolean, onChange: (v: boolean) => void) => (
+    <label class="flex items-center gap-1">
+      <input type="checkbox" data-testid={testId} checked={checked} onChange={(e) => onChange(e.currentTarget.checked)} />
+      <span>{label}</span>
+    </label>
+  );
+  return (
+    <>
+      <Show when={draws()}>
+        <select data-testid="pen-mode" title="Drawing mode" value={o().mode} onChange={(e) => set({ mode: e.currentTarget.value as PenSettings["mode"] })}>
+          <option value="shape">Shape</option>
+          <option value="path">Path</option>
+        </select>
+        <Show when={o().mode === "shape"}>
+          <ShapeStyleFields />
+        </Show>
+        <Separator />
+        <select
+          data-testid="pen-op"
+          title="Path operations"
+          value={o().mode === "path" && o().op === "new" ? "combine" : o().op}
+          onChange={(e) => set({ op: e.currentTarget.value as PenSettings["op"] })}
+        >
+          <For each={PEN_OPS}>{(p) => <Show when={p.op !== "new" || o().mode === "shape"}><option value={p.op}>{p.label}</option></Show>}</For>
+        </select>
+        <div class="relative">
+          <button ref={gearButton} type="button" title="Pen options" data-testid="pen-gear" aria-expanded={gear() ? "true" : "false"} class="grid size-6 place-items-center rounded-sm hover:bg-raised" onClick={() => setGear((g) => !g)}>
+            <Icon name="gear" size={16} />
+          </button>
+          <Popover open={gear()} onClose={() => setGear(false)} trigger={() => gearButton} class="top-full left-0 mt-1" testId="pen-gear-popover">
+            <div class="flex w-56 flex-col gap-2 rounded-md border border-line bg-panel p-3 shadow-lg">
+              <Swatch title="Path Color" testId="path-color" color={editor.settings.pathDisplay.color} onChange={(c) => editor.setSettings((s) => void (s.pathDisplay.color = c ?? BLACK))} />
+              <NumberField label="Path Thickness" testId="path-thickness" value={editor.settings.pathDisplay.thickness} min={1} max={5} step={1} suffix="px" onChange={(t) => editor.setSettings((s) => void (s.pathDisplay.thickness = t))} />
+              <Show when={tool() === "pen"}>{check("Rubber Band", "pen-rubber-band", o().rubberBand, (rubberBand) => set({ rubberBand }))}</Show>
+            </div>
+          </Popover>
+        </div>
+      </Show>
+      <Show when={tool() === "pen"}>{check("Auto Add/Delete", "pen-auto", o().autoAddDelete, (autoAddDelete) => set({ autoAddDelete }))}</Show>
+      <Show when={tool() === "path-select" || tool() === "direct-select"}>
+        {check("Constrain Path Dragging", "pen-constrain", o().constrainDragging, (constrainDragging) => set({ constrainDragging }))}
+      </Show>
     </>
   );
 }
@@ -363,6 +440,9 @@ export function OptionsBar() {
         </Match>
         <Match when={SHAPE_TOOLS.includes(editor.tool())}>
           <ShapeOptions />
+        </Match>
+        <Match when={isPathTool(editor.tool())}>
+          <PenOptions />
         </Match>
         <Match when={editor.tool().startsWith("type-")}>
           <TypeOptions />

@@ -230,7 +230,7 @@ const MENUS: readonly { readonly title: string; readonly items: readonly MenuIte
       "view.actual",
       "-",
       "view.extras",
-      { submenu: "Show", items: ["view.show.guides", "view.show.grid", "view.show.smartGuides"] },
+      { submenu: "Show", items: ["view.show.guides", "view.show.grid", "view.show.targetPath", "view.show.smartGuides"] },
       "-",
       "view.rulers",
       "-",

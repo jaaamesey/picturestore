@@ -12,6 +12,7 @@ import { boxCorners, boxToDoc, overlayLines } from "../core/crop";
 import { toHex } from "../core/color";
 import type { Overlay, ToolEvent } from "../editor/types";
 import { TextInput, TextOverlayView } from "./TextEditing";
+import { PathsOverlay } from "./PathsOverlay";
 import { RULER_PX, docToScreen, rulerStep, screenToDoc, zoomAt } from "../editor/view";
 import { shown } from "../editor/viewOptions";
 import { gridSpacing } from "../editor/preferences";
@@ -117,7 +118,7 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
       // tools that only show a state skip to the latest.
       const events = editor.latestMoveOnly() ? [e] : (e.getCoalescedEvents?.() ?? [e]);
       for (const c of events) editor.pointerMove(toEvent(c));
-    }
+    } else editor.pointerHover(toEvent(e));
     setHover(toEvent(e));
   };
 
@@ -286,6 +287,16 @@ export function Viewport(props: { device: GPUDevice; readback: boolean }) {
         {(s) => (
           <svg class="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
             <ViewExtras doc={s().displayed()} view={s().view()} guides={s().smartGuides()} size={size()} />
+            <PathsOverlay
+              doc={s().displayed()}
+              view={s().view()}
+              state={s().paths()}
+              tool={editor.tool()}
+              display={editor.settings.pathDisplay}
+              showTarget={shown(editor.viewOptions()).targetPath}
+              hover={hover()}
+              rubberBand={editor.settings.pen.rubberBand}
+            />
             <Show when={s().overlay()}>
               {(o) => <OverlayShape overlay={o()} view={s().view()} showReference={editor.settings.transform.showReference} hover={hover()} />}
             </Show>
