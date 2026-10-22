@@ -144,7 +144,7 @@ function LayerRow(props: {
         fallback={
           <div class={["relative", targetRing(props.active && !props.maskTargeted && !!layer().mask && hasPixels(layer()))]}>
             <Show
-              when={layer().content.kind === "adjustment"}
+              when={layer().content.kind === "adjustment" || layer().content.kind === "text"}
               fallback={
                 <div
                   data-testid="layer-thumbnail"
@@ -159,9 +159,34 @@ function LayerRow(props: {
                 </div>
               }
             >
-              <div class="grid shrink-0 place-items-center rounded-xs bg-raised text-fg" style={{ width: `${THUMB}px`, height: `${THUMB}px` }} title="Adjustment layer">
-                <Icon name="adjust" size={20} />
-              </div>
+              <Show
+                when={layer().content.kind === "text"}
+                fallback={
+                  <div class="grid shrink-0 place-items-center rounded-xs bg-raised text-fg" style={{ width: `${THUMB}px`, height: `${THUMB}px` }} title="Adjustment layer">
+                    <Icon name="adjust" size={20} />
+                  </div>
+                }
+              >
+                {/* Photoshop's type thumbnail: a T. Double-click selects all the text for editing; Ctrl-click loads the type as a selection. */}
+                <div
+                  class="grid shrink-0 place-items-center rounded-xs border border-line bg-raised text-fg"
+                  style={{ width: `${THUMB}px`, height: `${THUMB}px` }}
+                  title="Type layer: double-click to edit"
+                  data-testid="layer-thumbnail"
+                  data-type-thumbnail=""
+                  onClick={(e) => {
+                    if (!(e.ctrlKey || e.metaKey)) return;
+                    e.stopPropagation();
+                    editor.loadSelection(layer().id, "layer", loadMode(e));
+                  }}
+                  onDblClick={(e) => {
+                    e.stopPropagation();
+                    editor.type.edit(layer().id, "all");
+                  }}
+                >
+                  <span class="font-serif text-xl leading-none font-semibold">T</span>
+                </div>
+              </Show>
             </Show>
             <Show when={layer().content.kind === "smart" || layer().content.kind === "shape"}>
               {/* Photoshop's badges: smart objects and shapes aren't directly editable pixels. */}
