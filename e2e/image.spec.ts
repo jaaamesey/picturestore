@@ -18,7 +18,8 @@ test("a tool flyout picks a tool in one gesture: press, drag off, slide, release
   await expect(page.getByTestId("tool-rectangle")).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("tool-flyout")).toHaveCount(0);
 
-  // Press and drag off the button: it opens at once (no hold timer), fading in.
+  // Press and drag off the button: it opens at once, fading in (an opacity fade, so even with reduced motion).
+  await page.emulateMedia({ reducedMotion: "reduce" });
   await page.mouse.down();
   await page.mouse.move(rectTool.x + 30, rectTool.y, { steps: 3 });
   const flyout = page.getByTestId("tool-flyout");
@@ -39,6 +40,27 @@ test("a tool flyout picks a tool in one gesture: press, drag off, slide, release
   await expect(flyout).toBeVisible();
   await page.getByTestId("flyout-ellipse").click();
   await expect(page.getByTestId("tool-ellipse")).toHaveAttribute("aria-pressed", "true");
+  await expect(flyout).toHaveCount(0);
+
+  // Press and hold without moving: it opens, fading in again, and stays open on release.
+  const ellipse = await centre("tool-ellipse");
+  await page.mouse.move(ellipse.x, ellipse.y);
+  await page.mouse.down();
+  await expect(flyout).toBeVisible();
+  expect(await flyout.evaluate((el) => el.getAnimations().map((a) => (a as CSSAnimation).animationName))).toEqual(["fade-in"]);
+  await page.mouse.up();
+  await expect(flyout).toBeVisible();
+  await expect(page.getByTestId("tool-ellipse")).toHaveAttribute("aria-pressed", "true");
+  await page.getByTestId("flyout-rectangle").click();
+  await expect(page.getByTestId("tool-rectangle")).toHaveAttribute("aria-pressed", "true");
+
+  // Pressed and dragged out onto the canvas: it opens, and the release there picks nothing.
+  await page.mouse.move(rectTool.x, rectTool.y);
+  await page.mouse.down();
+  await page.mouse.move(rectTool.x + 300, rectTool.y + 300, { steps: 2 });
+  await expect(flyout).toBeVisible();
+  await page.mouse.up();
+  await expect(page.getByTestId("tool-rectangle")).toHaveAttribute("aria-pressed", "true");
 });
 
 test("Image Size scales pixels, shapes and their strokes together; without Resample only the resolution changes", async ({ page }) => {

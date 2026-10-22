@@ -14,11 +14,14 @@ import { Icon } from "./icons";
  * group's other tools — one gesture: slide onto a tool and release to pick
  * it. Right-click opens the flyout too.
  */
+/** How long a press on a tool group's button opens its flyout, as in Photoshop. */
+const HOLD_MS = 300;
+
 function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (open: boolean) => void }) {
   const { editor } = useContext(AppContext);
   const [last, setLast] = createSignal(props.tools[0]);
   const shown = () => props.tools.find((t) => t.id === editor.tool()) ?? last();
-  /** Opened by a press-and-drag: its release picks, and isn't also a click on the button. */
+  /** Opened by a press (held, or dragged off): its release picks, and isn't also a click on the button. */
   let dragged = false;
   const choose = (t: ToolInfo) => {
     setLast(t);
@@ -38,15 +41,21 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
         if (props.tools.length < 2 || e.button !== 0) return;
         const button = group.getBoundingClientRect();
         let opened = false;
-        const move = (m: PointerEvent) => {
-          if (m.pointerId !== e.pointerId || opened) return;
-          const off = m.clientX < button.left || m.clientX > button.right || m.clientY < button.top || m.clientY > button.bottom;
-          if (!off) return;
+        const open = () => {
+          if (opened) return;
           opened = dragged = true;
           props.onOpen(true);
         };
+        // Held down (wherever the pointer has gone since), or dragged off the button. A click or
+        // trackpad tap is released long before the hold, so it only selects the tool.
+        const hold = setTimeout(open, HOLD_MS);
+        const move = (m: PointerEvent) => {
+          if (m.pointerId !== e.pointerId) return;
+          if (m.clientX < button.left || m.clientX > button.right || m.clientY < button.top || m.clientY > button.bottom) open();
+        };
         const end = (u: PointerEvent) => {
           if (u.pointerId !== e.pointerId) return;
+          clearTimeout(hold);
           window.removeEventListener("pointermove", move, true);
           window.removeEventListener("pointerup", end, true);
           window.removeEventListener("pointercancel", end, true);
@@ -77,7 +86,7 @@ function ToolGroup(props: { tools: readonly ToolInfo[]; open: boolean; onOpen: (
         <span class="pointer-events-none absolute right-0.5 bottom-0.5 size-0 border-t-[3px] border-l-[3px] border-t-transparent border-l-transparent border-r-[3px] border-b-[3px] border-r-fg/60 border-b-fg/60" />
       </Show>
       <Popover open={props.open} onClose={() => props.onOpen(false)} trigger={() => group} class="top-0 left-full ml-1">
-        <div class="min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl motion-safe:animate-fade-in" role="menu" data-testid="tool-flyout">
+        <div class="min-w-48 rounded-sm border border-line bg-panel-2 py-1 shadow-xl animate-fade-in" role="menu" data-testid="tool-flyout">
           <For each={props.tools}>
             {(t) => (
               <button
